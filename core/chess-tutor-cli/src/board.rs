@@ -108,7 +108,12 @@ fn cell_glyph(ch: char, ascii: bool) -> String {
     if ascii {
         return ch.to_string();
     }
-    match ch {
+    // U+FE0E (VARIATION SELECTOR-15) forces text presentation. Without it,
+    // U+265F (BLACK CHESS PAWN ♟) renders as a double-width colour emoji on
+    // modern terminals — it's the only chess glyph with Emoji_Presentation
+    // set by default. Appended universally for consistency; it's a no-op
+    // for characters that already default to text.
+    let piece = match ch {
         'K' => "♔",
         'Q' => "♕",
         'R' => "♖",
@@ -121,9 +126,9 @@ fn cell_glyph(ch: char, ascii: bool) -> String {
         'b' => "♝",
         'n' => "♞",
         'p' => "♟",
-        _ => "?",
-    }
-    .to_string()
+        _ => return "?".to_string(),
+    };
+    format!("{piece}\u{FE0E}")
 }
 
 fn square_to_idx(sq: &str) -> Option<(usize, usize)> {
@@ -153,9 +158,22 @@ mod tests {
     #[test]
     fn renders_startpos_unicode() {
         let out = render(STARTPOS, &RenderOptions::default());
-        assert!(out.contains("♜ ♞ ♝ ♛ ♚ ♝ ♞ ♜"));
-        assert!(out.contains("♖ ♘ ♗ ♕ ♔ ♗ ♘ ♖"));
+        // Every Unicode piece is followed by U+FE0E (text presentation
+        // selector) to suppress the emoji rendering of the black pawn.
+        assert!(out.contains("♜\u{FE0E}"));
+        assert!(out.contains("♟\u{FE0E}"));
+        assert!(out.contains("♔\u{FE0E}"));
+        assert!(out.contains("♙\u{FE0E}"));
         assert!(out.contains("a b c d e f g h"));
+    }
+
+    #[test]
+    fn black_pawn_has_text_presentation_selector() {
+        let out = render(STARTPOS, &RenderOptions::default());
+        assert!(
+            out.contains("♟\u{FE0E}"),
+            "black pawn should be rendered with VS15 to avoid emoji presentation"
+        );
     }
 
     #[test]

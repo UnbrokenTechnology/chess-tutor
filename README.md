@@ -42,7 +42,13 @@ The `play` loop accepts moves in **either** notation:
 - **SAN** (algebraic) — `e4`, `Nf3`, `O-O`, `Qxf7#`, `e8=Q`, `Nbd2` for disambiguation
 - **UCI** — `e2e4`, `g1f3`, `e1g1` for castling, `e7e8q` for promotion
 
-Commands: `moves` (list legal SAN moves), `undo`, `resign`, `flip`, `fen`, `help`, `quit`.
+Commands during play:
+
+- `moves` — every legal move as SAN
+- `hanging` — every piece where attackers > defenders
+- `attackers e4` — who attacks the given square (both colours)
+- `attackers N` / `attackers n` — attackers on each white / black knight. Same letters work for K Q R B P.
+- `undo`, `resign`, `flip`, `fen`, `help`, `quit`
 
 ```sh
 # Windows / Linux / macOS desktop GUI (Phase 4 shell — window boots,
