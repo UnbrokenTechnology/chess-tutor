@@ -234,7 +234,7 @@ impl Game {
     }
 
     pub fn fen(&self) -> String {
-        Fen::from_position(&self.position, EnPassantMode::Legal).to_string()
+        Fen::from_position(self.position.clone(), EnPassantMode::Legal).to_string()
     }
 
     /// All legal moves as UCI strings. Shells use this for generic legality
