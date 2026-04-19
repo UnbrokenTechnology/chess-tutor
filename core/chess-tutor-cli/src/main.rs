@@ -130,7 +130,11 @@ fn play_loop(
 
     writeln!(
         out,
-        "chess-tutor play — UCI moves, or: undo / resign / fen / flip / quit"
+        "chess-tutor play — type moves as SAN (e4, Nf3, O-O) or UCI (e2e4, g1f3)."
+    )?;
+    writeln!(
+        out,
+        "commands: moves / undo / resign / fen / flip / help / quit"
     )?;
     if game.has_time_control() {
         writeln!(
@@ -188,6 +192,20 @@ fn play_loop(
         match cmd {
             "" => continue,
             "quit" | "exit" => break,
+            "help" | "?" => {
+                writeln!(
+                    out,
+                    "moves: SAN (e4, Nf3, O-O, Qxf7#) or UCI (e2e4, g1f3)."
+                )?;
+                writeln!(
+                    out,
+                    "commands: moves / undo / resign / fen / flip / help / quit"
+                )?;
+            }
+            "moves" => {
+                let sans = game.legal_moves_san();
+                writeln!(out, "{} legal moves: {}", sans.len(), sans.join(" "))?;
+            }
             "flip" => {
                 manual_flip = !manual_flip;
             }
@@ -202,11 +220,18 @@ fn play_loop(
                 game.resign(mover);
                 writeln!(out, "status: {:?}", game.status())?;
             }
-            uci => {
+            input => {
+                let uci = match game.parse_move(input) {
+                    Ok(uci) => uci,
+                    Err(e) => {
+                        writeln!(out, "rejected: {e}")?;
+                        continue;
+                    }
+                };
                 let result = if game.has_time_control() {
-                    game.apply_timed(uci, elapsed_ms)
+                    game.apply_timed(&uci, elapsed_ms)
                 } else {
-                    game.apply(uci)
+                    game.apply(&uci)
                 };
                 match result {
                     Ok(report) => {

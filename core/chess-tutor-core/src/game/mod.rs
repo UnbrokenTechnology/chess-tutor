@@ -247,6 +247,44 @@ impl Game {
             .collect()
     }
 
+    /// All legal moves as SAN strings (e.g. "e4", "Nf3", "O-O"). More
+    /// natural for UIs that let users type moves by algebraic notation.
+    pub fn legal_moves_san(&self) -> Vec<String> {
+        self.position
+            .legal_moves()
+            .into_iter()
+            .map(|m| SanPlus::from_move(self.position.clone(), &m).to_string())
+            .collect()
+    }
+
+    /// Accept a move in either SAN (`e4`, `Nf3`, `O-O`, `Qxf7#`) or UCI
+    /// (`e2e4`, `g1f3`, `e1g1`) and return the canonical UCI form for the
+    /// current position. SAN disambiguation uses the current position.
+    ///
+    /// Conveniences: `0-0` / `0-0-0` are normalised to `O-O` / `O-O-O`.
+    pub fn parse_move(&self, input: &str) -> Result<String> {
+        let trimmed = input.trim();
+        let normalised = trimmed.replace('0', "O");
+
+        // SAN first — more natural for a human typing in a terminal.
+        if let Ok(san) = normalised.parse::<SanPlus>() {
+            if let Ok(mv) = san.san.to_move(&self.position) {
+                return Ok(mv.to_uci(CastlingMode::Standard).to_string());
+            }
+        }
+
+        // UCI fallback.
+        if let Ok(uci) = trimmed.parse::<Uci>() {
+            if let Ok(mv) = uci.to_move(&self.position) {
+                return Ok(mv.to_uci(CastlingMode::Standard).to_string());
+            }
+        }
+
+        Err(Error::InvalidFen(format!(
+            "could not parse '{trimmed}' as SAN or UCI"
+        )))
+    }
+
     /// Apply a move given as UCI (e.g. "e2e4", "e7e8q"). Rejects illegal
     /// moves. Returns a [`MoveReport`] with `class = Unclassified` and
     /// `deep_dive = None` until the Phase 1 analysis + classifier land —
@@ -488,6 +526,40 @@ mod tests {
             GameStatus::TimedOut { winner: Side::Black }
         ));
         assert_eq!(g.remaining_ms(Side::White), Some(0));
+    }
+
+    #[test]
+    fn parse_move_accepts_san_and_uci() {
+        let g = Game::new_standard(PlayerKind::Human, PlayerKind::Human);
+        assert_eq!(g.parse_move("e4").unwrap(), "e2e4");
+        assert_eq!(g.parse_move("Nf3").unwrap(), "g1f3");
+        assert_eq!(g.parse_move("e2e4").unwrap(), "e2e4");
+        assert_eq!(g.parse_move("g1f3").unwrap(), "g1f3");
+    }
+
+    #[test]
+    fn parse_move_normalises_castling() {
+        // Quick middlegame where White can castle kingside.
+        let fen = "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 4 4";
+        let g = Game::from_fen(fen, PlayerKind::Human, PlayerKind::Human).unwrap();
+        assert_eq!(g.parse_move("O-O").unwrap(), "e1g1");
+        assert_eq!(g.parse_move("0-0").unwrap(), "e1g1");
+    }
+
+    #[test]
+    fn parse_move_rejects_garbage() {
+        let g = Game::new_standard(PlayerKind::Human, PlayerKind::Human);
+        assert!(g.parse_move("xx").is_err());
+        assert!(g.parse_move("Nd5").is_err()); // illegal from startpos
+    }
+
+    #[test]
+    fn legal_moves_san_covers_startpos() {
+        let g = Game::new_standard(PlayerKind::Human, PlayerKind::Human);
+        let moves = g.legal_moves_san();
+        assert_eq!(moves.len(), 20);
+        assert!(moves.contains(&"e4".to_string()));
+        assert!(moves.contains(&"Nf3".to_string()));
     }
 
     #[test]

@@ -37,7 +37,12 @@ cargo run -p chess-tutor-cli -- play --time 300 --increment 3 --auto-flip
 cargo run -p chess-tutor-cli -- play --ascii
 ```
 
-The `play` loop accepts UCI moves (`e2e4`, `g8f6`, `e7e8q`) plus `undo`, `resign`, `flip`, `fen`, and `quit`.
+The `play` loop accepts moves in **either** notation:
+
+- **SAN** (algebraic) — `e4`, `Nf3`, `O-O`, `Qxf7#`, `e8=Q`, `Nbd2` for disambiguation
+- **UCI** — `e2e4`, `g1f3`, `e1g1` for castling, `e7e8q` for promotion
+
+Commands: `moves` (list legal SAN moves), `undo`, `resign`, `flip`, `fen`, `help`, `quit`.
 
 ```sh
 # Windows / Linux / macOS desktop GUI (Phase 4 shell — window boots,
