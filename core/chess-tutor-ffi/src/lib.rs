@@ -14,7 +14,7 @@
 
 use chess_tutor_core::{
     analyze,
-    game::{Game, PlayerKind},
+    game::{Game, PlayerKind, TimeControl},
     Error,
 };
 
@@ -34,15 +34,46 @@ pub fn game_new_standard() -> Result<String, String> {
     snapshot(&g)
 }
 
+/// Start a fresh timed H vs H game with a Fischer clock. `initial_ms` goes
+/// on each side, `increment_ms` is added after each completed move.
+pub fn game_new_timed(initial_ms: u64, increment_ms: u64) -> Result<String, String> {
+    let g = Game::new_standard(PlayerKind::Human, PlayerKind::Human)
+        .with_time_control(TimeControl::fischer(initial_ms, increment_ms));
+    snapshot(&g)
+}
+
 /// Apply a UCI move to a serialised game, returning `(new_game_json,
 /// move_report_json)`.
 pub fn game_apply(game_json: String, uci: String) -> Result<(String, String), String> {
-    let mut g: GameSnapshot =
+    apply_inner(game_json, uci, None)
+}
+
+/// Apply a UCI move in a timed game. `elapsed_ms` is the wall-clock time
+/// the mover spent. Returns `(new_game_json, move_report_json)`. If the
+/// mover flags on the clock, returns an error and the returned snapshot
+/// will show `TimedOut` status.
+pub fn game_apply_timed(
+    game_json: String,
+    uci: String,
+    elapsed_ms: u64,
+) -> Result<(String, String), String> {
+    apply_inner(game_json, uci, Some(elapsed_ms))
+}
+
+fn apply_inner(
+    game_json: String,
+    uci: String,
+    elapsed_ms: Option<u64>,
+) -> Result<(String, String), String> {
+    let g: GameSnapshot =
         serde_json::from_str(&game_json).map_err(|e| format!("bad game snapshot: {e}"))?;
     let mut game = g.hydrate().map_err(|e| e.to_string())?;
-    let report = game.apply(&uci).map_err(|e| e.to_string())?;
-    g = GameSnapshot::from(&game);
-    let game_json = serde_json::to_string(&g).map_err(|e| e.to_string())?;
+    let report = match elapsed_ms {
+        Some(ms) => game.apply_timed(&uci, ms).map_err(|e| e.to_string())?,
+        None => game.apply(&uci).map_err(|e| e.to_string())?,
+    };
+    let out = GameSnapshot::from(&game);
+    let game_json = serde_json::to_string(&out).map_err(|e| e.to_string())?;
     let report_json = serde_json::to_string(&report).map_err(|e| e.to_string())?;
     Ok((game_json, report_json))
 }
@@ -67,6 +98,7 @@ struct GameSnapshot {
     history_uci: Vec<String>,
     white_player: PlayerKind,
     black_player: PlayerKind,
+    time_control: Option<TimeControl>,
 }
 
 impl GameSnapshot {
@@ -87,6 +119,7 @@ impl GameSnapshot {
             history_uci,
             white_player: PlayerKind::Human,
             black_player: PlayerKind::Human,
+            time_control: game.time_control().copied(),
         }
     }
 
@@ -94,6 +127,9 @@ impl GameSnapshot {
         let mut g = Game::from_fen(&self.fen, self.white_player, self.black_player)?;
         for uci in &self.history_uci {
             g.apply(uci)?;
+        }
+        if let Some(tc) = self.time_control {
+            g = g.with_time_control(tc);
         }
         Ok(g)
     }

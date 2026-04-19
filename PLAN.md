@@ -94,9 +94,14 @@ Every explanation is paired: **your move's explanation** + **engine's top move's
 
 ### Coaching cadence (default)
 
-- After each user move: one-line classification + tagline ("Inaccuracy — you missed a discovered attack on d5").
-- Tap/click for the full deep-dive: missed motifs, the forcing line the engine saw, the paired "your move vs. best move" comparison.
-- After-game review walks every move in sequence with the deep-dive expanded for every non-book, non-best move.
+Per-move, but **unobtrusive**. The non-negotiables:
+
+- Feedback never covers the board and never blocks the next move — no modal dialogs, no "continue" buttons.
+- Feedback lives in a dedicated region: a chip or footer under the board on touch devices, a side/bottom pane on desktop. It auto-updates as each move is played.
+- Each move in the move list carries its classification as a coloured glyph (blunder/mistake/inaccuracy/good/best/book/forced). Tapping a move opens the deep-dive in a side pane or sheet, still without blocking the active game.
+- After-game review walks every non-book / non-best move in sequence with the deep-dive expanded.
+
+In fast time controls, real-time analysis is best-effort: if the analysis can't keep up with the game pace, the missed classifications are queued for post-game review rather than delaying the UI.
 
 ## Tech Stack
 
@@ -150,6 +155,7 @@ Goal: prove the game loop + analysis pipeline. The CLI becomes a playable interf
 
 - [x] Cargo workspace with `shakmaty` dependency
 - [x] `Game` state skeleton (history, apply/undo, legal moves, status)
+- [x] Time controls in core (increment supported; delay/bronstein deferred)
 - [ ] Attacker/defender map per square
 - [ ] Static Exchange Evaluation (SEE)
 - [ ] Detect checks, captures, threats for both sides
@@ -160,7 +166,7 @@ Goal: prove the game loop + analysis pipeline. The CLI becomes a playable interf
 - [ ] Quiescence search for forcing lines (capped depth, captures + checks)
 - [ ] Move classification: `Best/Excellent/Good/Inaccuracy/Mistake/Blunder/Book/Forced` (eval-delta + our own heuristics)
 - [ ] Template explainer — first pass, ~50 templates covering the above
-- [ ] CLI: `chess-tutor analyze "<fen>"`, `chess-tutor play`, `chess-tutor review <pgn>`
+- [ ] CLI: `chess-tutor analyze`, `chess-tutor play [--time SEC] [--increment SEC]`, `chess-tutor review <pgn>`
 - [ ] Test suite of ~100 positions with expected tactical findings, sourced from the Lichess puzzle database
 
 ### Phase 2 — Cross-check engine integration (Viridithas)
@@ -214,22 +220,44 @@ Goal: prove the game loop + analysis pipeline. The CLI becomes a playable interf
 - [ ] Expanded positional: outposts, minority attack patterns, pawn breaks, space, piece coordination
 - [ ] Curated opening trainer with annotated main lines for common openings
 - [ ] Puzzle mode sourced from Lichess puzzle database
-- [ ] Clocks / time controls
-- [ ] Network play (scope TBD — LAN invite? Lichess API? Own relay?)
+- [ ] Delay / Bronstein clock modes (Phase 1 ships increment only)
+- [ ] Tunable bot opponents — see Research below. This is the biggest open design area.
 
 ## Key Decisions
 
-1. **Engine choice — DECIDED: Viridithas (Rust, MIT).** Rationale in "Cross-check engine" above. Same engine doubles as the capped-strength bot opponent.
+1. **Engine choice — DECIDED: Viridithas (Rust, MIT).** Rationale in "Cross-check engine" above. Same engine may also back the bot opponent, pending the bot-personality research below.
 2. **Licensing — DECIDED: proprietary / all-rights-reserved.** Cargo manifests use `license = "UNLICENSED"` (the Cargo convention for "not for public distribution"). No public source release.
 3. **Apple bundle ID — DECIDED: `com.unbrokentechnology.chesstutor`.** Used for both the iOS and macOS targets in a single Xcode project to enable Universal Purchase. Apple Developer Program membership: active (enrolled February 2026). Remaining to-do before first TestFlight build: register the App ID in the Developer Portal and toggle Universal Purchase in App Store Connect.
 4. **Apple UI approach — DECIDED: Xcode Multiplatform SwiftUI with substantial per-platform view divergence.** macOS is a proper desktop experience with sidebar/menus/keyboard shortcuts, not a scaled-up iOS app.
 5. **Windows UI approach — DECIDED: Rust + egui, single binary, no .NET / runtime deps.** Same binary works on Linux and macOS for development; macOS's shipping app is SwiftUI.
 6. **Opening book source — DECIDED: Lichess masters DB** (free, permissive). Revisit if coverage of early deviations is weak.
 7. **Puzzle data — DECIDED: Lichess puzzle database** (CC0, tagged with motif labels — perfect for validating our tactics detector).
-8. **Bot opponent — DEFAULT (not final): reuse Viridithas with skill-level / depth caps.** Revisit after Phase 2 if capped-engine play feels too mechanical vs. a bespoke sparring bot.
-9. **Coaching cadence — DEFAULT (not final): per-move classification + tagline, deep-dive on demand, full review post-game.** Revisit after Phase 1 when the explainer is real enough to dogfood.
-10. **Time controls — DEFERRED to Phase 7.** `Game` carries optional clock fields from day one so we don't have to thread them through later, but the UI ignores them in v1.
-11. **Network play — DEFERRED to Phase 7.** Scope decision (LAN invite vs. Lichess API vs. own relay) lives with that phase.
+8. **Coaching cadence — DECIDED: per-move feedback, never blocking.** Feedback never covers the board, never requires dismissal. Chip/footer/side-pane only. Spec in "Coaching cadence (default)" above.
+9. **Time controls — DECIDED: in core from Phase 1.** `Game` owns clock state; UI passes wall-clock-elapsed into `apply_timed`. Increment supported at launch; delay / Bronstein deferred to Phase 7. Untimed games still work via plain `apply`.
+10. **Network play — SCRAPPED (may revisit).** This is primarily a solo study tool, not a competition platform. If it ever ships it would be local-LAN invite-based, never tied to chess.com / Lichess accounts.
+11. **Bot opponent — OPEN, RESEARCH.** See Research section below.
+
+## Research — deferred, not yet designed
+
+### Bot personalities
+
+chess.com and others ship bot opponents with recognisable *personalities*: one always replies to 1. e4 with …f5, one always tries Scholar's Mate, one hangs pieces on move 12. These are not "`X%` play best, `(1−X)%` play random" — they have consistent opening preferences, recurring tactical motifs they favour, and characteristic blind spots.
+
+Goal: tunable bots that a user can deliberately configure for what they're currently studying. Examples:
+
+- "I'm learning the Caro-Kann — give me a bot that always plays 1. e4 and responds to 1…c6 with the Advance."
+- "I keep missing discovered attacks — give me a bot that sets them up whenever the position allows."
+- "I need to practise winning won endgames — give me a bot that blunders into K+P vs. K losses."
+
+Design axes worth researching (none committed):
+
+- **Opening bias** — forced or heavily weighted first-N moves from a named opening repertoire.
+- **Style weights** — evaluation multipliers that push an engine toward aggressive king attacks, positional grinds, quiet manoeuvring, sharp tactics, etc.
+- **Deliberate weakness** — blunder rate, specific tactical blind spots (e.g. misses pins but sees forks), horizon-effect injection, depth caps that shift per phase.
+- **Named personalities** vs. **parametric sliders** — chess.com ships named bots with backstories; a learning tool probably wants named *and* a "build your own" slider panel.
+- **Implementation approach** — capped Viridithas with custom opening book + evaluation overlay, vs. a separate lightweight engine tuned per personality, vs. a hybrid (Viridithas for search, our evaluator for style).
+
+Action: user to research; we revisit before Phase 2 starts in earnest. Until then the `CrossCheckEngine::SearchOptions` trait has a `skill_cap` field as a placeholder for the simplest bot knob.
 
 ## Data Sources (all free / permissive)
 
@@ -243,7 +271,7 @@ Goal: prove the game loop + analysis pipeline. The CLI becomes a playable interf
 ## Non-Goals
 
 - Maximum playing strength. We are not competing with Stockfish on ELO (and Viridithas is already well past any strength our teaching layer needs).
-- Online multiplayer, accounts, or a social layer — at most, defer-phase scoped network play so two local humans can play over a LAN.
+- Online multiplayer, matchmaking, accounts, social layer, or integration with chess.com / Lichess. This is a solo study tool, not a competition platform.
 - Runtime ML/LLM inference.
 - Cloud dependencies. The app must work on a plane.
 

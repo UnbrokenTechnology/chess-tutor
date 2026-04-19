@@ -14,11 +14,22 @@ namespace chess_tutor {
     [Throws=CoreError]
     string game_new_standard();
 
+    // Fischer clock: `initial_ms` on each side, `increment_ms` added after
+    // every completed move.
+    [Throws=CoreError]
+    string game_new_timed(u64 initial_ms, u64 increment_ms);
+
     [Throws=CoreError]
     string game_legal_moves(string game_json);
 
     [Throws=CoreError]
     GameApplyResult game_apply(string game_json, string uci);
+
+    // Timed variant. `elapsed_ms` is wall-clock time the mover spent on this
+    // move. If they flag, an error is returned and the returned snapshot
+    // shows `TimedOut` status.
+    [Throws=CoreError]
+    GameApplyResult game_apply_timed(string game_json, string uci, u64 elapsed_ms);
 };
 
 dictionary GameApplyResult {

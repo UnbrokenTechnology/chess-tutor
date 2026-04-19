@@ -114,16 +114,48 @@ pub enum GameStatus {
     ThreefoldRepetition,
     Resigned { winner: Side },
     DrawAgreed,
+    TimedOut { winner: Side },
 }
 
-/// Placeholder for clocks. Carried on the game so it survives save/restore,
-/// but the UI ignores it in v1 (see `PLAN.md` → Phase 7).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Wall-clock state for a timed game. The core is wall-clock-agnostic: the UI
+/// measures elapsed time between its turn and the move submission and passes
+/// that into [`Game::apply_timed`]. Core deducts, adds increment, detects
+/// flag. No ticking, no I/O.
+///
+/// Phase 1 supports Fischer increment only. Delay / Bronstein land in Phase 7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeControl {
-    pub initial_ms: Option<u64>,
-    pub increment_ms: Option<u64>,
-    pub white_remaining_ms: Option<u64>,
-    pub black_remaining_ms: Option<u64>,
+    pub initial_ms: u64,
+    pub increment_ms: u64,
+    pub white_remaining_ms: u64,
+    pub black_remaining_ms: u64,
+}
+
+impl TimeControl {
+    /// Fischer clock: `initial` on each side's clock, add `increment` after
+    /// each completed move.
+    pub fn fischer(initial_ms: u64, increment_ms: u64) -> Self {
+        Self {
+            initial_ms,
+            increment_ms,
+            white_remaining_ms: initial_ms,
+            black_remaining_ms: initial_ms,
+        }
+    }
+
+    pub fn remaining(&self, side: Side) -> u64 {
+        match side {
+            Side::White => self.white_remaining_ms,
+            Side::Black => self.black_remaining_ms,
+        }
+    }
+
+    fn set_remaining(&mut self, side: Side, ms: u64) {
+        match side {
+            Side::White => self.white_remaining_ms = ms,
+            Side::Black => self.black_remaining_ms = ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -133,7 +165,7 @@ pub struct Game {
     white_player: PlayerKind,
     black_player: PlayerKind,
     status: GameStatus,
-    time_control: TimeControl,
+    time_control: Option<TimeControl>,
 }
 
 impl Game {
@@ -144,7 +176,7 @@ impl Game {
             white_player,
             black_player,
             status: GameStatus::Ongoing,
-            time_control: TimeControl::default(),
+            time_control: None,
         }
     }
 
@@ -159,8 +191,14 @@ impl Game {
             white_player: white,
             black_player: black,
             status: GameStatus::Ongoing,
-            time_control: TimeControl::default(),
+            time_control: None,
         })
+    }
+
+    /// Attach a time control to the game. Replaces any existing one.
+    pub fn with_time_control(mut self, tc: TimeControl) -> Self {
+        self.time_control = Some(tc);
+        self
     }
 
     pub fn side_to_move(&self) -> Side {
@@ -182,8 +220,17 @@ impl Game {
         &self.history
     }
 
-    pub fn time_control(&self) -> &TimeControl {
-        &self.time_control
+    pub fn time_control(&self) -> Option<&TimeControl> {
+        self.time_control.as_ref()
+    }
+
+    pub fn has_time_control(&self) -> bool {
+        self.time_control.is_some()
+    }
+
+    /// Milliseconds remaining for a side. `None` if the game has no clock.
+    pub fn remaining_ms(&self, side: Side) -> Option<u64> {
+        self.time_control.map(|tc| tc.remaining(side))
     }
 
     pub fn fen(&self) -> String {
@@ -204,6 +251,9 @@ impl Game {
     /// moves. Returns a [`MoveReport`] with `class = Unclassified` and
     /// `deep_dive = None` until the Phase 1 analysis + classifier land —
     /// the history entry and FENs are correct today.
+    ///
+    /// For timed games use [`Game::apply_timed`]; plain `apply` does not
+    /// touch the clock (useful for loading PGNs and analysis-only flows).
     pub fn apply(&mut self, uci: &str) -> Result<MoveReport> {
         if !matches!(self.status, GameStatus::Ongoing) {
             return Err(Error::Engine(format!(
@@ -243,6 +293,68 @@ impl Game {
             tagline: String::new(),
             deep_dive: None,
         })
+    }
+
+    /// Apply a move in a timed game. `elapsed_ms` is the wall-clock time the
+    /// mover spent on this move (measured by the UI from "clock started for
+    /// this side" to "move submitted"). Order of operations mirrors an OTB
+    /// chess clock:
+    ///
+    /// 1. If the mover's remaining time after deduction would go negative,
+    ///    they flag *before* the move registers — status becomes
+    ///    [`GameStatus::TimedOut`] and the move is rejected.
+    /// 2. Otherwise deduct `elapsed_ms`, add the increment, and apply the move.
+    ///
+    /// If the game has no time control attached, this errors — callers should
+    /// use [`Game::apply`] for untimed play.
+    pub fn apply_timed(&mut self, uci: &str, elapsed_ms: u64) -> Result<MoveReport> {
+        let mut tc = self
+            .time_control
+            .ok_or_else(|| Error::Engine("apply_timed called on untimed game".into()))?;
+
+        let mover = self.side_to_move();
+        let remaining = tc.remaining(mover);
+        if elapsed_ms > remaining {
+            // Flagged. Opponent wins on time.
+            let winner = match mover {
+                Side::White => Side::Black,
+                Side::Black => Side::White,
+            };
+            tc.set_remaining(mover, 0);
+            self.time_control = Some(tc);
+            self.status = GameStatus::TimedOut { winner };
+            return Err(Error::Engine("flagged on the clock".into()));
+        }
+
+        // Deduct + add increment. Increment only applies if the move
+        // completes successfully, so defer it until after `apply`.
+        tc.set_remaining(mover, remaining - elapsed_ms);
+        self.time_control = Some(tc);
+
+        let report = self.apply(uci)?;
+
+        // Post-move: add increment to the side that just moved.
+        if let Some(mut tc) = self.time_control {
+            let post = tc.remaining(mover) + tc.increment_ms;
+            tc.set_remaining(mover, post);
+            self.time_control = Some(tc);
+        }
+
+        Ok(report)
+    }
+
+    /// Explicitly flag a side on time (UI detected a flag without a move
+    /// attempt, e.g. the user just let the clock run out).
+    pub fn flag(&mut self, side: Side) {
+        if let Some(mut tc) = self.time_control {
+            tc.set_remaining(side, 0);
+            self.time_control = Some(tc);
+        }
+        let winner = match side {
+            Side::White => Side::Black,
+            Side::Black => Side::White,
+        };
+        self.status = GameStatus::TimedOut { winner };
     }
 
     /// Pop the last move. Intentionally loses any cached explanation tied to
@@ -347,5 +459,46 @@ mod tests {
             g.status(),
             GameStatus::Checkmate { winner: Side::Black }
         ));
+    }
+
+    #[test]
+    fn apply_timed_deducts_and_adds_increment() {
+        let mut g = Game::new_standard(PlayerKind::Human, PlayerKind::Human)
+            .with_time_control(TimeControl::fischer(60_000, 2_000));
+        g.apply_timed("e2e4", 5_000).unwrap();
+        // White spent 5s, gained 2s increment = -3s net.
+        assert_eq!(g.remaining_ms(Side::White), Some(57_000));
+        assert_eq!(g.remaining_ms(Side::Black), Some(60_000));
+    }
+
+    #[test]
+    fn apply_timed_on_untimed_game_errors() {
+        let mut g = Game::new_standard(PlayerKind::Human, PlayerKind::Human);
+        assert!(g.apply_timed("e2e4", 1_000).is_err());
+    }
+
+    #[test]
+    fn flag_on_clock_ends_game() {
+        let mut g = Game::new_standard(PlayerKind::Human, PlayerKind::Human)
+            .with_time_control(TimeControl::fischer(3_000, 0));
+        let err = g.apply_timed("e2e4", 5_000).unwrap_err();
+        assert!(err.to_string().contains("flagged"));
+        assert!(matches!(
+            g.status(),
+            GameStatus::TimedOut { winner: Side::Black }
+        ));
+        assert_eq!(g.remaining_ms(Side::White), Some(0));
+    }
+
+    #[test]
+    fn explicit_flag_ends_game() {
+        let mut g = Game::new_standard(PlayerKind::Human, PlayerKind::Human)
+            .with_time_control(TimeControl::fischer(10_000, 0));
+        g.flag(Side::Black);
+        assert!(matches!(
+            g.status(),
+            GameStatus::TimedOut { winner: Side::White }
+        ));
+        assert_eq!(g.remaining_ms(Side::Black), Some(0));
     }
 }
