@@ -1,0 +1,44 @@
+# Rust
+/core/target/
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Generated FFI artifacts
+/core/chess-tutor-ffi/generated/
+/apple/Frameworks/ChessTutorCore.xcframework/
+/android/app/src/main/jniLibs/
+
+# Stockfish build artifacts
+/stockfish/build/
+/stockfish/vendor/
+
+# Bundled data (built by scripts/build-book.sh)
+/assets/book.bin
+
+# Apple
+**/xcuserdata/
+**/*.xcuserstate
+/apple/DerivedData/
+*.xcworkspace/xcuserdata/
+
+# Android
+/android/.gradle/
+/android/build/
+/android/**/build/
+/android/local.properties
+/android/.idea/
+/android/*.iml
+/android/captures/
+
+# Web (phase 2)
+/web/node_modules/
+/web/dist/
+/web/.vite/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

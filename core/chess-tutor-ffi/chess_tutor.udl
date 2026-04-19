@@ -1,0 +1,18 @@
+// uniffi interface definition for Swift and Kotlin bindings.
+//
+// Kept intentionally narrow — the core emits a single JSON blob and the
+// shells decode it. When the shape of `PositionAnalysis` stabilises we can
+// either lift it into uniffi records directly or keep the JSON bridge.
+
+namespace chess_tutor {
+    [Throws=CoreError]
+    string analyze_fen(string fen);
+};
+
+[Error]
+enum CoreError {
+    "InvalidFen",
+    "Serde",
+    "Engine",
+    "Book",
+};

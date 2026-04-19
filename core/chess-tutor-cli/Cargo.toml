@@ -1,0 +1,20 @@
+[package]
+name = "chess-tutor-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Command-line driver for chess-tutor-core. Phase 1 harness."
+publish = false
+
+[[bin]]
+name = "chess-tutor"
+path = "src/main.rs"
+
+[dependencies]
+chess-tutor-core = { path = "../chess-tutor-core" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

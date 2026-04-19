@@ -1,0 +1,19 @@
+[package]
+name = "chess-tutor-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Deterministic chess position analysis and explanation engine."
+
+[lib]
+# Default rlib so the CLI and FFI crates can depend on it like any Rust lib.
+crate-type = ["rlib"]
+
+[dependencies]
+shakmaty = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

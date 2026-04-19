@@ -1,0 +1,31 @@
+[package]
+name = "chess-tutor-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "uniffi + wasm-bindgen surface for chess-tutor-core."
+publish = false
+
+[lib]
+# cdylib for iOS/Android/wasm consumers; staticlib for the Apple xcframework
+# build. rlib kept for cargo tests.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+chess-tutor-core = { path = "../chess-tutor-core" }
+serde_json = { workspace = true }
+
+# uniffi is wired on platform builds by `scripts/build-xcframework.sh` and
+# `scripts/build-android-libs.sh`. Left commented here so the workspace
+# compiles offline without pulling uniffi's C dependencies during the initial
+# scaffold.
+#
+# [dependencies.uniffi]
+# version = "0.28"
+# features = ["build", "cli"]
+#
+# [build-dependencies]
+# uniffi = { version = "0.28", features = ["build"] }
