@@ -14,11 +14,13 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chess_tutor_core::{
+    analysis::AttackMap,
     analyze,
     explain::Explainer,
     game::{Game, GameStatus, PlayerKind, Side, TimeControl},
 };
 use clap::{Parser, Subcommand};
+use shakmaty::{Board, Color, Piece, Role, Square};
 
 use crate::board::{render as render_board, RenderOptions};
 
@@ -134,7 +136,7 @@ fn play_loop(
     )?;
     writeln!(
         out,
-        "commands: moves / undo / resign / fen / flip / help / quit"
+        "commands: moves / hanging / attackers <sq|piece> / undo / resign / fen / flip / help / quit"
     )?;
     if game.has_time_control() {
         writeln!(
@@ -197,14 +199,27 @@ fn play_loop(
                     out,
                     "moves: SAN (e4, Nf3, O-O, Qxf7#) or UCI (e2e4, g1f3)."
                 )?;
-                writeln!(
-                    out,
-                    "commands: moves / undo / resign / fen / flip / help / quit"
-                )?;
+                writeln!(out, "commands:")?;
+                writeln!(out, "  moves               list every legal move as SAN")?;
+                writeln!(out, "  hanging             list pieces attacked more than defended")?;
+                writeln!(out, "  attackers <sq>      show who attacks a square (e.g. `attackers e4`)")?;
+                writeln!(out, "  attackers <piece>   show attackers on every piece of that letter")?;
+                writeln!(out, "                      (K/Q/R/B/N/P = white, k/q/r/b/n/p = black)")?;
+                writeln!(out, "  undo / resign / fen / flip / help / quit")?;
             }
             "moves" => {
                 let sans = game.legal_moves_san();
                 writeln!(out, "{} legal moves: {}", sans.len(), sans.join(" "))?;
+            }
+            "hanging" => {
+                report_hanging(game.position(), &mut out)?;
+            }
+            "attackers" => {
+                writeln!(out, "usage: attackers <square> | attackers <piece-letter>")?;
+            }
+            cmd if cmd.starts_with("attackers ") => {
+                let arg = cmd.trim_start_matches("attackers ").trim();
+                report_attackers(game.position(), arg, &mut out)?;
             }
             "flip" => {
                 manual_flip = !manual_flip;
@@ -276,4 +291,196 @@ fn last_move_squares(game: &Game) -> Option<(String, String)> {
         return None;
     }
     Some((uci[0..2].to_string(), uci[2..4].to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Inspection helpers (`hanging`, `attackers`) — thin CLI wrappers over
+// `chess_tutor_core::analysis::AttackMap`. The core does the actual work;
+// these just format the output.
+// ---------------------------------------------------------------------------
+
+fn report_hanging(position: &shakmaty::Chess, out: &mut impl Write) -> io::Result<()> {
+    use shakmaty::Position;
+    let board = position.board();
+    let am = AttackMap::from_position(position);
+
+    let mut hits: Vec<Square> = Vec::new();
+    for sq in Square::ALL {
+        if am.is_hanging(board, sq) {
+            hits.push(sq);
+        }
+    }
+
+    if hits.is_empty() {
+        writeln!(out, "no hanging pieces.")?;
+        return Ok(());
+    }
+
+    writeln!(out, "hanging pieces ({}):", hits.len())?;
+    for sq in hits {
+        let piece = board.piece_at(sq).expect("is_hanging requires a piece");
+        let own = am.count(sq, piece.color);
+        let foe = am.count(sq, piece.color.other());
+        writeln!(
+            out,
+            "  {} {} — {} attacker{} vs {} defender{}",
+            square_name(sq),
+            piece_letter(piece),
+            foe,
+            pluralise(foe),
+            own,
+            pluralise(own),
+        )?;
+    }
+    Ok(())
+}
+
+fn report_attackers(
+    position: &shakmaty::Chess,
+    arg: &str,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use shakmaty::Position;
+    let board = position.board();
+    let am = AttackMap::from_position(position);
+
+    let targets = match parse_inspect_target(arg, board) {
+        Some(sqs) if !sqs.is_empty() => sqs,
+        Some(_) => {
+            writeln!(out, "no pieces of that type on the board.")?;
+            return Ok(());
+        }
+        None => {
+            writeln!(
+                out,
+                "unrecognised target '{arg}'. Use a square (e.g. e4) or a piece letter (K Q R B N P, lowercase for black)."
+            )?;
+            return Ok(());
+        }
+    };
+
+    for sq in targets {
+        describe_square(&am, board, sq, out)?;
+    }
+    Ok(())
+}
+
+fn parse_inspect_target(arg: &str, board: &Board) -> Option<Vec<Square>> {
+    let arg = arg.trim();
+
+    // Try as a square name.
+    if let Some(sq) = parse_square(arg) {
+        return Some(vec![sq]);
+    }
+
+    // Try as a single piece letter (FEN convention).
+    if arg.chars().count() == 1 {
+        let ch = arg.chars().next().unwrap();
+        let (color, role) = match ch {
+            'K' => (Color::White, Role::King),
+            'Q' => (Color::White, Role::Queen),
+            'R' => (Color::White, Role::Rook),
+            'B' => (Color::White, Role::Bishop),
+            'N' => (Color::White, Role::Knight),
+            'P' => (Color::White, Role::Pawn),
+            'k' => (Color::Black, Role::King),
+            'q' => (Color::Black, Role::Queen),
+            'r' => (Color::Black, Role::Rook),
+            'b' => (Color::Black, Role::Bishop),
+            'n' => (Color::Black, Role::Knight),
+            'p' => (Color::Black, Role::Pawn),
+            _ => return None,
+        };
+        let needle = Piece { color, role };
+        let squares = Square::ALL
+            .into_iter()
+            .filter(|sq| board.piece_at(*sq) == Some(needle))
+            .collect();
+        return Some(squares);
+    }
+
+    None
+}
+
+fn parse_square(s: &str) -> Option<Square> {
+    if s.len() != 2 {
+        return None;
+    }
+    let mut chars = s.chars();
+    let file_ch = chars.next()?;
+    let rank_ch = chars.next()?;
+    if !('a'..='h').contains(&file_ch) || !('1'..='8').contains(&rank_ch) {
+        return None;
+    }
+    let file = (file_ch as u8 - b'a') as u32;
+    let rank = (rank_ch as u8 - b'1') as u32;
+    Some(Square::new(rank * 8 + file))
+}
+
+fn describe_square(
+    am: &AttackMap,
+    board: &Board,
+    sq: Square,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let occupant = board
+        .piece_at(sq)
+        .map(|p| format!(" ({})", piece_letter(p)))
+        .unwrap_or_default();
+
+    let white = am.attackers(sq, Color::White);
+    let black = am.attackers(sq, Color::Black);
+
+    writeln!(out, "{}{}:", square_name(sq), occupant)?;
+    writeln!(out, "  White: {}", describe_sources(board, white))?;
+    writeln!(out, "  Black: {}", describe_sources(board, black))?;
+    Ok(())
+}
+
+fn describe_sources(board: &Board, bb: shakmaty::Bitboard) -> String {
+    if bb.is_empty() {
+        return "—".to_string();
+    }
+    bb.into_iter()
+        .map(|sq| match board.piece_at(sq) {
+            Some(p) if p.role == Role::Pawn => square_name(sq),
+            Some(p) => format!("{}{}", role_letter(p.role), square_name(sq)),
+            None => square_name(sq),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn square_name(sq: Square) -> String {
+    let file = (u32::from(sq) % 8) as u8 + b'a';
+    let rank = (u32::from(sq) / 8) as u8 + b'1';
+    format!("{}{}", file as char, rank as char)
+}
+
+fn piece_letter(p: Piece) -> char {
+    let ch = role_letter(p.role);
+    if p.color == Color::White {
+        ch
+    } else {
+        ch.to_ascii_lowercase()
+    }
+}
+
+fn role_letter(r: Role) -> char {
+    match r {
+        Role::Pawn => 'P',
+        Role::Knight => 'N',
+        Role::Bishop => 'B',
+        Role::Rook => 'R',
+        Role::Queen => 'Q',
+        Role::King => 'K',
+    }
+}
+
+fn pluralise(n: u8) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }

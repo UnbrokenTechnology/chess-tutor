@@ -63,19 +63,23 @@ impl PositionAnalysis {
 
 /// Analyse a position given its FEN.
 ///
-/// Phase 1 stub — wiring only. Individual modules will flesh out their
-/// contribution over the course of Phase 1.
+/// Phase 1 — currently populates `square_data` from the attacker/defender
+/// map. Remaining fields fill in as subsequent Phase 1 tasks land (SEE,
+/// tactics, positional, candidates, explainer).
 pub fn analyze(fen: &str) -> Result<PositionAnalysis> {
     use shakmaty::fen::Fen;
-    use shakmaty::{CastlingMode, Chess, Position};
+    use shakmaty::{CastlingMode, Chess};
 
     let parsed: Fen = fen.parse().map_err(|e| Error::InvalidFen(format!("{e}")))?;
-    let _pos: Chess = parsed
+    let pos: Chess = parsed
         .into_position(CastlingMode::Standard)
         .map_err(|e| Error::InvalidFen(format!("{e}")))?;
 
-    // TODO(phase-1): populate each field from the matching module.
-    Ok(PositionAnalysis::empty(fen))
+    let attack_map = analysis::AttackMap::from_position(&pos);
+
+    let mut report = PositionAnalysis::empty(fen);
+    report.square_data = attack_map.to_square_data();
+    Ok(report)
 }
 
 #[cfg(test)]

@@ -156,7 +156,7 @@ Goal: prove the game loop + analysis pipeline. The CLI becomes a playable interf
 - [x] Cargo workspace with `shakmaty` dependency
 - [x] `Game` state skeleton (history, apply/undo, legal moves, status)
 - [x] Time controls in core (increment supported; delay/bronstein deferred)
-- [ ] Attacker/defender map per square
+- [x] Attacker/defender map per square (`analysis::AttackMap`) + CLI `hanging` / `attackers` commands
 - [ ] Static Exchange Evaluation (SEE)
 - [ ] Detect checks, captures, threats for both sides
 - [ ] Basic tactical motifs: fork, pin (absolute + relative), skewer, discovered attack, double check

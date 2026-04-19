@@ -233,6 +233,13 @@ impl Game {
         self.time_control.map(|tc| tc.remaining(side))
     }
 
+    /// Borrow the underlying shakmaty position. Exposed for code that needs
+    /// to run shakmaty's own analysis primitives (e.g. the attacker/defender
+    /// map, tactic detectors) without re-parsing the FEN.
+    pub fn position(&self) -> &Chess {
+        &self.position
+    }
+
     pub fn fen(&self) -> String {
         Fen::from_position(self.position.clone(), EnPassantMode::Legal).to_string()
     }
