@@ -24,9 +24,24 @@ chess-tutor/
 cd core
 cargo build
 cargo test
-cargo run -p chess-tutor-cli -- play
 
-# Windows / Linux / macOS desktop GUI (Phase 4 shell, board rendering TBD)
+# Render a board from a FEN
+cargo run -p chess-tutor-cli -- board
+cargo run -p chess-tutor-cli -- board "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+
+# Play a game in the terminal — live Unicode board, last-move highlight,
+# 5+3 Fischer clock, auto-flip so the mover is always at the bottom.
+cargo run -p chess-tutor-cli -- play --time 300 --increment 3 --auto-flip
+
+# Need ASCII pieces (terminal without chess-glyph support)?
+cargo run -p chess-tutor-cli -- play --ascii
+```
+
+The `play` loop accepts UCI moves (`e2e4`, `g8f6`, `e7e8q`) plus `undo`, `resign`, `flip`, `fen`, and `quit`.
+
+```sh
+# Windows / Linux / macOS desktop GUI (Phase 4 shell — window boots,
+# board rendering lands with Phase 4)
 cd ../desktop/chess-tutor-desktop
 cargo run --release
 ```
