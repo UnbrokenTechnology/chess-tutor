@@ -7,11 +7,37 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Implementors run a low-depth search on a FEN and return a top move plus
-/// its evaluation. Kept intentionally minimal so swapping engines is cheap.
+/// Implementors run a bounded search on a FEN and return a top move plus
+/// its evaluation. The same trait covers both the teaching-mode cross-check
+/// (high depth, full strength) and the bot-opponent use case (capped
+/// strength via depth / skill / contempt). Keeping it narrow makes swapping
+/// engines cheap.
 pub trait CrossCheckEngine {
-    fn best_move(&mut self, fen: &str, depth: u8) -> crate::Result<EngineCheck>;
+    fn search(&mut self, fen: &str, opts: SearchOptions) -> crate::Result<EngineCheck>;
     fn name(&self) -> &'static str;
+}
+
+/// Bounds for a single search. Separate from the engine so the caller can
+/// tune the same engine for "analyse this position" vs. "play a move as
+/// ~1400 ELO bot" without building a wrapper per mode.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchOptions {
+    pub depth: u8,
+    /// `None` means "no extra strength cap" (cross-check mode). `Some(level)`
+    /// caps the engine for bot play — meaning is engine-specific; Viridithas
+    /// reads this as a skill level and wires it through search pruning.
+    pub skill_cap: Option<u8>,
+    pub movetime_ms: Option<u32>,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            depth: 8,
+            skill_cap: None,
+            movetime_ms: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

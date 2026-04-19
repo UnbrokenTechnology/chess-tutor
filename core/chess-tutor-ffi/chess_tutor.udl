@@ -1,12 +1,29 @@
 // uniffi interface definition for Swift and Kotlin bindings.
 //
-// Kept intentionally narrow — the core emits a single JSON blob and the
-// shells decode it. When the shape of `PositionAnalysis` stabilises we can
-// either lift it into uniffi records directly or keep the JSON bridge.
+// Kept intentionally narrow — the core emits JSON blobs and the shells
+// decode them. When `PositionAnalysis` / `Game` shapes stabilise we can
+// either lift them into uniffi records directly or keep the JSON bridge.
 
 namespace chess_tutor {
+    // Static analysis.
     [Throws=CoreError]
     string analyze_fen(string fen);
+
+    // Game loop — the shell owns the opaque `game_json` snapshot and threads
+    // it through each call. Nothing retained on the native side.
+    [Throws=CoreError]
+    string game_new_standard();
+
+    [Throws=CoreError]
+    string game_legal_moves(string game_json);
+
+    [Throws=CoreError]
+    GameApplyResult game_apply(string game_json, string uci);
+};
+
+dictionary GameApplyResult {
+    string game_json;
+    string move_report_json;
 };
 
 [Error]

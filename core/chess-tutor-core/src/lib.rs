@@ -6,19 +6,21 @@
 //!
 //! Module layout mirrors the pipeline:
 //!
+//! - [`game`]     — live game state (history, apply/undo, status, per-move reports)
 //! - [`analysis`] — attacker/defender maps, SEE, threat detection
 //! - [`tactics`]  — motif detection (forks, pins, skewers, ...)
 //! - [`positional`] — pawn structure, king safety, piece activity
 //! - [`book`]     — Polyglot opening book reader
 //! - [`search`]   — quiescence / forcing-line walker
 //! - [`explain`]  — template-based prose generator
-//! - [`engine`]   — pluggable cross-check engine trait (Stockfish or Rust-native)
+//! - [`engine`]   — pluggable cross-check engine + bot-opponent trait (Viridithas)
 
 pub mod analysis;
 pub mod book;
 pub mod engine;
 pub mod error;
 pub mod explain;
+pub mod game;
 pub mod positional;
 pub mod search;
 pub mod tactics;

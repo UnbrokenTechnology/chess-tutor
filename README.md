@@ -8,21 +8,27 @@ See [`PLAN.md`](PLAN.md) for the full architecture and roadmap.
 
 ```
 chess-tutor/
-├── core/          Rust workspace — analysis, tactics, positional, explainer, FFI, CLI
+├── core/          Rust workspace — Game state, analysis, explainer, FFI, CLI
 ├── engine/        Vendored cross-check engine (Viridithas fork, Phase 2)
-├── apple/         SwiftUI app (iOS, iPadOS, macOS — Universal Purchase)
-├── android/       Kotlin + Jetpack Compose app
+├── desktop/       Rust + egui app (Windows shipping target; also dev on Linux/macOS)
+├── apple/         SwiftUI Multiplatform app (iOS, iPadOS, macOS — Universal Purchase)
+├── android/       Kotlin + Jetpack Compose app (deprioritised — Phase 5)
 ├── assets/        Opening book, ECO mapping, other bundled data
 └── scripts/       Cross-platform build glue
 ```
 
-## Quick Start (Rust core)
+## Quick Start
 
 ```sh
+# Core library + CLI
 cd core
 cargo build
 cargo test
-cargo run -p chess-tutor-cli -- analyze "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+cargo run -p chess-tutor-cli -- play
+
+# Windows / Linux / macOS desktop GUI (Phase 4 shell, board rendering TBD)
+cd ../desktop/chess-tutor-desktop
+cargo run --release
 ```
 
 ## Platform Builds
@@ -32,6 +38,8 @@ cargo run -p chess-tutor-cli -- analyze "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQ
 | Apple        | `scripts/build-xcframework.sh`        |
 | Android      | `scripts/build-android-libs.sh`       |
 | Opening book | `scripts/build-book.sh`               |
+
+The Windows/desktop target just runs `cargo build --release` inside `desktop/chess-tutor-desktop` — no script needed.
 
 ## Status
 
