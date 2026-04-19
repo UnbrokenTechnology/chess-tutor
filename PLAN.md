@@ -7,7 +7,7 @@ An offline chess learning app that explains **why** moves are good or bad, not j
 - **Explanations first, evaluation second.** A perfect explanation for the second-best move beats a silent recommendation of the best.
 - **No LLM at runtime, ever.** All explanations come from structured analysis data filled into templates. No hallucination surface.
 - **Deterministic analysis pipeline.** Given a FEN, output is fully reproducible.
-- **Stockfish is a cross-check, not the oracle.** Our analysis runs first; Stockfish confirms or flags disagreement, and disagreement is itself surfaced as a learning moment.
+- **The cross-check engine is a cross-check, not the oracle.** Our analysis runs first; the engine confirms or flags disagreement, and disagreement is itself surfaced as a learning moment.
 - **Share the hard work across platforms.** One Rust core; thin native UIs.
 
 ## Architecture
@@ -36,8 +36,8 @@ An offline chess learning app that explains **why** moves are good or bad, not j
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Stockfish (C++, bundled as static lib)                 │
-│  Called for low-depth cross-check only                  │
+│  Cross-check engine: Viridithas (Rust, MIT)             │
+│  Linked as a library; called for low-depth check only   │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -55,7 +55,7 @@ The core's main output, for any given position:
 - **Positional features**: pawn structure (passed, isolated, doubled, backward, hanging, islands), open/semi-open files, outposts, bishop pair, bad bishops, fianchetto status, king safety (attackers/defenders on king ring, pawn shelter, open lines toward king), space advantage, piece activity/mobility
 - **Opening identification**: ECO code + name + common continuations, if in book
 - **Forcing lines**: quiescence-style walk of checks/captures/threats with resulting position assessment
-- **Stockfish check**: top move, eval, agreement/disagreement flag
+- **Engine check**: top move, eval, agreement/disagreement flag
 
 This is the source of truth the `Explainer` walks to produce prose.
 
@@ -74,10 +74,14 @@ Every explanation is paired: **your move's explanation** + **engine's top move's
 - **`wasm-bindgen`** — web target (later phase)
 - Custom modules for SEE, motif detection, positional features, explainer
 
-### Stockfish
+### Cross-check engine — Viridithas (decided)
 
-- Bundled as static C++ library, built for each target platform
-- GPLv3 implications: the shipped app must also be GPLv3-compatible. **Decide early** whether this is acceptable, or whether to use a Rust-native engine (`Carp`, `Viridithas`) for the cross-check and avoid the license constraint. For low-depth sanity checks, a weaker engine is fine.
+- **Viridithas** (https://github.com/cosmobobak/viridithas), Rust, **MIT-licensed**.
+- Chosen over Stockfish to avoid GPLv3's App Store friction and the requirement to ship the whole app's source to every paying customer.
+- Chosen over Carp and Pleco because Viridithas's license is the only one confirmed permissive; it is also the strongest and most actively maintained of the Rust-native options.
+- Ships as a UCI binary, not a library crate. Integration path: fork it, library-ify the search/eval entry points, link directly into `chess-tutor-core` behind the [`engine::CrossCheckEngine`] trait. No subprocess — iOS/Android both make process spawning awkward.
+- **Bundle-size caveat:** NNUE nets are typically 30–50 MB. For a low-depth cross-check we can later swap for a smaller/quantised net, or strip NNUE and use classical eval. That's a Phase 2 optimisation, not a scaffold blocker.
+- The trait abstraction stays regardless — if we ever need Stockfish-strength analysis on a platform where GPLv3 is acceptable (e.g. a desktop companion), we can plug a second engine in behind the same interface.
 
 ### Apple platforms
 
@@ -95,7 +99,7 @@ Every explanation is paired: **your move's explanation** + **engine's top move's
 
 - Polyglot `.bin` opening book built from master PGN dump (Lichess masters DB or Caissabase)
 - ECO code → name mapping
-- Static Stockfish NNUE file (if using Stockfish)
+- Viridithas NNUE file (bundled per-platform; size TBD — see "Cross-check engine" above)
 
 ## Development Phases
 
@@ -116,12 +120,15 @@ Goal: prove the analysis pipeline works. Build everything as a Rust CLI that tak
 - [ ] CLI tool: `chess-tutor analyze "<fen>"`
 - [ ] Test suite of ~100 FENs with expected tactical findings (build from Lichess puzzle database — it's free and labeled)
 
-### Phase 2 — Stockfish integration
+### Phase 2 — Cross-check engine integration (Viridithas)
 
-- [ ] Decide: Stockfish vs. Rust-native engine (GPL decision)
-- [ ] Wrap engine behind a trait so it can be swapped
-- [ ] Cross-check logic: agreement/disagreement flagging
-- [ ] Extend explainer to narrate disagreements
+- [x] Decide: Stockfish vs. Rust-native engine → **Viridithas (MIT)**
+- [x] Engine trait (`chess_tutor_core::engine::CrossCheckEngine`) landed in scaffold
+- [ ] Fork Viridithas, expose search/eval as library API (currently ships as a UCI binary)
+- [ ] Wire fork in as a path/git dependency of `chess-tutor-core`
+- [ ] Decide NNUE strategy: full net vs. smaller/quantised vs. classical-eval-only (bundle-size call)
+- [ ] Cross-check logic: agreement/disagreement flagging against our top candidate
+- [ ] Extend explainer to narrate disagreements ("the engine prefers X because …")
 
 ### Phase 3 — iOS/macOS app (Universal Purchase)
 
@@ -153,12 +160,13 @@ Goal: prove the analysis pipeline works. Build everything as a Rust CLI that tak
 - [ ] Curated opening trainer with annotated main lines for common openings
 - [ ] Puzzle mode sourced from Lichess puzzle database
 
-## Key Decisions to Make Early
+## Key Decisions
 
-1. **Engine choice**: Stockfish (strongest, GPLv3) vs. Rust-native (cleaner build, weaker play, permissive license). For a low-depth cross-check, a weaker engine is genuinely fine — the analysis layer is doing the teaching.
-2. **Opening book source**: Lichess masters DB (free, permissive) vs. building custom from curated PGN. Start with Lichess masters.
-3. **Puzzle data**: Lichess publishes its puzzle database under CC0. Use it.
-4. **Universal Purchase bundle ID**: pick it before the first TestFlight build.
+1. **Engine choice — DECIDED: Viridithas (Rust, MIT).** Rationale in "Cross-check engine" above.
+2. **Licensing — DECIDED: proprietary / all-rights-reserved.** Cargo manifests use `license = "UNLICENSED"` (the Cargo convention for "not for public distribution"). No public source release.
+3. **Apple bundle ID — DECIDED: `com.unbrokentechnology.chesstutor`.** Used for both the iOS and macOS targets in a single Xcode project to enable Universal Purchase. Apple Developer Program membership: active (enrolled February 2026). Remaining to-do before first TestFlight build: register the App ID in the Developer Portal and toggle Universal Purchase in App Store Connect.
+4. **Opening book source — DECIDED: Lichess masters DB** (free, permissive). Revisit if coverage of early deviations is weak.
+5. **Puzzle data — DECIDED: Lichess puzzle database** (CC0, tagged with motif labels — perfect for validating our tactics detector).
 
 ## Data Sources (all free / permissive)
 
@@ -166,11 +174,12 @@ Goal: prove the analysis pipeline works. Build everything as a Rust CLI that tak
 - **Lichess masters / open DB** — master games for opening book
 - **Chess Programming Wiki** — reference for SEE, evaluation features, search
 - **ECO codes** — public domain
-- **Stockfish source** — GPLv3, classical evaluation code is a goldmine of positional heuristics even if not shipping Stockfish itself
+- **Viridithas source** — MIT, Rust-native, plugs in directly as our cross-check engine
+- **Stockfish source** — GPLv3, not shipped, but the classical evaluation code is still a reference goldmine of positional heuristics we can draw from (heuristics aren't copyrightable; specific code is)
 
 ## Non-Goals
 
-- Maximum playing strength. We are not competing with Stockfish on ELO.
+- Maximum playing strength. We are not competing with Stockfish on ELO (and Viridithas is already well past any strength our teaching layer needs).
 - Online play, accounts, or multiplayer.
 - Runtime ML/LLM inference.
 - Cloud dependencies. The app must work on a plane.

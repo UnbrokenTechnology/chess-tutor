@@ -9,7 +9,7 @@ See [`PLAN.md`](PLAN.md) for the full architecture and roadmap.
 ```
 chess-tutor/
 ├── core/          Rust workspace — analysis, tactics, positional, explainer, FFI, CLI
-├── stockfish/     C++ submodule + per-platform build scripts
+├── engine/        Vendored cross-check engine (Viridithas fork, Phase 2)
 ├── apple/         SwiftUI app (iOS, iPadOS, macOS — Universal Purchase)
 ├── android/       Kotlin + Jetpack Compose app
 ├── assets/        Opening book, ECO mapping, other bundled data

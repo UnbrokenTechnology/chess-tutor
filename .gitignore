@@ -9,9 +9,9 @@ Cargo.lock.bak
 /apple/Frameworks/ChessTutorCore.xcframework/
 /android/app/src/main/jniLibs/
 
-# Stockfish build artifacts
-/stockfish/build/
-/stockfish/vendor/
+# Vendored engine build artifacts
+/engine/target/
+/engine/build/
 
 # Bundled data (built by scripts/build-book.sh)
 /assets/book.bin

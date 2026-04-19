@@ -1,8 +1,9 @@
 //! Cross-check engine abstraction.
 //!
-//! Lets us ship either Stockfish (strong, GPLv3) or a Rust-native engine
-//! behind a stable trait. The analysis layer does the teaching; the engine
-//! only confirms or flags disagreement.
+//! The analysis layer does the teaching; the engine only confirms or flags
+//! disagreement. The chosen engine is **Viridithas** (Rust, MIT). The trait
+//! stays generic so we can plug a second engine in later without churning
+//! call sites — see `engine/README.md` at the repo root.
 
 use serde::{Deserialize, Serialize};
 
