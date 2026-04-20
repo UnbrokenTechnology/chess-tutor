@@ -42,6 +42,10 @@ The `play` loop accepts moves in **either** notation:
 - **SAN** (algebraic) — `e4`, `Nf3`, `O-O`, `Qxf7#`, `e8=Q`, `Nbd2` for disambiguation
 - **UCI** — `e2e4`, `g1f3`, `e1g1` for castling, `e7e8q` for promotion
 
+SAN decorations are optional: the capture `x` and the check / mate `+` / `#`
+can all be omitted. `Qd7` resolves to `Qxd7`, `ed5` to `exd5`, `Qf7` to
+`Qxf7#`, whenever that's the unique legal move.
+
 Commands during play:
 
 - `moves` — every legal move as SAN

@@ -268,7 +268,11 @@ impl Game {
     /// (`e2e4`, `g1f3`, `e1g1`) and return the canonical UCI form for the
     /// current position. SAN disambiguation uses the current position.
     ///
-    /// Conveniences: `0-0` / `0-0-0` are normalised to `O-O` / `O-O-O`.
+    /// Conveniences:
+    /// - `0-0` / `0-0-0` are normalised to `O-O` / `O-O-O`.
+    /// - Capture `x` is optional: `Qd7` resolves to `Qxd7` when that's the
+    ///   unique legal move. `+` / `#` are also optional (already handled by
+    ///   the SAN parser).
     pub fn parse_move(&self, input: &str) -> Result<String> {
         let trimmed = input.trim();
         let normalised = trimmed.replace('0', "O");
@@ -284,6 +288,30 @@ impl Game {
         if let Ok(uci) = trimmed.parse::<Uci>() {
             if let Ok(mv) = uci.to_move(&self.position) {
                 return Ok(mv.to_uci(CastlingMode::Standard).to_string());
+            }
+        }
+
+        // Relaxed SAN: match against legal-move SANs with `x` / `+` / `#`
+        // stripped from both sides. Covers `Qd7` → `Qxd7`, `Nce5` → `Ncxe5`,
+        // `ed5` → `exd5`.
+        let strip = |s: &str| -> String {
+            s.chars()
+                .filter(|c| !matches!(c, 'x' | 'X' | '+' | '#'))
+                .collect()
+        };
+        let target = strip(&normalised);
+        if !target.is_empty() {
+            let mut matches = self.position.legal_moves().into_iter().filter(|mv| {
+                strip(&SanPlus::from_move(self.position.clone(), mv).to_string()) == target
+            });
+            if let Some(mv) = matches.next() {
+                // Ambiguity is impossible here: SAN is already disambiguated,
+                // and stripping `x`/`+`/`#` can't collapse two distinct legal
+                // moves onto the same string (a capture and a quiet move to
+                // the same square can't both be legal). But guard anyway.
+                if matches.next().is_none() {
+                    return Ok(mv.to_uci(CastlingMode::Standard).to_string());
+                }
             }
         }
 
@@ -558,6 +586,26 @@ mod tests {
         let g = Game::new_standard(PlayerKind::Human, PlayerKind::Human);
         assert!(g.parse_move("xx").is_err());
         assert!(g.parse_move("Nd5").is_err()); // illegal from startpos
+    }
+
+    #[test]
+    fn parse_move_accepts_capture_without_x() {
+        // Black queen on d7, d-file open for White's queen — Qxd7 is legal.
+        // `Qd7` (no `x`) should resolve to the same move.
+        let fen = "rnb1kbnr/pppqpppp/8/8/8/8/PPP1PPPP/RNBQKBNR w KQkq - 0 1";
+        let g = Game::from_fen(fen, PlayerKind::Human, PlayerKind::Human).unwrap();
+        assert_eq!(g.parse_move("Qxd7").unwrap(), "d1d7");
+        assert_eq!(g.parse_move("Qd7").unwrap(), "d1d7");
+    }
+
+    #[test]
+    fn parse_move_accepts_pawn_capture_without_x() {
+        // 1. e4 d5 — White can play exd5. Both `exd5` and `ed5` should work.
+        let mut g = Game::new_standard(PlayerKind::Human, PlayerKind::Human);
+        g.apply("e2e4").unwrap();
+        g.apply("d7d5").unwrap();
+        assert_eq!(g.parse_move("exd5").unwrap(), "e4d5");
+        assert_eq!(g.parse_move("ed5").unwrap(), "e4d5");
     }
 
     #[test]
