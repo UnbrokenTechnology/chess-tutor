@@ -158,7 +158,7 @@ Goal: prove the game loop + analysis pipeline. The CLI becomes a playable interf
 - [x] Time controls in core (increment supported; delay/bronstein deferred)
 - [x] Attacker/defender map per square (`analysis::AttackMap`) + CLI `hanging` / `attackers` commands
 - [x] Static Exchange Evaluation (SEE) — `analysis::see` module, populated on `SquareReport.see`, CLI `see <sq>` command
-- [ ] Detect checks, captures, threats for both sides
+- [x] Detect checks, captures, threats for both sides — `analysis::threats` module (`ThreatScan` / `ThreatScans`), populated on `PositionAnalysis.threats`, CLI `checks` / `captures` / `threats` commands
 - [ ] Basic tactical motifs: fork, pin (absolute + relative), skewer, discovered attack, double check
 - [ ] Basic positional features: passed/isolated/doubled/backward pawns, open/semi-open files, bishop pair
 - [ ] King safety scoring (attackers on king ring, pawn shelter)

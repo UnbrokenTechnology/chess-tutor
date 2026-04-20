@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 /// Version of the analysis schema. Bump whenever [`PositionAnalysis`] changes
 /// in a way that platform shells or persisted reports would notice.
-pub const ANALYSIS_SCHEMA_VERSION: u32 = 1;
+pub const ANALYSIS_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level output of the analysis pipeline for a single position.
 ///
@@ -43,6 +43,7 @@ pub struct PositionAnalysis {
     pub schema_version: u32,
     pub fen: String,
     pub square_data: analysis::SquareData,
+    pub threats: analysis::ThreatScans,
     pub candidates: Vec<analysis::CandidateMove>,
     pub tactics: tactics::TacticsReport,
     pub positional: positional::PositionalReport,
@@ -79,6 +80,7 @@ pub fn analyze(fen: &str) -> Result<PositionAnalysis> {
 
     let mut report = PositionAnalysis::empty(fen);
     report.square_data = attack_map.to_square_data(&pos);
+    report.threats = analysis::ThreatScans::from_position(&pos);
     Ok(report)
 }
 

@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chess_tutor_core::{
-    analysis::{see_on_square, AttackMap},
+    analysis::{see_on_square, AttackMap, ThreatScan, ThreatScans},
     analyze,
     explain::Explainer,
     game::{Game, GameStatus, PlayerKind, Side, TimeControl},
@@ -136,7 +136,7 @@ fn play_loop(
     )?;
     writeln!(
         out,
-        "commands: moves / hanging / attackers <sq|piece> / see <sq> / undo / resign / fen / flip / help / quit"
+        "commands: moves / hanging / attackers <sq|piece> / see <sq> / checks / captures / threats / undo / resign / fen / flip / help / quit"
     )?;
     if game.has_time_control() {
         writeln!(
@@ -206,6 +206,9 @@ fn play_loop(
                 writeln!(out, "  attackers <piece>   show attackers on every piece of that letter")?;
                 writeln!(out, "                      (K/Q/R/B/N/P = white, k/q/r/b/n/p = black)")?;
                 writeln!(out, "  see <sq>            SEE (centipawns) for each side capturing on <sq>")?;
+                writeln!(out, "  checks              list every check either side could deliver")?;
+                writeln!(out, "  captures            list every capture either side could make")?;
+                writeln!(out, "  threats             list quiet moves that set up a winning capture")?;
                 writeln!(out, "  undo / resign / fen / flip / help / quit")?;
             }
             "moves" => {
@@ -228,6 +231,15 @@ fn play_loop(
             cmd if cmd.starts_with("see ") => {
                 let arg = cmd.trim_start_matches("see ").trim();
                 report_see(game.position(), arg, &mut out)?;
+            }
+            "checks" => {
+                report_threats(game.position(), ThreatKind::Checks, &mut out)?;
+            }
+            "captures" => {
+                report_threats(game.position(), ThreatKind::Captures, &mut out)?;
+            }
+            "threats" => {
+                report_threats(game.position(), ThreatKind::Threats, &mut out)?;
             }
             "flip" => {
                 manual_flip = !manual_flip;
@@ -339,6 +351,70 @@ fn report_hanging(position: &shakmaty::Chess, out: &mut impl Write) -> io::Resul
             own,
             pluralise(own),
         )?;
+    }
+    Ok(())
+}
+
+enum ThreatKind {
+    Checks,
+    Captures,
+    Threats,
+}
+
+fn report_threats(
+    position: &shakmaty::Chess,
+    kind: ThreatKind,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let scans = ThreatScans::from_position(position);
+    print_side_threats(&scans.mover, kind_label(&kind), &kind, out)?;
+    match scans.opponent {
+        Some(opp) => print_side_threats(&opp, kind_label(&kind), &kind, out)?,
+        None => writeln!(
+            out,
+            "(opponent scan unavailable — current side to move is in check)"
+        )?,
+    }
+    Ok(())
+}
+
+fn kind_label(kind: &ThreatKind) -> &'static str {
+    match kind {
+        ThreatKind::Checks => "checks",
+        ThreatKind::Captures => "captures",
+        ThreatKind::Threats => "threats",
+    }
+}
+
+fn print_side_threats(
+    scan: &ThreatScan,
+    label: &str,
+    kind: &ThreatKind,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let moves = match kind {
+        ThreatKind::Checks => &scan.checks,
+        ThreatKind::Captures => &scan.captures,
+        ThreatKind::Threats => &scan.threats,
+    };
+    if moves.is_empty() {
+        writeln!(out, "{}: no {label}.", scan.side)?;
+        return Ok(());
+    }
+    writeln!(out, "{} {label} ({}):", scan.side, moves.len())?;
+    for m in moves {
+        match kind {
+            ThreatKind::Captures => {
+                let sign = if m.see >= 0 { "+" } else { "" };
+                writeln!(out, "  {:<7} SEE {}{} cp", m.san, sign, m.see)?;
+            }
+            ThreatKind::Threats => {
+                writeln!(out, "  {:<7} threatens {}", m.san, m.threatens.join(", "))?;
+            }
+            ThreatKind::Checks => {
+                writeln!(out, "  {}", m.san)?;
+            }
+        }
     }
     Ok(())
 }

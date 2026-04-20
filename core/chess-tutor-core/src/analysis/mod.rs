@@ -2,7 +2,9 @@
 //! candidate move annotation.
 
 pub mod see;
+pub mod threats;
 pub use see::{piece_value, see as see_value, see_on_square};
+pub use threats::{ThreatMove, ThreatScan, ThreatScans};
 
 use serde::{Deserialize, Serialize};
 use shakmaty::attacks;
