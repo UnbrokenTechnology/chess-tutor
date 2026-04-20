@@ -78,7 +78,7 @@ pub fn analyze(fen: &str) -> Result<PositionAnalysis> {
     let attack_map = analysis::AttackMap::from_position(&pos);
 
     let mut report = PositionAnalysis::empty(fen);
-    report.square_data = attack_map.to_square_data();
+    report.square_data = attack_map.to_square_data(&pos);
     Ok(report)
 }
 

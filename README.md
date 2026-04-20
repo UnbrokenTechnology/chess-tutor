@@ -52,6 +52,7 @@ Commands during play:
 - `hanging` — every piece where attackers > defenders
 - `attackers e4` — who attacks the given square (both colours)
 - `attackers N` / `attackers n` — attackers on each white / black knight. Same letters work for K Q R B P.
+- `see e5` — Static Exchange Evaluation (centipawns) for each side capturing on the square with their least valuable attacker
 - `undo`, `resign`, `flip`, `fen`, `help`, `quit`
 
 ```sh

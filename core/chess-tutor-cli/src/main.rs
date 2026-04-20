@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chess_tutor_core::{
-    analysis::AttackMap,
+    analysis::{see_on_square, AttackMap},
     analyze,
     explain::Explainer,
     game::{Game, GameStatus, PlayerKind, Side, TimeControl},
@@ -136,7 +136,7 @@ fn play_loop(
     )?;
     writeln!(
         out,
-        "commands: moves / hanging / attackers <sq|piece> / undo / resign / fen / flip / help / quit"
+        "commands: moves / hanging / attackers <sq|piece> / see <sq> / undo / resign / fen / flip / help / quit"
     )?;
     if game.has_time_control() {
         writeln!(
@@ -205,6 +205,7 @@ fn play_loop(
                 writeln!(out, "  attackers <sq>      show who attacks a square (e.g. `attackers e4`)")?;
                 writeln!(out, "  attackers <piece>   show attackers on every piece of that letter")?;
                 writeln!(out, "                      (K/Q/R/B/N/P = white, k/q/r/b/n/p = black)")?;
+                writeln!(out, "  see <sq>            SEE (centipawns) for each side capturing on <sq>")?;
                 writeln!(out, "  undo / resign / fen / flip / help / quit")?;
             }
             "moves" => {
@@ -220,6 +221,13 @@ fn play_loop(
             cmd if cmd.starts_with("attackers ") => {
                 let arg = cmd.trim_start_matches("attackers ").trim();
                 report_attackers(game.position(), arg, &mut out)?;
+            }
+            "see" => {
+                writeln!(out, "usage: see <square>   e.g. `see e5`")?;
+            }
+            cmd if cmd.starts_with("see ") => {
+                let arg = cmd.trim_start_matches("see ").trim();
+                report_see(game.position(), arg, &mut out)?;
             }
             "flip" => {
                 manual_flip = !manual_flip;
@@ -331,6 +339,38 @@ fn report_hanging(position: &shakmaty::Chess, out: &mut impl Write) -> io::Resul
             own,
             pluralise(own),
         )?;
+    }
+    Ok(())
+}
+
+fn report_see(
+    position: &shakmaty::Chess,
+    arg: &str,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    use shakmaty::Position;
+    let Some(sq) = parse_square(arg) else {
+        writeln!(out, "unrecognised square '{arg}'. Try e.g. `see e5`.")?;
+        return Ok(());
+    };
+
+    let board = position.board();
+    let occupant = board
+        .piece_at(sq)
+        .map(|p| format!(" ({})", piece_letter(p)))
+        .unwrap_or_default();
+    writeln!(out, "{}{}:", square_name(sq), occupant)?;
+
+    if board.piece_at(sq).is_none() {
+        writeln!(out, "  (empty — SEE is only meaningful on occupied squares)")?;
+        return Ok(());
+    }
+
+    for side in [Color::White, Color::Black] {
+        match see_on_square(position, sq, side) {
+            Some(v) => writeln!(out, "  {:?}: {:+} cp", side, v)?,
+            None => writeln!(out, "  {:?}: no attacker", side)?,
+        }
     }
     Ok(())
 }

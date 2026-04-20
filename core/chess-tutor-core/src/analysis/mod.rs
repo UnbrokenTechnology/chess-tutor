@@ -1,6 +1,9 @@
 //! Square-level analysis: attacker/defender maps, Static Exchange Evaluation,
 //! candidate move annotation.
 
+pub mod see;
+pub use see::{piece_value, see as see_value, see_on_square};
+
 use serde::{Deserialize, Serialize};
 use shakmaty::attacks;
 use shakmaty::{Bitboard, Board, Chess, Color, Position, Role, Square};
@@ -17,8 +20,9 @@ pub struct SquareData {
 pub struct SquareReport {
     pub white_attackers: u8,
     pub black_attackers: u8,
-    /// SEE value for capturing on this square with the side to move.
-    /// Populated in a later Phase 1 step.
+    /// SEE value (centipawns) for capturing on this square with the side
+    /// to move's least valuable attacker. `None` when the side to move has
+    /// no attacker on this square.
     pub see: Option<i32>,
 }
 
@@ -86,14 +90,20 @@ impl AttackMap {
     }
 
     /// Build a compact per-square report for serialisation and FFI.
-    pub fn to_square_data(&self) -> SquareData {
+    ///
+    /// The `see` field on each square is the SEE value of capturing on that
+    /// square with the side to move's least valuable attacker. `None` means
+    /// the side to move has no attacker on that square (so a capture isn't
+    /// on offer for them).
+    pub fn to_square_data(&self, position: &Chess) -> SquareData {
+        let mover = position.turn();
         let squares = Square::ALL
             .map(|sq| {
                 let idx = usize::from(sq);
                 SquareReport {
                     white_attackers: self.white_attackers[idx].count() as u8,
                     black_attackers: self.black_attackers[idx].count() as u8,
-                    see: None,
+                    see: see_on_square(position, sq, mover),
                 }
             })
             .to_vec();
