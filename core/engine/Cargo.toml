@@ -1,0 +1,8 @@
+[package]
+name = "chess-tutor-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "chess_tutor_engine"

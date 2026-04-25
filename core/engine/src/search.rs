@@ -1,0 +1,2013 @@
+//! Alpha-beta search with iterative deepening and Stockfish 11's
+//! pruning stack: null-move, late move reductions (LMR), late move
+//! pruning (LMP), futility pruning, SEE pruning, check extensions, and
+//! mate-distance pruning. Assembles a principal variation, an
+//! accompanying [`EvalTrace`] at the PV leaf, and wires into the
+//! [`crate::tt::TranspositionTable`] and [`ButterflyHistory`] for fast
+//! subsequent searches.
+//!
+//! MultiPV follows Stockfish's per-PV-slot pattern: at every iterative
+//! deepening depth we walk through [`Search::multi_pv`] slots in order,
+//! each time restricting the root move list to those not already claimed
+//! by an earlier PV. After each slot's search completes we stable-sort
+//! the tail of [`Search::root_moves`] by score descending, promoting the
+//! winner into position `pv_idx`. This preserves alpha-beta efficiency
+//! within each slot's pass while producing a deterministic top-N ranking.
+//! Singular extensions, multi-cut, IID, probcut, razoring, and
+//! sophisticated time management are deferred to a follow-up; the
+//! scaffolding here should accept them without API churn.
+
+use crate::eval::{evaluate, evaluate_with_trace, EvalTrace};
+use crate::movepick::{ButterflyHistory, MovePicker, BUTTERFLY_HISTORY_BOUND};
+use crate::position::{Position, StateInfo};
+use crate::tt::TranspositionTable;
+use crate::types::{Bound, Color, Depth, Move, Value};
+
+use crate::engine::{SearchLine, SearchParams};
+
+use std::time::Instant;
+
+// =========================================================================
+// Constants
+// =========================================================================
+
+/// Maximum search depth / ply. Matches `Value::MAX_PLY`.
+pub const MAX_PLY: usize = Value::MAX_PLY as usize;
+
+/// How often (in nodes) we check the wall clock / node cap for a stop
+/// signal. Keeping this coarse avoids a `now()` syscall per node.
+const STOP_CHECK_INTERVAL: u64 = 4096;
+
+/// Node-count interval for the `verbose_progress` "still alive"
+/// heartbeat. Picked large enough to not spam stderr in normal search
+/// (at ~5 Mnodes/s, 500k = ~100ms between ticks) but small enough that
+/// a genuinely-stuck search's last heartbeat is recent.
+const VERBOSE_TICK_INTERVAL: u64 = 500_000;
+
+/// Aspiration-window start width. Search widens on fail-high/fail-low.
+const ASPIRATION_DELTA: i32 = 17;
+
+/// Side-to-move-asymmetric bias added to every static evaluation during
+/// search. Positive cp when it's the root side's turn; negative when
+/// it's the opponent's. Effect at the root: any position the raw
+/// evaluator scores as `0` (objectively drawn) returns `+CONTEMPT_CP`
+/// after the bias, while a repetition-draw still returns ~0. Drawing
+/// is thus a real deficit against the shifted landscape instead of
+/// equivalent to playing on, which gives alpha-beta pruning a gradient
+/// even in draw-heavy positions. Mimics Stockfish's `Contempt` UCI
+/// option.
+///
+/// **Cross-search caveat:** because contempt is keyed to root_stm and
+/// sign-flips between consecutive moves in a game, persisted TT
+/// entries carry contempt with the *previous* root's sign. Reads
+/// during the next move's search are therefore biased by up to
+/// `2 × CONTEMPT_CP`. Keeping the magnitude small (2 cp) bounds that
+/// pollution to ±4 cp — small enough to be noise relative to real
+/// evaluation differences, while still giving the search a tiny
+/// preference for playing on over repeating in balanced positions.
+const CONTEMPT_CP: i32 = 2;
+
+/// Depth below which draw values aren't jittered — quiescence-ish
+/// regions where a ±1 cp tiebreak would only add noise.
+const DRAW_JITTER_MIN_DEPTH: i32 = 4;
+
+/// Minimum depth at which null-move pruning is considered.
+const NULL_MIN_DEPTH: i32 = 3;
+
+/// Minimum depth at which LMR activates; earlier moves below it play
+/// out at full depth.
+const LMR_MIN_DEPTH: i32 = 3;
+
+/// Number of moves always searched at full depth before LMR kicks in.
+const LMR_FULL_DEPTH_MOVES: usize = 4;
+
+/// Maximum depth at which futility / LMP / SEE pruning consider quiets.
+const SHALLOW_PRUNE_MAX_DEPTH: i32 = 7;
+
+/// Adjacent-ply |Δwhite-POV-score| below which the PV is considered
+/// "settled". In Stockfish-internal centipawns (roughly: PawnEG = 213),
+/// so 25 cp is about one-tenth of a pawn — tight enough to treat small
+/// positional wobble as noise, wide enough to not get tricked by a 10-cp
+/// mobility swing. Tuneable once we see real output on test positions.
+pub const SETTLED_THRESHOLD_CP: i32 = 25;
+
+// =========================================================================
+// Root move tracking
+// =========================================================================
+
+/// One candidate root move with its most-recent score and principal
+/// variation. [`Search::root_moves`] holds one of these per legal move at
+/// the root; the MultiPV loop sorts this vector (stably) after each PV
+/// slot finishes so `root_moves[i]` holds the i-th best move.
+#[derive(Clone, Debug)]
+struct RootMove {
+    /// The root move itself — the first move of `pv`.
+    mv: Move,
+    /// Score from the root side-to-move's point of view. Equal to
+    /// `-Value::INFINITE` before the first iteration scores it.
+    score: Value,
+    /// Principal variation starting with `mv`. Captured after each
+    /// slot's root-level search completes.
+    pv: Vec<Move>,
+    /// Score from the previous completed iterative-deepening iteration
+    /// — used as the aspiration-window seed for the next iteration.
+    prev_score: Value,
+}
+
+// =========================================================================
+// Per-search state
+// =========================================================================
+
+/// Per-search scratchpad: killers, PV table, node counter, stop
+/// machinery, repetition path. One `Search` is constructed per
+/// `Engine::search` call and thrown away. The TT and history reference
+/// shared engine state.
+pub(crate) struct Search<'a> {
+    tt: &'a TranspositionTable,
+    history: &'a mut ButterflyHistory,
+
+    /// Killer moves per ply: two slots, `killers[ply][0]` is the latest
+    /// fail-high quiet found at that ply.
+    killers: Vec<[Move; 2]>,
+
+    /// Flat PV storage: `MAX_PLY` slots per ply, addressed as
+    /// `pv[ply * MAX_PLY + idx]`. Paired with `pv_length` per ply.
+    pv: Vec<Move>,
+    pv_length: Vec<usize>,
+
+    /// Path of position keys from root to current node. Used for
+    /// repetition detection inside the search tree.
+    path_keys: Vec<u64>,
+
+    /// Every legal move at the root position with its most-recent score
+    /// and PV. Stable-sorted by score descending (in the `[pv_idx..]`
+    /// range) after each PV slot's search completes.
+    root_moves: Vec<RootMove>,
+    /// Current PV slot being searched. The root move loop only considers
+    /// `root_moves[pv_idx..]` so earlier slots stay fixed.
+    pv_idx: usize,
+    /// Effective MultiPV count for this search — clamped to the number
+    /// of legal root moves when the caller requests more lines than are
+    /// available.
+    multi_pv: usize,
+
+    nodes: u64,
+    max_nodes: Option<u64>,
+    start_time: Instant,
+    stop_time: Option<Instant>,
+    next_stop_check: u64,
+    aborted: bool,
+
+    /// When `true`, write iterative-deepening and root-move progress
+    /// to stderr. Mirrors [`SearchParams::verbose_progress`]; set from
+    /// `run()`.
+    verbose_progress: bool,
+
+    /// Node count at which the next verbose "still alive" heartbeat
+    /// should print. Only used when [`verbose_progress`] is `true`.
+    verbose_next_tick: u64,
+
+    /// Side-to-move at the root. Captured at the start of
+    /// [`Search::run`] so contempt can be applied asymmetrically
+    /// (root prefers playing on; opponent is nudged toward drawing).
+    root_stm: Color,
+}
+
+impl<'a> Search<'a> {
+    pub(crate) fn new(tt: &'a TranspositionTable, history: &'a mut ButterflyHistory) -> Search<'a> {
+        Search {
+            tt,
+            history,
+            // `pv_length` is sized `MAX_PLY + 1` so the parent's
+            // `update_pv` read of `pv_length[ply + 1]` is in bounds when
+            // the child bailed at `ply == MAX_PLY`. The child still
+            // writes `pv_length[ply] = 0` on the bail path, so the
+            // parent sees a correctly-empty child PV.
+            killers: vec![[Move::NONE; 2]; MAX_PLY],
+            pv: vec![Move::NONE; MAX_PLY * MAX_PLY],
+            pv_length: vec![0; MAX_PLY + 1],
+            path_keys: Vec::with_capacity(MAX_PLY),
+            root_moves: Vec::new(),
+            pv_idx: 0,
+            multi_pv: 1,
+            nodes: 0,
+            max_nodes: None,
+            start_time: Instant::now(),
+            stop_time: None,
+            next_stop_check: STOP_CHECK_INTERVAL,
+            aborted: false,
+            verbose_progress: false,
+            verbose_next_tick: 0,
+            root_stm: Color::White,
+        }
+    }
+
+    /// Run a search under `params` and return up to `params.multi_pv`
+    /// ranked principal variations with per-line traces. Returns an
+    /// empty vector when the root position has no legal moves
+    /// (checkmate or stalemate) — callers can surface this as a
+    /// terminal result.
+    pub(crate) fn run(&mut self, pos: &mut Position, params: &SearchParams) -> Vec<SearchLine> {
+        self.tt.new_search();
+        self.nodes = 0;
+        self.aborted = false;
+        self.start_time = Instant::now();
+        self.stop_time = params.max_time.map(|d| self.start_time + d);
+        self.max_nodes = params.max_nodes;
+        self.next_stop_check = STOP_CHECK_INTERVAL;
+        self.verbose_progress = params.verbose_progress;
+        self.verbose_next_tick = VERBOSE_TICK_INTERVAL;
+        self.root_stm = pos.side_to_move();
+        // Seed repetition tracking with the caller-supplied game
+        // history, then the root. `is_repetition` fires on any match in
+        // `path_keys[..len - 1]`, so a move inside the search that
+        // returns to a position already reached in the real game is
+        // scored as a draw — which is the point: the engine must not
+        // recommend a repetition when it's winning.
+        self.path_keys.clear();
+        self.path_keys.extend_from_slice(&params.game_history);
+        self.path_keys.push(pos.key());
+        for k in self.killers.iter_mut() {
+            *k = [Move::NONE; 2];
+        }
+
+        // Build the root move list up front. Legal-move generation at
+        // the root gives us the full candidate set; MultiPV iterates
+        // through it slot-by-slot.
+        self.root_moves.clear();
+        let mut root_legal = crate::movegen::MoveList::new();
+        crate::movegen::generate_legal_moves(pos, &mut root_legal);
+        for &mv in &root_legal {
+            self.root_moves.push(RootMove {
+                mv,
+                score: -Value::INFINITE,
+                pv: vec![mv],
+                prev_score: Value::ZERO,
+            });
+        }
+
+        if self.root_moves.is_empty() {
+            return Vec::new();
+        }
+
+        // Clamp MultiPV to the number of legal moves — asking for 5
+        // lines in a position with only 3 legal replies just returns 3.
+        self.multi_pv = params.multi_pv.clamp(1, self.root_moves.len());
+
+        let max_depth = params.max_depth.max(1);
+        let mut completed_depth: u32 = 0;
+
+        'ids: for depth in 1..=max_depth {
+            if self.verbose_progress {
+                eprintln!(
+                    "[search] depth {depth} starting ({} nodes so far, {} ms elapsed)",
+                    self.nodes,
+                    self.start_time.elapsed().as_millis(),
+                );
+            }
+            for pv_idx in 0..self.multi_pv {
+                self.pv_idx = pv_idx;
+                let prev = self.root_moves[pv_idx].prev_score;
+                let _score = self.aspiration_search(pos, depth as i32, prev);
+
+                if self.aborted {
+                    break 'ids;
+                }
+
+                // Stable-sort the tail [pv_idx..] by score desc, so the
+                // newly-discovered best unclaimed move lands at pv_idx.
+                // Moves at indices < pv_idx were claimed by earlier
+                // slots and stay fixed.
+                self.root_moves[pv_idx..].sort_by_key(|rm| std::cmp::Reverse(rm.score));
+            }
+
+            // Promote current scores to prev_score for the next
+            // iteration's aspiration-window seed.
+            for rm in self.root_moves.iter_mut() {
+                rm.prev_score = rm.score;
+            }
+
+            completed_depth = depth;
+
+            if self.verbose_progress {
+                let best = &self.root_moves[0];
+                eprintln!(
+                    "[search] depth {depth} complete: best={}-{} score={} nodes={} elapsed={} ms",
+                    best.mv.from().to_algebraic(),
+                    best.mv.to().to_algebraic(),
+                    best.score.0,
+                    self.nodes,
+                    self.start_time.elapsed().as_millis(),
+                );
+            }
+
+            // Mate found in the leader — no point searching deeper.
+            if self.root_moves[0].score.0.abs() >= Value::MATE.0 - Value::MAX_PLY {
+                break;
+            }
+        }
+
+        // Final ordering: each PV slot's search ran with its own
+        // aspiration window and a slightly-different TT state, so the
+        // per-slot scores aren't guaranteed to be strictly monotonic
+        // across slots (a well-known MultiPV quirk). Stable-sort the
+        // first `multi_pv` slots by score descending so the output
+        // reflects what a teaching UI expects: "best move first, then
+        // next-best, etc.". Slots past `multi_pv` stay untouched.
+        self.root_moves[..self.multi_pv].sort_by_key(|rm| std::cmp::Reverse(rm.score));
+
+        // force_include pass: after natural MultiPV has found its
+        // top-k, run a dedicated single-move IDS for each forced move
+        // that isn't already in the top-k. Each forced slot reuses the
+        // same aspiration_search + negamax path — we just pin the
+        // forced move into position `multi_pv` and temporarily truncate
+        // the tail so `allowed_root` resolves to that one move only.
+        // The slot's output lands at `root_moves[multi_pv]` and
+        // `self.multi_pv` increments by one per successful forced slot.
+        if !params.force_include.is_empty() && !self.aborted {
+            self.run_forced_slots(pos, &params.force_include, max_depth);
+
+            // Final re-sort so forced moves interleave with the natural
+            // top-k by score, keeping "best move first" even when a
+            // forced move happens to be the strongest alternative.
+            self.root_moves[..self.multi_pv].sort_by_key(|rm| std::cmp::Reverse(rm.score));
+        }
+
+        // Build the output vector. For each PV slot, walk the line and
+        // capture per-ply traces, then compute the settled-ply index
+        // from the white-POV score trajectory. Slots that never got
+        // scored (we aborted before any iteration finished) are dropped.
+        let root_stm = pos.side_to_move();
+        let mut out = Vec::with_capacity(self.multi_pv);
+        for rm in self.root_moves.iter().take(self.multi_pv) {
+            if rm.score == -Value::INFINITE {
+                continue;
+            }
+            let ply_traces = self.trace_along_pv(pos, &rm.pv);
+            let settled_ply = compute_settled_ply(&ply_traces, root_stm);
+            out.push(SearchLine {
+                pv: rm.pv.clone(),
+                score: rm.score,
+                depth: completed_depth,
+                ply_traces,
+                settled_ply,
+            });
+        }
+        out
+    }
+
+    /// Run a dedicated single-move iterative-deepening pass for every
+    /// move in `forced` that isn't already in `root_moves[..multi_pv]`.
+    /// Each successful forced slot grows `self.multi_pv` by one.
+    ///
+    /// Mechanics: we swap the forced move into `root_moves[multi_pv]`,
+    /// temporarily split off the rest of `root_moves` past that slot
+    /// (so `allowed_root` inside `negamax` resolves to just the forced
+    /// move), run the full IDS, then restore the split-off tail.
+    fn run_forced_slots(&mut self, pos: &mut Position, forced: &[Move], max_depth: u32) {
+        // Deduplicate forced list + skip anything already in the top-k
+        // with a real score. `Move::NONE` is a sentinel used by callers
+        // that pass an uninitialized slot — silently ignore it.
+        let mut already_covered: std::collections::HashSet<Move> = self.root_moves[..self.multi_pv]
+            .iter()
+            .filter(|rm| rm.score != -Value::INFINITE)
+            .map(|rm| rm.mv)
+            .collect();
+
+        for &forced_mv in forced {
+            if self.aborted {
+                break;
+            }
+            if forced_mv == Move::NONE {
+                continue;
+            }
+            if !already_covered.insert(forced_mv) {
+                continue; // duplicate in the forced list, or already in top-k
+            }
+            // Illegal moves are silently dropped.
+            let Some(idx) = self.root_moves.iter().position(|rm| rm.mv == forced_mv) else {
+                continue;
+            };
+
+            let new_slot = self.multi_pv;
+            if idx != new_slot {
+                self.root_moves.swap(idx, new_slot);
+            }
+
+            // Reset per-slot scratch so the fresh IDS doesn't inherit
+            // stale aspiration seeds or leftover -INFINITE scores.
+            self.root_moves[new_slot].prev_score = Value::ZERO;
+            self.root_moves[new_slot].score = -Value::INFINITE;
+            self.root_moves[new_slot].pv = vec![forced_mv];
+
+            // Truncate the tail so `allowed_root[..pv_idx..]` becomes
+            // exactly `[forced_mv]` for this slot's search. Save the
+            // removed portion for restoration.
+            let saved_tail = self.root_moves.split_off(new_slot + 1);
+
+            self.pv_idx = new_slot;
+            for depth in 1..=max_depth {
+                let prev = self.root_moves[new_slot].prev_score;
+                let _ = self.aspiration_search(pos, depth as i32, prev);
+                if self.aborted {
+                    break;
+                }
+                self.root_moves[new_slot].prev_score = self.root_moves[new_slot].score;
+
+                // Mate-in-N termination mirrors the main IDS loop.
+                if self.root_moves[new_slot].score.0.abs() >= Value::MATE.0 - Value::MAX_PLY {
+                    break;
+                }
+            }
+
+            // Restore the tail so subsequent forced slots see the full
+            // legal-move list again.
+            self.root_moves.extend(saved_tail);
+
+            // Include this slot in the output. Only grow on a real
+            // score — if aborted before any depth completed, drop the
+            // slot rather than emitting an -INFINITE line.
+            if self.root_moves[new_slot].score != -Value::INFINITE {
+                self.multi_pv += 1;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Iterative deepening + aspiration
+    // ------------------------------------------------------------------
+
+    fn aspiration_search(&mut self, pos: &mut Position, depth: i32, prev_score: Value) -> Value {
+        let mut alpha = -Value::INFINITE;
+        let mut beta = Value::INFINITE;
+        let mut delta = ASPIRATION_DELTA;
+
+        if depth >= 4 {
+            alpha = Value((prev_score.0 - delta).max(-Value::INFINITE.0));
+            beta = Value((prev_score.0 + delta).min(Value::INFINITE.0));
+        }
+
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            if self.verbose_progress {
+                eprintln!(
+                    "[search] aspiration depth={depth} attempt={attempt} window=[{}, {}] delta={delta}",
+                    alpha.0, beta.0,
+                );
+            }
+
+            let score = self.negamax(pos, alpha, beta, depth, 0, true, true);
+
+            if self.aborted {
+                return score;
+            }
+
+            if self.verbose_progress {
+                let outcome = if score <= alpha {
+                    "FAIL-LOW"
+                } else if score >= beta {
+                    "FAIL-HIGH"
+                } else {
+                    "OK"
+                };
+                eprintln!(
+                    "[search] aspiration depth={depth} attempt={attempt} result={outcome} score={}",
+                    score.0,
+                );
+            }
+
+            if score <= alpha {
+                beta = Value((alpha.0 + beta.0) / 2);
+                alpha = Value((score.0 - delta).max(-Value::INFINITE.0));
+                delta = (delta * 2).max(delta + 1);
+            } else if score >= beta {
+                beta = Value((score.0 + delta).min(Value::INFINITE.0));
+                delta = (delta * 2).max(delta + 1);
+            } else {
+                return score;
+            }
+
+            if delta > 500 {
+                alpha = -Value::INFINITE;
+                beta = Value::INFINITE;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Alpha-beta with pruning stack
+    // ------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn negamax(
+        &mut self,
+        pos: &mut Position,
+        mut alpha: Value,
+        mut beta: Value,
+        depth: i32,
+        ply: usize,
+        is_root: bool,
+        is_pv: bool,
+    ) -> Value {
+        // Hard cap on recursion depth. Check extensions don't decrement
+        // depth, so a position rich in forcing checks (e.g. infiltrated
+        // queen + knight + rook) can drive `ply` past normal bounds.
+        // Without this bail, indexing `pv_length[ply]` and the child's
+        // reciprocal read `pv_length[ply + 1]` go out of bounds.
+        if ply >= MAX_PLY {
+            self.pv_length[ply] = 0;
+            return if pos.in_check() {
+                Value::DRAW
+            } else {
+                self.search_eval(pos)
+            };
+        }
+
+        self.pv_length[ply] = 0;
+
+        if self.check_should_stop() {
+            return Value::ZERO;
+        }
+
+        if depth <= 0 {
+            return self.qsearch(pos, alpha, beta, ply);
+        }
+
+        self.nodes += 1;
+
+        if !is_root {
+            if pos.halfmove_clock() >= 100 || self.is_repetition(pos) {
+                return self.draw_value(depth, pos);
+            }
+
+            // Mate distance pruning.
+            alpha = alpha.max(Value::mated_in(ply as i32));
+            beta = beta.min(Value::mate_in(ply as i32 + 1));
+            if alpha >= beta {
+                return alpha;
+            }
+        }
+
+        // --- TT probe ---
+        let key = pos.key();
+        let probe = self.tt.probe(key);
+        let tt_hit = probe.hit;
+        let tt_move = if tt_hit { probe.data.mv } else { Move::NONE };
+        let tt_value = if tt_hit {
+            value_from_tt(probe.data.value, ply as i32)
+        } else {
+            Value::NONE
+        };
+        let tt_depth = if tt_hit { probe.data.depth.0 } else { -999 };
+        let tt_bound = if tt_hit {
+            probe.data.bound
+        } else {
+            Bound::None
+        };
+
+        if !is_pv && tt_hit && tt_depth >= depth && tt_value != Value::NONE {
+            let usable = match tt_bound {
+                Bound::Exact => true,
+                Bound::Lower => tt_value >= beta,
+                Bound::Upper => tt_value <= alpha,
+                Bound::None => false,
+            };
+            if usable {
+                return tt_value;
+            }
+        }
+
+        let in_check = pos.in_check();
+
+        // --- Static eval ---
+        //
+        // `raw_static_eval` is the evaluator's untinted output — what
+        // we persist to the TT so that later searches (possibly with
+        // a different root side-to-move) can re-apply the right
+        // contempt sign. `static_eval` is the contempt-adjusted form
+        // used for this search's pruning decisions.
+        let raw_static_eval = if in_check {
+            Value::NONE
+        } else if tt_hit && probe.data.eval != Value::NONE {
+            probe.data.eval
+        } else {
+            evaluate(pos)
+        };
+        let static_eval = self.apply_contempt(raw_static_eval, pos);
+
+        // --- Null-move pruning ---
+        if !is_pv
+            && !in_check
+            && depth >= NULL_MIN_DEPTH
+            && static_eval != Value::NONE
+            && static_eval >= beta
+            && pos.non_pawn_material(pos.side_to_move()).0 > 0
+        {
+            let r = 3 + depth / 4 + ((static_eval.0 - beta.0) / 200).clamp(0, 3);
+            let reduced = (depth - r).max(1);
+
+            let saved = pos.do_null_move();
+            self.path_keys.push(pos.key());
+            let null_score = -self.negamax(
+                pos,
+                -beta,
+                Value(-beta.0 + 1),
+                reduced,
+                ply + 1,
+                false,
+                false,
+            );
+            self.path_keys.pop();
+            pos.undo_null_move(saved);
+
+            if self.aborted {
+                return Value::ZERO;
+            }
+
+            if null_score >= beta {
+                let clamped = if null_score.0 >= Value::MATE.0 - Value::MAX_PLY {
+                    beta
+                } else {
+                    null_score
+                };
+                return clamped;
+            }
+        }
+
+        // --- Main move loop ---
+        let mut picker = MovePicker::new_main(pos, tt_move, Depth(depth), self.killers[ply]);
+
+        // At the root, we want the picker's ordering (TT move, then
+        // captures, then killers/history) but only among moves the
+        // current PV slot still owns — earlier slots claimed their top
+        // moves in previous iterations and those stay fixed. Collect
+        // the set of in-bounds root moves for O(n) membership checks.
+        let allowed_root: Option<Vec<Move>> = if is_root {
+            Some(
+                self.root_moves[self.pv_idx..]
+                    .iter()
+                    .map(|rm| rm.mv)
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        let mut best_score = -Value::INFINITE;
+        let mut best_move = Move::NONE;
+        let mut move_count = 0usize;
+        let mut quiets_tried: Vec<Move> = Vec::new();
+        let mut raised_alpha = false;
+
+        loop {
+            let mv = picker.next_move(pos, Some(self.history), false);
+            if mv == Move::NONE {
+                break;
+            }
+
+            // Root MultiPV filter: skip moves claimed by earlier PV
+            // slots — they're fixed at positions [0..pv_idx].
+            if let Some(allowed) = &allowed_root {
+                if !allowed.contains(&mv) {
+                    continue;
+                }
+            }
+
+            // Legality check via do/undo. `pos.do_move` assumes pseudo-
+            // legal input; the picker guarantees that.
+            let state = pos.do_move(mv);
+            let us_was = !pos.side_to_move();
+            let our_king = pos.king_square(us_was);
+            let still_attacked =
+                (pos.attackers_to(our_king, pos.occupied()) & pos.pieces_by_color(!us_was)).any();
+            if still_attacked {
+                pos.undo_move(mv, state);
+                continue;
+            }
+
+            move_count += 1;
+            if is_root && self.verbose_progress {
+                eprintln!(
+                    "[search]   depth {depth} slot {} move #{move_count}: {}-{} ({} nodes, {} ms)",
+                    self.pv_idx,
+                    mv.from().to_algebraic(),
+                    mv.to().to_algebraic(),
+                    self.nodes,
+                    self.start_time.elapsed().as_millis(),
+                );
+            }
+            let is_capture =
+                state.captured.is_some() || mv.kind() == crate::types::MoveKind::EnPassant;
+            let gives_check = pos.in_check();
+
+            let extension = if gives_check { 1 } else { 0 };
+            let new_depth = depth - 1 + extension;
+
+            // Shallow pruning for quiet moves.
+            let pruned_quiet = !is_root
+                && !in_check
+                && !is_capture
+                && !gives_check
+                && best_score > Value::MATED_IN_MAX_PLY
+                && depth <= SHALLOW_PRUNE_MAX_DEPTH
+                && (late_move_prune(depth, move_count)
+                    || futility_prune(static_eval, alpha, depth));
+            if pruned_quiet {
+                pos.undo_move(mv, state);
+                quiets_tried.push(mv);
+                continue;
+            }
+
+            // SEE pruning on losing captures at shallow depth.
+            if !is_root && is_capture && depth <= 6 && !gives_check {
+                let margin = Value(-200 * depth);
+                pos.undo_move(mv, state);
+                if !pos.see_ge(mv, margin) {
+                    continue;
+                }
+                let _ = pos.do_move(mv);
+            }
+
+            self.path_keys.push(pos.key());
+
+            let mut score: Value;
+            let mut full_depth = true;
+
+            // --- LMR: zero-window reduced-depth search on late quiets ---
+            if depth >= LMR_MIN_DEPTH
+                && move_count > LMR_FULL_DEPTH_MOVES
+                && !is_capture
+                && !in_check
+                && !gives_check
+            {
+                let r = lmr_reduction(depth, move_count);
+                let reduced = (new_depth - r).max(1);
+
+                let reduced_score = -self.negamax(
+                    pos,
+                    Value(-alpha.0 - 1),
+                    -alpha,
+                    reduced,
+                    ply + 1,
+                    false,
+                    false,
+                );
+                full_depth = reduced_score > alpha;
+                if !full_depth {
+                    score = reduced_score;
+                } else {
+                    score = Value::NONE;
+                }
+            } else {
+                score = Value::NONE;
+            }
+
+            if full_depth && !(is_pv && move_count == 1) {
+                score = -self.negamax(
+                    pos,
+                    Value(-alpha.0 - 1),
+                    -alpha,
+                    new_depth,
+                    ply + 1,
+                    false,
+                    false,
+                );
+            }
+
+            if is_pv && (move_count == 1 || (score > alpha && (is_root || score < beta))) {
+                score = -self.negamax(pos, -beta, -alpha, new_depth, ply + 1, false, true);
+            }
+
+            self.path_keys.pop();
+            pos.undo_move(mv, state);
+
+            if self.aborted {
+                return Value::ZERO;
+            }
+
+            // Root bookkeeping: before the alpha/best_score update
+            // below, write this move's authoritative score + PV back to
+            // its slot in `root_moves`. Stockfish's rule: only store a
+            // useful score when this move is either the first examined
+            // (so it's our current best by default) or strictly
+            // improves on the pre-update alpha. Other moves are tagged
+            // with `-INFINITE` so the post-slot stable-sort pushes them
+            // below the survivors.
+            if is_root {
+                let idx = self
+                    .root_moves
+                    .iter()
+                    .position(|rm| rm.mv == mv)
+                    .expect("root move picked must exist in root_moves");
+                if move_count == 1 || score > alpha {
+                    self.root_moves[idx].score = score;
+                    let child_len = self.pv_length[ply + 1];
+                    let mut pv_out = Vec::with_capacity(1 + child_len);
+                    pv_out.push(mv);
+                    for i in 0..child_len {
+                        pv_out.push(self.pv[(ply + 1) * MAX_PLY + i]);
+                    }
+                    self.root_moves[idx].pv = pv_out;
+                } else {
+                    self.root_moves[idx].score = -Value::INFINITE;
+                }
+            }
+
+            if score > best_score {
+                best_score = score;
+                best_move = mv;
+
+                if score > alpha {
+                    alpha = score;
+                    raised_alpha = true;
+                    self.update_pv(ply, mv);
+
+                    if score >= beta {
+                        if !is_capture {
+                            if self.killers[ply][0] != mv {
+                                self.killers[ply][1] = self.killers[ply][0];
+                                self.killers[ply][0] = mv;
+                            }
+                            let bonus = history_bonus(depth);
+                            let us = pos.side_to_move();
+                            self.history.update(us, mv.from(), mv.to(), bonus);
+                            for q in &quiets_tried {
+                                self.history.update(us, q.from(), q.to(), -bonus);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if !is_capture {
+                quiets_tried.push(mv);
+            }
+        }
+
+        if move_count == 0 {
+            return if in_check {
+                Value::mated_in(ply as i32)
+            } else {
+                Value::DRAW
+            };
+        }
+
+        // Skip TT save at the root for secondary PV slots — otherwise
+        // the search for pv_idx > 0 would clobber the root's best-move
+        // entry with a deliberately-second-best pick, polluting future
+        // probes. The primary slot still writes normally.
+        let skip_tt_save = is_root && self.pv_idx > 0;
+
+        let bound = if best_score >= beta {
+            Bound::Lower
+        } else if is_pv && raised_alpha {
+            Bound::Exact
+        } else {
+            Bound::Upper
+        };
+        if skip_tt_save {
+            return best_score;
+        }
+        probe.save(
+            key,
+            value_to_tt(best_score, ply as i32),
+            is_pv,
+            bound,
+            Depth(depth),
+            best_move,
+            raw_static_eval,
+        );
+
+        best_score
+    }
+
+    // ------------------------------------------------------------------
+    // Quiescence
+    // ------------------------------------------------------------------
+
+    fn qsearch(&mut self, pos: &mut Position, mut alpha: Value, beta: Value, ply: usize) -> Value {
+        if ply >= MAX_PLY {
+            self.pv_length[ply] = 0;
+            return if pos.in_check() {
+                Value::DRAW
+            } else {
+                self.search_eval(pos)
+            };
+        }
+
+        self.pv_length[ply] = 0;
+
+        if self.check_should_stop() {
+            return Value::ZERO;
+        }
+
+        self.nodes += 1;
+
+        let in_check = pos.in_check();
+
+        let key = pos.key();
+        let probe = self.tt.probe(key);
+        let tt_hit = probe.hit;
+        let tt_move = if tt_hit { probe.data.mv } else { Move::NONE };
+        let tt_value = if tt_hit {
+            value_from_tt(probe.data.value, ply as i32)
+        } else {
+            Value::NONE
+        };
+
+        if tt_hit && tt_value != Value::NONE {
+            let usable = match probe.data.bound {
+                Bound::Exact => true,
+                Bound::Lower => tt_value >= beta,
+                Bound::Upper => tt_value <= alpha,
+                Bound::None => false,
+            };
+            if usable {
+                return tt_value;
+            }
+        }
+
+        // Qsearch doesn't save to TT, so no need to preserve a raw
+        // variant — apply contempt directly to the value we'll use.
+        let stand_pat = if in_check {
+            Value::NONE
+        } else if tt_hit && probe.data.eval != Value::NONE {
+            self.apply_contempt(probe.data.eval, pos)
+        } else {
+            self.search_eval(pos)
+        };
+
+        let mut best_score;
+        if !in_check {
+            best_score = stand_pat;
+            if best_score >= beta {
+                return best_score;
+            }
+            if best_score > alpha {
+                alpha = best_score;
+            }
+        } else {
+            best_score = -Value::INFINITE;
+        }
+
+        let depth = if in_check {
+            Depth::QS_CHECKS
+        } else {
+            Depth::QS_NO_CHECKS
+        };
+
+        let mut picker = MovePicker::new_qs(pos, tt_move, depth, None);
+        let mut move_count = 0usize;
+
+        loop {
+            let mv = picker.next_move(pos, Some(self.history), false);
+            if mv == Move::NONE {
+                break;
+            }
+
+            if !in_check && !pos.see_ge(mv, Value::ZERO) {
+                continue;
+            }
+
+            let state = pos.do_move(mv);
+            let us_was = !pos.side_to_move();
+            let our_king = pos.king_square(us_was);
+            let still_attacked =
+                (pos.attackers_to(our_king, pos.occupied()) & pos.pieces_by_color(!us_was)).any();
+            if still_attacked {
+                pos.undo_move(mv, state);
+                continue;
+            }
+
+            move_count += 1;
+            self.path_keys.push(pos.key());
+            let score = -self.qsearch(pos, -beta, -alpha, ply + 1);
+            self.path_keys.pop();
+            pos.undo_move(mv, state);
+
+            if self.aborted {
+                return Value::ZERO;
+            }
+
+            if score > best_score {
+                best_score = score;
+                if score > alpha {
+                    alpha = score;
+                    self.update_pv(ply, mv);
+                    if score >= beta {
+                        return best_score;
+                    }
+                }
+            }
+        }
+
+        if in_check && move_count == 0 {
+            return Value::mated_in(ply as i32);
+        }
+
+        best_score
+    }
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    fn update_pv(&mut self, ply: usize, mv: Move) {
+        self.pv[ply * MAX_PLY] = mv;
+        let child_len = self.pv_length[ply + 1];
+        for i in 0..child_len {
+            self.pv[ply * MAX_PLY + 1 + i] = self.pv[(ply + 1) * MAX_PLY + i];
+        }
+        self.pv_length[ply] = 1 + child_len;
+    }
+
+    /// Side-to-move-asymmetric contempt offset. Returns the adjustment
+    /// to add to a raw score (from `curr_stm`'s POV) so that, after
+    /// propagation back to the root via negamax negations, every non-
+    /// drawing evaluation is shifted by `-CONTEMPT_CP` from the root's
+    /// POV — a small preference for playing on.
+    fn contempt_for_pov(&self, curr_stm: Color) -> i32 {
+        if curr_stm == self.root_stm {
+            -CONTEMPT_CP
+        } else {
+            CONTEMPT_CP
+        }
+    }
+
+    /// Contempt-adjusted static evaluation. The raw `evaluate(pos)`
+    /// returns a position score from the side-to-move's POV; we add
+    /// the appropriate contempt so non-drawing lines are preferred
+    /// over drawing ones at the root. Leaf evaluations used in
+    /// pruning decisions should go through this, but **not** values
+    /// written into the TT — see `probe.save(..., raw_eval)` below.
+    fn search_eval(&self, pos: &Position) -> Value {
+        Value(evaluate(pos).0 + self.contempt_for_pov(pos.side_to_move()))
+    }
+
+    /// Apply contempt to a raw eval pulled from the TT. Mirrors
+    /// [`search_eval`] for already-computed values.
+    fn apply_contempt(&self, raw: Value, pos: &Position) -> Value {
+        if raw == Value::NONE {
+            raw
+        } else {
+            Value(raw.0 + self.contempt_for_pov(pos.side_to_move()))
+        }
+    }
+
+    /// Score returned for draw-by-repetition / 50-move-rule. Combines
+    /// contempt with a node-counter-based ±1 jitter (above a minimum
+    /// depth) so distinct search paths to a draw return distinct
+    /// values — alpha-beta pruning then has real differences to cut
+    /// on, instead of an everything-zero subtree.
+    fn draw_value(&self, depth: i32, pos: &Position) -> Value {
+        let contempt = self.contempt_for_pov(pos.side_to_move());
+        let jitter = if depth < DRAW_JITTER_MIN_DEPTH {
+            0
+        } else {
+            2 * (self.nodes & 1) as i32 - 1
+        };
+        Value(contempt + jitter)
+    }
+
+    fn is_repetition(&self, pos: &Position) -> bool {
+        let key = pos.key();
+        let len = self.path_keys.len();
+        if len < 2 {
+            return false;
+        }
+        // Chess repetition can only occur across reversible moves —
+        // any pawn move or capture resets the halfmove clock *and*
+        // makes it impossible for positions prior to that reset to
+        // repeat. Scan only the last `halfmove_clock()` entries of
+        // the path instead of the whole vector. This is a perf fix
+        // for pathological late-endgame searches where the full
+        // `game_history` is long (100+ plies) and most of those
+        // keys are forever unreachable — but more importantly, it
+        // shrinks the "every subtree leaf returns draw" zone that
+        // otherwise kills alpha-beta pruning in near-draw positions.
+        //
+        // `len - 1` is the current position's own key (we compare
+        // against all earlier keys, not it). We look back at most
+        // `halfmove_clock` further entries from there.
+        let hmc = pos.halfmove_clock() as usize;
+        let start = (len - 1).saturating_sub(hmc);
+        for k in &self.path_keys[start..len - 1] {
+            if *k == key {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn check_should_stop(&mut self) -> bool {
+        if self.aborted {
+            return true;
+        }
+        if self.verbose_progress && self.nodes >= self.verbose_next_tick {
+            eprintln!(
+                "[search]     tick: {} nodes, {} ms elapsed",
+                self.nodes,
+                self.start_time.elapsed().as_millis(),
+            );
+            self.verbose_next_tick = self.nodes + VERBOSE_TICK_INTERVAL;
+        }
+        if self.nodes >= self.next_stop_check {
+            self.next_stop_check = self.nodes + STOP_CHECK_INTERVAL;
+            if let Some(n) = self.max_nodes {
+                if self.nodes >= n {
+                    self.aborted = true;
+                    return true;
+                }
+            }
+            if let Some(deadline) = self.stop_time {
+                if Instant::now() >= deadline {
+                    self.aborted = true;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Walk the principal variation and capture an [`EvalTrace`] at each
+    /// ply. Returns one trace per move in `pv`: `traces[i]` is the
+    /// evaluation of the position reached after playing `pv[0..=i]`. The
+    /// leaf trace (the evaluation at the end of the PV) is the last
+    /// element. `pos` is mutated during the walk via `do_move` / undone
+    /// on the way out, so callers get the original position back.
+    ///
+    /// Used by the teaching-analysis pipeline's settled-ply detection:
+    /// the score trajectory along a PV tells the UI where the evaluation
+    /// stops meaningfully changing, which is the "aha moment" to
+    /// attribute term deltas to.
+    fn trace_along_pv(&self, pos: &mut Position, pv: &[Move]) -> Vec<EvalTrace> {
+        let mut traces = Vec::with_capacity(pv.len());
+        let mut states: Vec<StateInfo> = Vec::with_capacity(pv.len());
+        for &mv in pv {
+            states.push(pos.do_move(mv));
+            let (_, trace) = evaluate_with_trace(pos);
+            traces.push(trace);
+        }
+        for (mv, st) in pv.iter().zip(states.iter()).rev() {
+            pos.undo_move(*mv, *st);
+        }
+        traces
+    }
+}
+
+// =========================================================================
+// Settled-ply detection
+// =========================================================================
+
+/// Side-to-move at the position reached after playing `ply + 1` moves
+/// from a root where `root_stm` was to move. Exposed publicly so the
+/// teaching-analysis pipeline (CLI debug renderer, future `MoveAnalysis`
+/// assembly) can compute the same alternation without re-deriving it.
+///
+/// `ply` is a 0-indexed position in a PV: ply 0 is the position reached
+/// after the first PV move has been played (so stm has flipped once).
+pub fn stm_after_ply(root_stm: crate::types::Color, ply: usize) -> crate::types::Color {
+    if ply % 2 == 0 {
+        !root_stm
+    } else {
+        root_stm
+    }
+}
+
+/// Compute the settled-ply index for a PV's per-ply trace sequence.
+///
+/// The settled ply is the last index `i` (starting at `i = 2`) where
+/// the white-POV score differs from the score **two plies earlier** by
+/// at least [`SETTLED_THRESHOLD_CP`], or 0 if no such difference exists.
+///
+/// **Why 2 plies, not 1**: every move temporarily shifts the eval in
+/// the mover's favor — their choice is committed but the opponent
+/// hasn't responded. Adjacent plies have opposite side-to-move and
+/// show the "sawtooth" of these unanswered commitments, routinely
+/// 100–300 cp even in quiet positions. Same-side-to-move plies (2
+/// apart) represent complete exchanges, so the delta between them
+/// reflects what really changed — material swings, positional gains,
+/// etc. — not the artificial side-to-move asymmetry.
+///
+/// `root_stm` is the side to move at the PV's root; the helper walks
+/// the alternation to pick the right sign for each ply's white-POV
+/// normalization.
+fn compute_settled_ply(traces: &[EvalTrace], root_stm: crate::types::Color) -> Option<usize> {
+    if traces.is_empty() {
+        return None;
+    }
+    if traces.len() == 1 {
+        return Some(0);
+    }
+
+    let white_pov: Vec<i32> = traces
+        .iter()
+        .enumerate()
+        .map(|(i, t)| t.white_pov_value(stm_after_ply(root_stm, i)).0)
+        .collect();
+
+    for i in (2..white_pov.len()).rev() {
+        let delta = (white_pov[i] - white_pov[i - 2]).abs();
+        if delta >= SETTLED_THRESHOLD_CP {
+            return Some(i);
+        }
+    }
+    Some(0)
+}
+
+// =========================================================================
+// Tuning helpers
+// =========================================================================
+
+fn value_to_tt(v: Value, ply: i32) -> Value {
+    if v.0 >= Value::MATE.0 - Value::MAX_PLY {
+        Value(v.0 + ply)
+    } else if v.0 <= -Value::MATE.0 + Value::MAX_PLY {
+        Value(v.0 - ply)
+    } else {
+        v
+    }
+}
+
+fn value_from_tt(v: Value, ply: i32) -> Value {
+    if v == Value::NONE {
+        return Value::NONE;
+    }
+    if v.0 >= Value::MATE.0 - Value::MAX_PLY {
+        Value(v.0 - ply)
+    } else if v.0 <= -Value::MATE.0 + Value::MAX_PLY {
+        Value(v.0 + ply)
+    } else {
+        v
+    }
+}
+
+fn lmr_reduction(depth: i32, move_count: usize) -> i32 {
+    if depth <= 3 || move_count <= 4 {
+        return 0;
+    }
+    let log_d = ((depth as u32).checked_ilog2().unwrap_or(0)) as i32;
+    let log_mc = ((move_count as u32).checked_ilog2().unwrap_or(0)) as i32;
+    (log_d * log_mc / 2).max(1)
+}
+
+fn late_move_prune(depth: i32, move_count: usize) -> bool {
+    let threshold = (3 + depth * depth) as usize;
+    move_count > threshold
+}
+
+fn futility_prune(static_eval: Value, alpha: Value, depth: i32) -> bool {
+    if static_eval == Value::NONE {
+        return false;
+    }
+    let margin = 150 * depth;
+    static_eval.0 + margin <= alpha.0
+}
+
+fn history_bonus(depth: i32) -> i32 {
+    let raw = depth * depth + 2 * depth - 2;
+    raw.clamp(0, BUTTERFLY_HISTORY_BOUND)
+}
+
+// =========================================================================
+// Tests
+// =========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::Engine;
+    use crate::types::Square;
+
+    fn search_to_depth(pos: &mut Position, depth: u32) -> SearchLine {
+        let mut engine = Engine::new(1);
+        let params = SearchParams {
+            max_depth: depth,
+            ..Default::default()
+        };
+        let mut lines = engine.search(pos, params);
+        assert!(!lines.is_empty(), "search returned no lines");
+        lines.remove(0)
+    }
+
+    #[test]
+    fn search_returns_a_legal_root_move() {
+        let mut pos = Position::startpos();
+        let line = search_to_depth(&mut pos, 2);
+        assert!(!line.pv.is_empty());
+        let first = line.pv[0];
+        let legal = crate::movegen::pseudo_legal_moves_vec(&pos);
+        assert!(legal.contains(&first));
+    }
+
+    #[test]
+    fn search_finds_mate_in_one() {
+        // Classic K+Q mate: white K f6, Q g6, black K h8. White plays
+        // Qg7#. The queen is supported by the white king, so black can't
+        // capture; g8 and h7 are both covered by the queen.
+        let mut pos = Position::from_fen("7k/8/5KQ1/8/8/8/8/8 w - - 0 1").unwrap();
+        let line = search_to_depth(&mut pos, 3);
+        assert_eq!(line.pv[0], Move::normal(Square::G6, Square::G7));
+        assert!(
+            line.score.0 >= Value::MATE.0 - Value::MAX_PLY,
+            "expected mate score, got {}",
+            line.score.0
+        );
+    }
+
+    #[test]
+    fn search_drives_home_kxk_endgame() {
+        // White K + Q vs lone black king on the edge. With the KXK
+        // evaluator in place, search should find *some* progress-making
+        // move rather than shuffling. Specifically: the engine's score
+        // should exceed plain queen value at even a modest depth,
+        // because PushToEdges / PushClose add ~100–200 on top.
+        let mut pos = Position::from_fen("7k/8/5KQ1/8/8/8/8/8 w - - 0 1").unwrap();
+        let line = search_to_depth(&mut pos, 4);
+        assert!(!line.pv.is_empty());
+        assert!(
+            line.score.0 > Value::QUEEN_MG.0,
+            "KXK endgame should score above raw queen value; got {}",
+            line.score.0
+        );
+    }
+
+    #[test]
+    fn search_completes_depth_six_from_startpos() {
+        // End-to-end smoke test: the full pruning stack must survive a
+        // real opening position at a non-trivial depth. Doesn't assert
+        // the best move (that's tuning-sensitive) — just that we get a
+        // non-empty PV and a sane score.
+        let mut pos = Position::startpos();
+        let line = search_to_depth(&mut pos, 6);
+        assert!(!line.pv.is_empty());
+        assert!(
+            line.score.0.abs() < Value::MATE.0 - Value::MAX_PLY,
+            "opening eval should not be a mate score, got {}",
+            line.score.0
+        );
+        assert_eq!(line.depth, 6);
+    }
+
+    #[test]
+    fn search_line_leaf_trace_matches_pv_leaf_static_eval() {
+        // After the per-ply refactor, the leaf trace is
+        // `ply_traces.last()`. It must still equal a fresh
+        // `evaluate_with_trace` at the PV's final position.
+        let mut pos = Position::startpos();
+        let line = search_to_depth(&mut pos, 3);
+        let mut replay = pos.clone();
+        let mut states: Vec<StateInfo> = Vec::with_capacity(line.pv.len());
+        for mv in &line.pv {
+            states.push(replay.do_move(*mv));
+        }
+        let (_, trace) = evaluate_with_trace(&replay);
+        assert_eq!(
+            line.ply_traces.last().unwrap(),
+            &trace,
+            "leaf trace must match a fresh evaluate_with_trace at the PV end"
+        );
+    }
+
+    #[test]
+    fn value_to_from_tt_roundtrip_preserves_non_mate_values() {
+        let v = Value(42);
+        assert_eq!(value_from_tt(value_to_tt(v, 5), 5), v);
+    }
+
+    #[test]
+    fn value_to_from_tt_handles_mate_values() {
+        let v = Value::mate_in(3);
+        assert_eq!(value_from_tt(value_to_tt(v, 3), 3), v);
+    }
+
+    #[test]
+    fn lmr_reduction_is_zero_at_shallow_depth() {
+        assert_eq!(lmr_reduction(2, 10), 0);
+        assert_eq!(lmr_reduction(5, 4), 0);
+    }
+
+    #[test]
+    fn lmr_reduction_grows_with_depth_and_count() {
+        let r_small = lmr_reduction(4, 5);
+        let r_big = lmr_reduction(10, 20);
+        assert!(r_big >= r_small);
+    }
+
+    #[test]
+    fn history_bonus_respects_butterfly_bound() {
+        for d in 1..=20 {
+            let b = history_bonus(d);
+            assert!((0..=BUTTERFLY_HISTORY_BOUND).contains(&b));
+        }
+    }
+
+    #[test]
+    fn recursion_bails_at_max_ply_without_panicking() {
+        // Regression: `pv_length` was sized MAX_PLY and indexed at `ply`
+        // before any bail check, and `negamax` had no ply-cap at all.
+        // A check-rich position that fed check extensions past MAX_PLY
+        // recursion levels crashed with "index out of bounds".
+        let tt = TranspositionTable::new(1);
+        let mut history = crate::movepick::ButterflyHistory::new();
+        let mut search = Search::new(&tt, &mut history);
+        let mut pos = Position::startpos();
+
+        // Both entry points must survive being called at the cap.
+        let _ = search.qsearch(&mut pos, -Value::INFINITE, Value::INFINITE, MAX_PLY);
+        let _ = search.negamax(
+            &mut pos,
+            -Value::INFINITE,
+            Value::INFINITE,
+            1,
+            MAX_PLY,
+            false,
+            false,
+        );
+        // Parent read path: child at MAX_PLY must leave pv_length[MAX_PLY]
+        // = 0 so a parent calling update_pv sees an empty child PV.
+        assert_eq!(search.pv_length[MAX_PLY], 0);
+    }
+
+    #[test]
+    fn is_repetition_detects_matches_against_seeded_path_keys() {
+        // Direct test of the detection logic: the repetition check
+        // compares the current position's key against entries in
+        // `path_keys` within the `halfmove_clock` window (positions
+        // before the last pawn move / capture can't physically
+        // repeat). Seeding `path_keys` with real game history (as
+        // `SearchParams::game_history` will do) must make in-tree
+        // positions that match that history fire as draws.
+        //
+        // Using a FEN with halfmove_clock=4 so the scan window
+        // actually covers the 2-entry gap between seeded repetitions
+        // below. The bit-layout is identical to startpos (the key
+        // matches) but the clock honestly reflects "four reversible
+        // plies have preceded this position."
+        let tt = TranspositionTable::new(1);
+        let mut history = crate::movepick::ButterflyHistory::new();
+        let mut search = Search::new(&tt, &mut history);
+        let pos =
+            Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 4 3").unwrap();
+
+        // Earlier key unrelated to `pos` → not a repetition.
+        search.path_keys.clear();
+        search.path_keys.push(0xDEAD_BEEF);
+        search.path_keys.push(pos.key());
+        assert!(!search.is_repetition(&pos));
+
+        // Earlier key equal to `pos.key()` → repetition.
+        search.path_keys.clear();
+        search.path_keys.push(pos.key());
+        search.path_keys.push(0xABCD);
+        search.path_keys.push(pos.key());
+        assert!(search.is_repetition(&pos));
+    }
+
+    #[test]
+    fn search_scores_known_repetition_as_draw() {
+        // End-to-end: construct a game history where the current
+        // position appears twice already (1st in game start, 2nd as the
+        // search root). Any move that returns the position to an
+        // earlier key is a 3rd occurrence — strictly a draw. With the
+        // history seeded, moves in the engine's PV that would cycle
+        // back must score as 0 cp.
+        //
+        // Concrete setup: at the startpos, play Nf3 Nf6 Ng1 Ng8 — four
+        // moves that return both sides to the initial position. Feed
+        // the engine the keys of every intermediate position as
+        // `game_history`, then search. Replaying the knight cycle
+        // would detect each of those keys mid-tree and return DRAW.
+        // The engine must prefer a non-cycling move (e.g. d4 / e4 /
+        // c4), so the score is strictly positive (tempo + whatever the
+        // engine normally finds for white).
+        let mut pos = Position::startpos();
+        let k0 = pos.key();
+        pos.do_move(Move::normal(Square::G1, Square::F3));
+        let k1 = pos.key();
+        pos.do_move(Move::normal(Square::G8, Square::F6));
+        let k2 = pos.key();
+        pos.do_move(Move::normal(Square::F3, Square::G1));
+        let k3 = pos.key();
+        pos.do_move(Move::normal(Square::F6, Square::G8));
+        // After the cycle we're back at the startpos bit-layout, but
+        // `halfmove_clock == 4` now — exactly what the bounded
+        // repetition scan needs to see the seeded history. (Undoing
+        // back to startpos here would reset hmc to 0 and the scan
+        // would never look far enough back to find the repeats.)
+        assert_eq!(pos.key(), k0);
+        assert_eq!(pos.halfmove_clock(), 4);
+
+        let game_history = vec![k0, k1, k2, k3];
+
+        let mut engine = Engine::new(1);
+        let lines = engine.search(
+            &mut pos,
+            SearchParams {
+                max_depth: 4,
+                game_history,
+                ..Default::default()
+            },
+        );
+        let line = lines.into_iter().next().expect("search returned no lines");
+        // Top move must not be Nf3 — that immediately lands on `k1`
+        // which is in game history (→ draw by repetition).
+        assert_ne!(
+            line.pv[0],
+            Move::normal(Square::G1, Square::F3),
+            "engine should avoid Nf3 when game history makes it a repetition draw"
+        );
+        // And the score should be positive — the engine found a non-
+        // drawing continuation.
+        assert!(
+            line.score.0 > 0,
+            "expected a positive score with a non-repeating continuation, got {}",
+            line.score.0
+        );
+    }
+
+    // ---- MultiPV ----------------------------------------------------
+
+    fn multi_pv_search(pos: &mut Position, depth: u32, multi_pv: usize) -> Vec<SearchLine> {
+        let mut engine = Engine::new(1);
+        engine.search(
+            pos,
+            SearchParams {
+                max_depth: depth,
+                multi_pv,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn multi_pv_returns_requested_number_of_lines_from_startpos() {
+        // 20 legal moves at the start; asking for 3 must return 3.
+        let mut pos = Position::startpos();
+        let lines = multi_pv_search(&mut pos, 4, 3);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn multi_pv_lines_are_sorted_by_score_descending() {
+        let mut pos = Position::startpos();
+        let lines = multi_pv_search(&mut pos, 4, 5);
+        assert_eq!(lines.len(), 5);
+        for pair in lines.windows(2) {
+            assert!(
+                pair[0].score >= pair[1].score,
+                "MultiPV must be sorted desc: {:?} then {:?}",
+                pair[0].score,
+                pair[1].score
+            );
+        }
+    }
+
+    #[test]
+    fn multi_pv_first_moves_are_distinct() {
+        // Every PV slot is claimed by a distinct root move — no slot
+        // ever duplicates another's first move.
+        let mut pos = Position::startpos();
+        let lines = multi_pv_search(&mut pos, 4, 5);
+        let firsts: Vec<Move> = lines.iter().map(|l| l.pv[0]).collect();
+        for i in 0..firsts.len() {
+            for j in (i + 1)..firsts.len() {
+                assert_ne!(
+                    firsts[i],
+                    firsts[j],
+                    "PVs #{} and #{} share first move {:?}",
+                    i + 1,
+                    j + 1,
+                    firsts[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multi_pv_clamps_to_legal_move_count() {
+        // King + king + queen endgame — very few legal moves for black.
+        // White played Qg7+, black's king on h8 is in check. Let's use
+        // a position where there are just 2 legal replies but we ask
+        // for 10.
+        let mut pos = Position::from_fen("7k/6Q1/5K2/8/8/8/8/8 b - - 0 1").unwrap();
+        // Black's king can step to g8 (attacked by K) — actually let's
+        // not overthink: use a slightly-more-constrained position.
+        let legal_count = crate::movegen::legal_moves_vec(&mut pos).len();
+        let lines = multi_pv_search(&mut pos, 3, 10);
+        assert_eq!(
+            lines.len(),
+            legal_count,
+            "MultiPV should clamp to legal-move count ({} legal moves)",
+            legal_count
+        );
+    }
+
+    #[test]
+    fn multi_pv_returns_empty_on_terminal_position() {
+        // Fool's-mate-style position: black king checkmated, it's
+        // black to move, no legal moves. Return empty.
+        //
+        // Position: white queen on g7 (protected by Kg6), black king h8.
+        // Actually simpler: known checkmate FEN.
+        let mut pos = Position::from_fen("7k/5KQ1/8/8/8/8/8/8 b - - 0 1").unwrap();
+        let legal = crate::movegen::legal_moves_vec(&mut pos);
+        assert!(
+            legal.is_empty(),
+            "precondition: test FEN must be a terminal position"
+        );
+        let lines = multi_pv_search(&mut pos, 3, 5);
+        assert!(lines.is_empty(), "terminal position should yield 0 PVs");
+    }
+
+    #[test]
+    fn multi_pv_first_line_matches_single_pv_first_line() {
+        // Whether the caller asked for 1 PV or 5, the leading line
+        // should agree on the best move (a reasonable property: our
+        // MultiPV loop's pv_idx=0 searches exactly the same move space
+        // as a multi_pv=1 run).
+        let mut pos = Position::startpos();
+        let single = multi_pv_search(&mut pos, 4, 1);
+        let multi = multi_pv_search(&mut pos, 4, 5);
+        assert!(!single.is_empty());
+        assert!(!multi.is_empty());
+        assert_eq!(
+            single[0].pv[0], multi[0].pv[0],
+            "MultiPV slot 0's first move must match single-PV"
+        );
+    }
+
+    #[test]
+    fn multi_pv_one_is_backwards_compatible_with_pre_refactor() {
+        // Historical contract: multi_pv=1 returns exactly one line for
+        // a non-terminal position, and its shape (non-empty PV,
+        // non-mate score at a shallow depth) matches what the old
+        // single-PV path returned.
+        let mut pos = Position::startpos();
+        let lines = multi_pv_search(&mut pos, 4, 1);
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        assert!(!line.pv.is_empty());
+        assert!(
+            line.score.0.abs() < Value::MATE.0 - Value::MAX_PLY,
+            "opening eval shouldn't be mate, got {}",
+            line.score.0
+        );
+    }
+
+    // ---- Per-ply traces + settled-ply ----------------------------------
+
+    #[test]
+    fn ply_traces_length_matches_pv_length() {
+        let mut pos = Position::startpos();
+        let line = search_to_depth(&mut pos, 4);
+        assert!(!line.pv.is_empty());
+        assert_eq!(
+            line.ply_traces.len(),
+            line.pv.len(),
+            "ply_traces must have exactly one entry per PV move"
+        );
+    }
+
+    #[test]
+    fn ply_traces_agree_with_replay_at_each_index() {
+        // For each index i, ply_traces[i] must match a fresh
+        // evaluate_with_trace at the position reached by replaying
+        // pv[0..=i]. Catches off-by-one errors in the walk.
+        let mut pos = Position::startpos();
+        let line = search_to_depth(&mut pos, 3);
+        let mut replay = pos.clone();
+        for (i, mv) in line.pv.iter().enumerate() {
+            replay.do_move(*mv);
+            let (_, expected) = evaluate_with_trace(&replay);
+            assert_eq!(
+                line.ply_traces[i], expected,
+                "ply_traces[{}] must match a fresh evaluate_with_trace at that ply",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn settled_ply_none_on_terminal_position() {
+        // Checkmate from black's side: no legal moves, so no PV, so no
+        // settled-ply to report.
+        let mut pos = Position::from_fen("7k/5KQ1/8/8/8/8/8/8 b - - 0 1").unwrap();
+        let lines = multi_pv_search(&mut pos, 3, 1);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn settled_ply_zero_when_single_move_pv() {
+        // Constructed scenario: if the PV has length 1, there's no
+        // adjacent delta to evaluate, so settled_ply == 0 trivially.
+        // Direct unit-level check of the helper.
+        use crate::types::Color;
+        let trace = EvalTrace::zero();
+        let result = compute_settled_ply(&[trace], Color::White);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn settled_ply_none_when_no_traces() {
+        use crate::types::Color;
+        let result = compute_settled_ply(&[], Color::White);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn settled_ply_zero_when_every_delta_below_threshold() {
+        // Hand-constructed trace sequence where the white-POV score
+        // barely moves. Must settle at 0 regardless of length.
+        use crate::types::{Color, Value};
+        let mut traces = Vec::new();
+        for i in 0..6 {
+            let mut t = EvalTrace::zero();
+            // Alternate sign on final_value per ply to mimic
+            // side-to-move oscillation. With i % 2 == 0 meaning stm is
+            // black, the white-POV converts to -t.final_value + tempo.
+            // We want a stable white-POV of ~+5, so:
+            //   - even i (black-to-move): final_value = -(5 - TEMPO) = TEMPO - 5.
+            //   - odd  i (white-to-move): final_value = 5 + TEMPO.
+            let tempo = t.tempo.0;
+            let fv = if i % 2 == 0 { tempo - 5 } else { 5 + tempo };
+            t.final_value = Value(fv);
+            traces.push(t);
+        }
+        assert_eq!(compute_settled_ply(&traces, Color::White), Some(0));
+    }
+
+    /// Build a trace sequence with the given white-POV targets for
+    /// each ply, assuming `root_stm == White` (so the stm-after-ply
+    /// pattern is Black, White, Black, ...).
+    fn traces_from_white_pov(targets_white_pov: &[i32]) -> Vec<EvalTrace> {
+        use crate::types::Value;
+        let tempo = EvalTrace::zero().tempo.0;
+        targets_white_pov
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| {
+                let mut t = EvalTrace::zero();
+                // Even i → stm is black (root is White, flipped once).
+                // White-POV w means stm_unsigned = -w, and final_value
+                // = stm_unsigned + tempo = -w + tempo.
+                // Odd i → stm is white. final_value = w + tempo.
+                let fv = if i % 2 == 0 { -w + tempo } else { w + tempo };
+                t.final_value = Value(fv);
+                t
+            })
+            .collect()
+    }
+
+    #[test]
+    fn settled_ply_filters_the_single_ply_sawtooth() {
+        // A canonical sawtooth: alternating 20/300 white-POV values
+        // with every 1-ply delta huge (280 cp) but every 2-ply delta
+        // exactly zero. Must settle at 0 — the eval is actually stable
+        // across complete exchanges, the 1-ply swings are just the
+        // "I moved but you haven't responded yet" asymmetry.
+        use crate::types::Color;
+        let traces = traces_from_white_pov(&[20, 300, 20, 300, 20, 300]);
+        assert_eq!(compute_settled_ply(&traces, Color::White), Some(0));
+    }
+
+    #[test]
+    fn settled_ply_detects_two_ply_shift_on_top_of_sawtooth() {
+        // Same sawtooth as above for the first four plies, then a
+        // 180-cp lift: ply 4 = 200 (same side as ply 2 = 20, diff
+        // 180), ply 5 = 480 (same side as ply 3 = 300, diff 180).
+        // Under 2-ply comparison both plies 4 and 5 show big deltas
+        // against their same-side predecessor; scanning backward
+        // finds the last one at ply 5.
+        use crate::types::Color;
+        let traces = traces_from_white_pov(&[20, 300, 20, 300, 200, 480]);
+        assert_eq!(compute_settled_ply(&traces, Color::White), Some(5));
+    }
+
+    #[test]
+    fn settled_ply_reports_zero_on_short_pv_below_two_plies() {
+        // A 2-ply trace sequence cannot use the 2-ply comparison
+        // (there's no index >= 2). Settles trivially at 0.
+        use crate::types::Color;
+        let traces = traces_from_white_pov(&[0, 100]);
+        assert_eq!(compute_settled_ply(&traces, Color::White), Some(0));
+    }
+
+    #[test]
+    fn settled_ply_on_live_search_is_within_bounds() {
+        // End-to-end: on a real search, settled_ply must be a valid
+        // index into ply_traces (if Some) or None for an empty PV.
+        let mut pos = Position::startpos();
+        let lines = multi_pv_search(&mut pos, 4, 2);
+        for line in &lines {
+            match line.settled_ply {
+                Some(i) => assert!(
+                    i < line.ply_traces.len(),
+                    "settled_ply {} out of bounds (ply_traces len {})",
+                    i,
+                    line.ply_traces.len()
+                ),
+                None => assert!(line.pv.is_empty()),
+            }
+        }
+    }
+
+    // ---- force_include ------------------------------------------------
+
+    /// Helper: run a search with forced moves and return the resulting lines.
+    fn search_with_forced(
+        pos: &mut Position,
+        depth: u32,
+        multi_pv: usize,
+        forced: Vec<Move>,
+    ) -> Vec<SearchLine> {
+        let mut engine = Engine::new(1);
+        engine.search(
+            pos,
+            SearchParams {
+                max_depth: depth,
+                multi_pv,
+                force_include: forced,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Find a legal move that the search definitely won't pick in the
+    /// top-k at a given depth. We take the last legal move in the
+    /// generated order — from startpos, that's typically a rook or
+    /// knight retreat that can't possibly be best.
+    fn pick_uninteresting_move(pos: &mut Position) -> Move {
+        let legal = crate::movegen::legal_moves_vec(pos);
+        *legal.last().expect("startpos must have legal moves")
+    }
+
+    #[test]
+    fn force_include_empty_matches_plain_multi_pv() {
+        // Empty force_include vector must be a no-op.
+        let mut pos = Position::startpos();
+        let plain = multi_pv_search(&mut pos, 4, 3);
+        let forced = search_with_forced(&mut pos, 4, 3, Vec::new());
+        assert_eq!(plain.len(), forced.len());
+        for (p, f) in plain.iter().zip(forced.iter()) {
+            assert_eq!(p.pv[0], f.pv[0], "first-move ordering must match");
+        }
+    }
+
+    #[test]
+    fn force_include_adds_out_of_top_k_move() {
+        // Take a startpos move that will not naturally appear in top-3
+        // (the last-generated legal move, usually a knight moving to a
+        // passive square) and force it into the output.
+        let mut pos = Position::startpos();
+        let victim = pick_uninteresting_move(&mut pos);
+
+        let plain = multi_pv_search(&mut pos, 4, 3);
+        let natural_first_moves: Vec<Move> = plain.iter().map(|l| l.pv[0]).collect();
+        assert!(
+            !natural_first_moves.contains(&victim),
+            "test setup: victim must NOT naturally be in top-3; \
+             if this fires, pick a different victim"
+        );
+
+        let forced = search_with_forced(&mut pos, 4, 3, vec![victim]);
+        let forced_first_moves: Vec<Move> = forced.iter().map(|l| l.pv[0]).collect();
+        assert!(
+            forced_first_moves.contains(&victim),
+            "forced move must appear in output; got {:?}",
+            forced_first_moves
+        );
+    }
+
+    #[test]
+    fn force_include_forced_slot_has_valid_score_and_pv() {
+        // The forced slot must produce a real score (not -INFINITE) and
+        // a PV of length > 1 at depth >= 2 — i.e. the search actually
+        // ran, didn't just stub out a one-move PV.
+        let mut pos = Position::startpos();
+        let victim = pick_uninteresting_move(&mut pos);
+
+        let forced = search_with_forced(&mut pos, 3, 1, vec![victim]);
+        let slot = forced
+            .iter()
+            .find(|l| l.pv[0] == victim)
+            .expect("forced move must appear");
+        assert_ne!(
+            slot.score,
+            -Value::INFINITE,
+            "forced slot must have real score"
+        );
+        assert!(slot.pv.len() > 1, "forced PV must extend past ply 1");
+        assert_eq!(
+            slot.ply_traces.len(),
+            slot.pv.len(),
+            "forced slot's ply_traces must align with its PV length"
+        );
+    }
+
+    #[test]
+    fn force_include_skips_move_already_in_top_k() {
+        // Forcing the natural best move should be a no-op — the output
+        // shouldn't have a duplicate of the best move.
+        let mut pos = Position::startpos();
+        let plain = multi_pv_search(&mut pos, 3, 2);
+        let natural_best = plain[0].pv[0];
+
+        let forced = search_with_forced(&mut pos, 3, 2, vec![natural_best]);
+        let duplicates = forced.iter().filter(|l| l.pv[0] == natural_best).count();
+        assert_eq!(duplicates, 1, "natural best must appear exactly once");
+        assert_eq!(forced.len(), plain.len(), "output size must not grow");
+    }
+
+    #[test]
+    fn force_include_ignores_illegal_moves_silently() {
+        // A move that isn't legal at the root (e.g. Move::NONE, or a
+        // fabricated move from a wrong-color piece) must be silently
+        // dropped — not crash, not return anything extra.
+        let mut pos = Position::startpos();
+        let plain = multi_pv_search(&mut pos, 3, 2);
+        let forced = search_with_forced(&mut pos, 3, 2, vec![Move::NONE]);
+        assert_eq!(forced.len(), plain.len());
+    }
+
+    #[test]
+    fn force_include_deduplicates_within_its_list() {
+        // The same forced move listed twice should still produce only
+        // one extra output row.
+        let mut pos = Position::startpos();
+        let victim = pick_uninteresting_move(&mut pos);
+        let forced = search_with_forced(&mut pos, 3, 2, vec![victim, victim, victim]);
+        let victim_count = forced.iter().filter(|l| l.pv[0] == victim).count();
+        assert_eq!(
+            victim_count, 1,
+            "duplicate forced moves must dedup to one slot"
+        );
+    }
+
+    #[test]
+    fn force_include_multiple_distinct_moves_all_appear() {
+        // Force in two distinct out-of-top-k moves; both must show.
+        let mut pos = Position::startpos();
+        let legal = crate::movegen::legal_moves_vec(&mut pos);
+        // Take two tail moves that we expect to be out of top-1.
+        let v1 = legal[legal.len() - 1];
+        let v2 = legal[legal.len() - 2];
+
+        let forced = search_with_forced(&mut pos, 3, 1, vec![v1, v2]);
+        let first_moves: Vec<Move> = forced.iter().map(|l| l.pv[0]).collect();
+        assert!(
+            first_moves.contains(&v1),
+            "v1 must appear: {:?}",
+            first_moves
+        );
+        assert!(
+            first_moves.contains(&v2),
+            "v2 must appear: {:?}",
+            first_moves
+        );
+    }
+
+    #[test]
+    fn force_include_output_is_sorted_by_score_descending() {
+        // After the final sort, the whole output (natural + forced)
+        // should be monotonically non-increasing in score.
+        let mut pos = Position::startpos();
+        let victim = pick_uninteresting_move(&mut pos);
+        let forced = search_with_forced(&mut pos, 4, 3, vec![victim]);
+        for pair in forced.windows(2) {
+            assert!(
+                pair[0].score.0 >= pair[1].score.0,
+                "output must be sorted descending by score; got {} then {}",
+                pair[0].score.0,
+                pair[1].score.0,
+            );
+        }
+    }
+
+    #[test]
+    fn force_include_preserves_natural_top_k() {
+        // Forcing an extra move must not change which moves appear in
+        // the natural top-k. (They may be reordered by the final sort,
+        // but the SET of moves covering the natural top positions
+        // plus the forced move should equal natural top-k ∪ {forced}.)
+        let mut pos = Position::startpos();
+        let victim = pick_uninteresting_move(&mut pos);
+        let plain = multi_pv_search(&mut pos, 4, 2);
+        let plain_moves: std::collections::HashSet<Move> = plain.iter().map(|l| l.pv[0]).collect();
+
+        let forced = search_with_forced(&mut pos, 4, 2, vec![victim]);
+        let forced_moves: std::collections::HashSet<Move> =
+            forced.iter().map(|l| l.pv[0]).collect();
+
+        // Everything natural is preserved; plus the victim is now in.
+        for m in &plain_moves {
+            assert!(
+                forced_moves.contains(m),
+                "natural move disappeared after force_include"
+            );
+        }
+        assert!(forced_moves.contains(&victim));
+    }
+}

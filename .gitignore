@@ -1,0 +1,19 @@
+# Rust build artifacts (release/debug binaries, profiling profile,
+# magic-bitboard tables, etc.)
+core/target/
+
+# The Stockfish 11 source archive — its contents are already
+# extracted under `reference/Stockfish-sf_11/`, so committing the
+# zip too would just bloat the history.
+Stockfish-sf_11.zip
+
+# Local Claude Code settings (per-machine permissions, hooks); the
+# committed CLAUDE.md is the project-wide guidance and lives at the
+# repo root.
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
