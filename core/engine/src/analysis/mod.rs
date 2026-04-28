@@ -42,6 +42,7 @@
 
 pub mod blocked_center_outcome;
 pub mod castling_outcome;
+pub mod initiative_outcome;
 pub mod king_safety_outcome;
 pub mod material_outcome;
 pub mod mobility_outcome;
@@ -80,6 +81,7 @@ fn post_user_move(
 // callers should use `chess_tutor_engine::analysis::Foo` everywhere.
 pub use blocked_center_outcome::{compute_blocked_center_outcome, BlockedCenterOutcome};
 pub use castling_outcome::{compute_castling_outcome, CastlingOutcome};
+pub use initiative_outcome::{compute_initiative_outcome, InitiativeOutcome};
 pub use king_safety_outcome::{compute_king_safety_outcome, KingSafetyOutcome, KingSafetySnapshot};
 pub use material_outcome::{compute_material_outcome, CaptureEvent, MaterialOutcome};
 pub use mobility_outcome::{compute_mobility_outcome, MobilityOutcome};

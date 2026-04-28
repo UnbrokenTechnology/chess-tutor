@@ -269,6 +269,45 @@ impl<'a> Evaluator<'a> {
 // Trace: per-term breakdown surfaced to callers for teaching UI
 // =========================================================================
 
+/// Decomposed material score: raw piece values (the part that changes
+/// only on captures / promotions) and the piece-square-table
+/// positional bonus (the part that changes on every piece move).
+/// Stockfish's PSQT tables bake both into one number per
+/// piece+square; the teaching layer wants them as separate signals so
+/// "you lost a pawn" doesn't get attributed to a non-capture move
+/// that happened to land on a slightly worse PSQ square.
+///
+/// Both fields are already `white - black` net. `total()` returns
+/// the aggregate, equal to `pos.psq_score()`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MaterialBreakdown {
+    /// Sum of raw piece values: `Σ count(pt) × piece_value(pt)` over
+    /// `pt ∈ {Pawn, Knight, Bishop, Rook, Queen}`, white minus
+    /// black. Kings have no piece value. Changes only on captures
+    /// and promotions.
+    pub piece_value: Score,
+    /// PSQT positional bonus: `psq_score - piece_value`. Captures the
+    /// piece-square table's positional contribution (knight on c3 vs
+    /// knight on a1 etc.), independent of piece counts. Changes on
+    /// every piece move.
+    pub psq_positional: Score,
+}
+
+impl MaterialBreakdown {
+    pub const fn zero() -> MaterialBreakdown {
+        MaterialBreakdown {
+            piece_value: Score::ZERO,
+            psq_positional: Score::ZERO,
+        }
+    }
+
+    /// Aggregate matching `pos.psq_score()` — the pre-split
+    /// `EvalTrace::material` value.
+    pub fn total(&self) -> Score {
+        self.piece_value + self.psq_positional
+    }
+}
+
 /// Per-term breakdown of a classical evaluation, captured by
 /// [`evaluate_with_trace`]. The teaching layer diffs these between
 /// before-move and after-move positions to show the student which
@@ -277,8 +316,7 @@ impl<'a> Evaluator<'a> {
 /// Terms are recorded as raw [`Score`] values (packed mg + eg, both
 /// 16-bit). Per-colour terms store white's raw score at index 0 and
 /// black's at index 1; the final net contribution is `white - black`.
-/// Single-field terms (`material`, `imbalance`, `initiative`) are
-/// already net.
+/// Single-field terms (`imbalance`, `initiative`) are already net.
 ///
 /// The `pawns` and `pieces` fields are granular per-sub-term breakdowns
 /// — each carries the named chess concepts (isolated pawn, knight
@@ -286,10 +324,16 @@ impl<'a> Evaluator<'a> {
 /// changes to. Call `.total()` on either to recover the legacy aggregate.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct EvalTrace {
-    /// Incrementally-maintained PSQT score — material values plus
-    /// piece-square-table positional bonus, summed over every piece on
-    /// the board. Already `white - black`.
-    pub material: Score,
+    /// Material score split into the two distinct chess concepts the
+    /// PSQT tables conflate: raw piece values (changes only on
+    /// captures and promotions — colloquial "material") and the
+    /// positional piece-square bonus (changes on every piece move).
+    /// Stockfish lumps these into one PSQ table per piece+square, but
+    /// for teaching narration the split lets a "Material" narrator
+    /// fire on captures while quiet PSQ shifts surface separately.
+    /// Use [`MaterialBreakdown::total`] for the aggregate matching
+    /// `pos.psq_score()`.
+    pub material: MaterialBreakdown,
     /// Non-linear material-imbalance polynomial. Already `white - black`.
     pub imbalance: Score,
     /// Granular per-sub-term pawn-structure breakdown per colour:
@@ -347,7 +391,7 @@ impl EvalTrace {
     /// An all-zero trace, suitable as a before-build scratchpad.
     pub const fn zero() -> EvalTrace {
         EvalTrace {
-            material: Score::ZERO,
+            material: MaterialBreakdown::zero(),
             imbalance: Score::ZERO,
             pawns: [PawnsBreakdown::zero(); 2],
             pieces: [PiecesBreakdown::zero(); 2],
@@ -448,6 +492,32 @@ pub fn evaluate_with_trace(pos: &Position) -> (Value, EvalTrace) {
     (v, trace)
 }
 
+/// `Σ count(pt) × piece_value(pt)` over `pt ∈ {Pawn, Knight, Bishop,
+/// Rook, Queen}`, white minus black, expressed as a packed
+/// (mg, eg) [`Score`]. Kings have no piece value. This is the part
+/// of `pos.psq_score()` that depends only on piece counts —
+/// subtracting it from the PSQT total leaves the pure positional
+/// PSQT contribution.
+fn piece_value_balance(pos: &Position) -> Score {
+    let mut mg = 0i32;
+    let mut eg = 0i32;
+    for pt in [
+        PieceType::Pawn,
+        PieceType::Knight,
+        PieceType::Bishop,
+        PieceType::Rook,
+        PieceType::Queen,
+    ] {
+        let net = pos.count(Color::White, pt) as i32 - pos.count(Color::Black, pt) as i32;
+        if net == 0 {
+            continue;
+        }
+        mg += Value::mg_of_piece(pt).0 * net;
+        eg += Value::eg_of_piece(pt).0 * net;
+    }
+    Score::new(mg, eg)
+}
+
 fn evaluate_inner(pos: &Position, mut trace: Option<&mut EvalTrace>) -> Value {
     let mut e = Evaluator::new(pos);
 
@@ -525,7 +595,16 @@ fn evaluate_inner(pos: &Position, mut trace: Option<&mut EvalTrace>) -> Value {
     let final_value = Value(stm_signed) + TEMPO;
 
     if let Some(t) = trace.as_mut() {
-        t.material = material;
+        // Split `material` (= pos.psq_score()) into raw piece values
+        // and the PSQT positional bonus. Cheap: 5 popcount lookups
+        // per colour. piece_value changes only on captures, so a
+        // teaching narrator can attribute "you lost material" only
+        // to actual captures rather than to PSQ-shift artifacts.
+        let piece_value = piece_value_balance(pos);
+        t.material = MaterialBreakdown {
+            piece_value,
+            psq_positional: material - piece_value,
+        };
         t.imbalance = imbalance;
         t.pawns = e.pawns.breakdowns;
         t.pieces = [white_pieces, black_pieces];
@@ -716,12 +795,15 @@ mod tests {
 
     #[test]
     fn trace_material_captures_psq_score() {
-        // `trace.material` is the PSQT score (material + positional),
-        // pre-taper. For startpos this is exactly zero by symmetry.
+        // `trace.material.total()` is the PSQT score (material +
+        // positional), pre-taper. For startpos this is exactly zero
+        // by symmetry; both component fields are zero too.
         let p = Position::startpos();
         let (_, trace) = evaluate_with_trace(&p);
-        assert_eq!(trace.material, Score::ZERO);
-        assert_eq!(trace.material, p.psq_score());
+        assert_eq!(trace.material.piece_value, Score::ZERO);
+        assert_eq!(trace.material.psq_positional, Score::ZERO);
+        assert_eq!(trace.material.total(), Score::ZERO);
+        assert_eq!(trace.material.total(), p.psq_score());
     }
 
     #[test]
@@ -731,9 +813,31 @@ mod tests {
         // past the classical trace.
         let p = Position::from_fen("4k3/1p6/8/8/8/8/P7/3QK3 w - - 0 1").unwrap();
         let (_, trace) = evaluate_with_trace(&p);
-        assert_ne!(trace.material, Score::ZERO);
-        // Mg component of an extra queen is strongly positive for white.
-        assert!(trace.material.mg().0 > 500);
+        assert_ne!(trace.material.total(), Score::ZERO);
+        // Mg component of an extra queen is strongly positive for white;
+        // the queen's raw piece value lives in `piece_value`.
+        assert!(trace.material.piece_value.mg().0 > 500);
+    }
+
+    #[test]
+    fn trace_material_split_sums_to_psq_score() {
+        // After any move sequence, piece_value + psq_positional must
+        // equal pos.psq_score(). The split is exact, not an
+        // approximation.
+        let positions = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            "r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5",
+        ];
+        for fen in positions {
+            let p = Position::from_fen(fen).unwrap();
+            let (_, trace) = evaluate_with_trace(&p);
+            assert_eq!(
+                trace.material.total(),
+                p.psq_score(),
+                "split must sum to psq_score for {fen}",
+            );
+        }
     }
 
     #[test]

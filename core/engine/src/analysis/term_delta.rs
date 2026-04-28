@@ -35,7 +35,7 @@ pub struct TermDelta {
 /// and either the ply-1 or settled-ply post-move trace, picking per
 /// [`TermId::timing`]:
 ///
-/// - Outcome terms ([`TermId::Material`], [`TermId::Imbalance`])
+/// - Outcome terms ([`TermId::MaterialPieceValue`], [`TermId::Imbalance`])
 ///   diff against `settled` — the line's eventual settled-ply trade.
 /// - State terms (everything else) diff against `ply1` — the board
 ///   immediately after the user's move, with no opponent reply
@@ -207,10 +207,10 @@ mod tests {
         let mut ply1 = trace_at(128, 64);
         let mut settled = trace_at(128, 64);
 
-        // Material is Outcome → reads from `settled`. A ply-1 value
-        // for Material should be ignored.
-        ply1.material = Score::new(999, 999);
-        settled.material = Score::new(80, 80);
+        // MaterialPieceValue is Outcome → reads from `settled`. A
+        // ply-1 value should be ignored.
+        ply1.material.piece_value = Score::new(999, 999);
+        settled.material.piece_value = Score::new(80, 80);
 
         // ThreatsHanging is State → reads from `ply1`. A settled
         // value should be ignored.
@@ -218,12 +218,18 @@ mod tests {
         settled.threats[Color::White.index()].hanging = Score::new(999, 999);
 
         let deltas = compute_term_deltas(&pre, &ply1, &settled);
-        let mat = deltas.iter().find(|d| d.term == TermId::Material).unwrap();
+        let mat = deltas
+            .iter()
+            .find(|d| d.term == TermId::MaterialPieceValue)
+            .unwrap();
         let hanging = deltas
             .iter()
             .find(|d| d.term == TermId::ThreatsHanging)
             .unwrap();
-        assert_eq!(mat.delta_mg, 80, "Material must read from settled trace");
+        assert_eq!(
+            mat.delta_mg, 80,
+            "MaterialPieceValue must read from settled trace"
+        );
         assert_eq!(
             hanging.delta_mg, 40,
             "ThreatsHanging must read from ply1 trace, not settled"
@@ -269,20 +275,20 @@ mod tests {
     #[test]
     fn cumulative_prefix_one_dominant_term_returns_one() {
         let deltas = vec![
-            make_delta(TermId::Material, 90),
-            make_delta(TermId::KingShelter, 5),
+            make_delta(TermId::MaterialPieceValue, 90),
+            make_delta(TermId::KingPawnShield, 5),
             make_delta(TermId::MobilityKnight, 5),
         ];
         let prefix = cumulative_prefix(&deltas, 75.0);
         assert_eq!(prefix.len(), 1);
-        assert_eq!(prefix[0].term, TermId::Material);
+        assert_eq!(prefix[0].term, TermId::MaterialPieceValue);
     }
 
     #[test]
     fn cumulative_prefix_distributed_terms_return_several() {
         let deltas = vec![
-            make_delta(TermId::Material, 30),
-            make_delta(TermId::KingShelter, 25),
+            make_delta(TermId::MaterialPieceValue, 30),
+            make_delta(TermId::KingPawnShield, 25),
             make_delta(TermId::MobilityKnight, 20),
             make_delta(TermId::ThreatsHanging, 15),
             make_delta(TermId::Space, 10),
@@ -294,9 +300,9 @@ mod tests {
     #[test]
     fn cumulative_prefix_percent_at_extremes() {
         let deltas = vec![
-            make_delta(TermId::Material, 50),
+            make_delta(TermId::MaterialPieceValue, 50),
             make_delta(TermId::MobilityKnight, 30),
-            make_delta(TermId::KingShelter, 20),
+            make_delta(TermId::KingPawnShield, 20),
         ];
         assert!(cumulative_prefix(&deltas, 0.0).is_empty());
         assert_eq!(cumulative_prefix(&deltas, 100.0).len(), 3);
@@ -305,7 +311,7 @@ mod tests {
     #[test]
     fn cumulative_prefix_all_zero_deltas_returns_empty() {
         let deltas = vec![
-            make_delta(TermId::Material, 0),
+            make_delta(TermId::MaterialPieceValue, 0),
             make_delta(TermId::MobilityKnight, 0),
         ];
         assert!(cumulative_prefix(&deltas, 75.0).is_empty());
@@ -320,12 +326,12 @@ mod tests {
     #[test]
     fn cumulative_prefix_uses_absolute_value() {
         let deltas = vec![
-            make_delta(TermId::Material, -80),
+            make_delta(TermId::MaterialPieceValue, -80),
             make_delta(TermId::MobilityKnight, 15),
-            make_delta(TermId::KingShelter, 5),
+            make_delta(TermId::KingPawnShield, 5),
         ];
         let prefix = cumulative_prefix(&deltas, 75.0);
         assert_eq!(prefix.len(), 1);
-        assert_eq!(prefix[0].term, TermId::Material);
+        assert_eq!(prefix[0].term, TermId::MaterialPieceValue);
     }
 }

@@ -2,7 +2,7 @@
 //! lines per side, mirroring the king-safety precedence (worsening
 //! wins over improving on the same side).
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::PawnStructureOutcome;
 use chess_tutor_engine::eval::PawnsBreakdown;
@@ -134,8 +134,8 @@ fn their_pawns_improved_line(o: &PawnStructureOutcome) -> Option<String> {
 /// Render the pawn-structure lines (ours, theirs). Per side,
 /// worsened takes precedence over improved if both fire — worsening
 /// is more urgent teaching, mirroring the king-safety precedence.
-pub(super) fn render_pawn_structure(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_pawn_structure(
+    out: &mut dyn io::Write,
     outcome: &PawnStructureOutcome,
 ) -> io::Result<bool> {
     let mut wrote = false;

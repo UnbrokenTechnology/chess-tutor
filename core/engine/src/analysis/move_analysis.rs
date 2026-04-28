@@ -24,6 +24,13 @@ pub struct MoveAnalysis {
     pub ply_traces: Vec<EvalTrace>,
     pub settled_ply: Option<usize>,
     pub pre_move_trace: EvalTrace,
+    /// Static eval of the root position (before the user's move),
+    /// from root side-to-move's POV — same scale as `score`. Shared
+    /// across all `MoveAnalysis` instances from the same
+    /// [`analyze_position`] call. Used by [`classify_move`] to
+    /// distinguish "missed a stronger move" from "actually worsened
+    /// the position."
+    pub pre_score: Value,
     /// Per-term deltas from `pre_move_trace` to the trace at
     /// `settled_ply` (falling back to the leaf if `settled_ply` is
     /// `None` and `ply_traces` is non-empty). Sorted by
@@ -63,15 +70,19 @@ pub fn analyze_position(
     pos: &mut Position,
     params: SearchParams,
 ) -> Vec<MoveAnalysis> {
-    let (_, pre_move_trace) = evaluate_with_trace(pos);
+    let (pre_score, pre_move_trace) = evaluate_with_trace(pos);
     let lines = engine.search(pos, params);
     lines
         .into_iter()
-        .map(|line| analysis_from_line(line, pre_move_trace))
+        .map(|line| analysis_from_line(line, pre_move_trace, pre_score))
         .collect()
 }
 
-fn analysis_from_line(line: SearchLine, pre_move_trace: EvalTrace) -> MoveAnalysis {
+fn analysis_from_line(
+    line: SearchLine,
+    pre_move_trace: EvalTrace,
+    pre_score: Value,
+) -> MoveAnalysis {
     let SearchLine {
         pv,
         score,
@@ -106,6 +117,7 @@ fn analysis_from_line(line: SearchLine, pre_move_trace: EvalTrace) -> MoveAnalys
         ply_traces,
         settled_ply,
         pre_move_trace,
+        pre_score,
         term_deltas,
     }
 }
@@ -147,9 +159,13 @@ mod tests {
         let mut pre = EvalTrace::zero();
         let mut settled = EvalTrace::zero();
         let mut leaf = EvalTrace::zero();
-        pre.material = Score::new(0, 0);
-        settled.material = Score::new(50, 50); // diff target
-        leaf.material = Score::new(999, 999); // should NOT be used
+        // Use `imbalance` as the discriminator — it's a single Score
+        // field on the trace, simpler than the post-split material
+        // breakdown for this "did diff_trace pick the right slot?"
+        // assertion.
+        pre.imbalance = Score::new(0, 0);
+        settled.imbalance = Score::new(50, 50); // diff target
+        leaf.imbalance = Score::new(999, 999); // should NOT be used
 
         let ma = MoveAnalysis {
             mv: Move::NONE,
@@ -159,16 +175,17 @@ mod tests {
             ply_traces: vec![settled, leaf],
             settled_ply: Some(0),
             pre_move_trace: pre,
+            pre_score: Value::ZERO,
             term_deltas: Vec::new(),
         };
-        assert_eq!(ma.diff_trace().material, Score::new(50, 50));
+        assert_eq!(ma.diff_trace().imbalance, Score::new(50, 50));
     }
 
     #[test]
     fn move_analysis_diff_trace_falls_back_to_leaf_when_settled_missing() {
         let pre = EvalTrace::zero();
         let mut leaf = EvalTrace::zero();
-        leaf.material = Score::new(7, 7);
+        leaf.imbalance = Score::new(7, 7);
 
         let ma = MoveAnalysis {
             mv: Move::NONE,
@@ -178,15 +195,16 @@ mod tests {
             ply_traces: vec![leaf],
             settled_ply: None,
             pre_move_trace: pre,
+            pre_score: Value::ZERO,
             term_deltas: Vec::new(),
         };
-        assert_eq!(ma.diff_trace().material, Score::new(7, 7));
+        assert_eq!(ma.diff_trace().imbalance, Score::new(7, 7));
     }
 
     #[test]
     fn move_analysis_diff_trace_falls_back_to_pre_when_no_plies() {
         let mut pre = EvalTrace::zero();
-        pre.material = Score::new(3, 3);
+        pre.imbalance = Score::new(3, 3);
         let ma = MoveAnalysis {
             mv: Move::NONE,
             score: Value::ZERO,
@@ -195,8 +213,9 @@ mod tests {
             ply_traces: Vec::new(),
             settled_ply: None,
             pre_move_trace: pre,
+            pre_score: Value::ZERO,
             term_deltas: Vec::new(),
         };
-        assert_eq!(ma.diff_trace().material, Score::new(3, 3));
+        assert_eq!(ma.diff_trace().imbalance, Score::new(3, 3));
     }
 }

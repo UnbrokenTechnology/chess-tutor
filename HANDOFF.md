@@ -7,24 +7,115 @@ A snapshot so a fresh context can pick up where we left off without reading the 
 - **Engine**: Classical Stockfish-11 evaluation fully ported (all terms, granular sub-term breakdown). Movegen perft-verified. Search has the full pruning stack (null-move, LMR, LMP, futility, SEE, check ext, mate-distance, aspiration, PVS). MultiPV works. Endgame specialists: KXK / KBNK / KPK (bitbase) / KNNK / KNNKP. Plays 2000 ELO (user-verified vs chess.com bots).
 - **CLI** (`chess-tutor`): subcommands `board`, `moves`, `eval`, `search`, `opening`, `play`. Lenient SAN + UCI input. Move analysis building blocks exposed: `--multi-pv N`, settled-ply display, `--debug` per-ply trajectory.
 - **Teaching-layer pieces landed**: Opening book (lookup + live banner in `play`); Trap library schema + Damiano refutation + CLI wiring + pending-trap state machine; Teaching-analysis pipeline Phase 0 (granular `EvalTrace` sub-terms, including the mobility split: `MobilityBreakdown` with knight/bishop/rook/queen sub-terms), Phase 1 chunks 1-2 (MultiPV, per-ply `EvalTrace` capture, 2-ply settled-ply detection), Phase 1 chunk 3 (trace-diff + `MoveAnalysis` + `analyze_position` + `chess-tutor search --analyze` + REPL `analyze`), Phase 1 chunk 4 (force_include + MoveVerdict classifier + shallow-vs-deep SurpriseKind + auto-retrospective in REPL), Phase 1 chunk 5 (`MaterialOutcome` structured data + PV capture-sequence renderer in retrospective; 75% cumulative-prefix secondary terms), Phase 3 Tier-1 hanging-piece detection (`ThreatsOutcome` + `HangingPiece` + CLI narrator with attacker annotations: "hanging knight on d2 (attacked by the e3 pawn)"), Phase 3 Tier-1 SEE-losing-exchange detection + narrator, Phase 3 Tier-1 Stockfish pressure-pattern parity (`PressuredPiece` + `PressureKind::{MinorOnMajor, RookOnQueen, SafePawnThreat}` + CLI narrator with kind-specific verbs: "harried" / "pressured" / "kicked"; CLI-side de-dup against hanging+SEE-losing lists), Phase 3 Tier-2 king-safety outcome (`KingSafetyOutcome` + pre/post `KingSafetySnapshot` capturing `king_sq` + `king_attackers_count` + `king_attacks_count` + pawn-shelter mg/eg + `phase`; CLI narrator with bidirectional teaching ("Your king is more exposed" / "Your king is safer"), flank-aware phrasing ("2 attackers on the kingside" / "queenside attackers down to 1" / fallback "king ring"), and endgame-phase shelter suppression below phase 32), Phase 3 Tier-3 pawn-structure + mobility outcomes (`PawnStructureOutcome` wrapping pre/post `PawnsBreakdown` per side; CLI narrator per-category phrasing for worsening/improving on both sides: "doubled a pawn", "isolated a pawn", "created a backward pawn", "exposed a weak pawn", "walked into a pawn lever", "broke pawn connections" + improved counterparts; `MobilityOutcome` wrapping pre/post `MobilityBreakdown`; CLI narrator picks the biggest-|delta| piece type per side with phrasings like "Your knight mobility dropped (+0.60 → +0.20)" and "You restricted the opponent's rook mobility (...)"), surprise-tag precision fix (suppress misleading "refutes it" on Good moves; tighten verdict→surprise pairing), brilliancy surfacing (`!` SAN annotation + "Well spotted" line on Best+LooksBadButGood; engine-preferred sharp moves flagged on the "Engine preferred" line), Phase 0 king + passed sub-term splits (`KingBreakdown { shelter, danger, pawnless_flank, flank_attacks }`, `PassedBreakdown { rank_bonus, king_proximity, free_advance, stopper_penalty }`; `king_danger` stays atomic; passed halving applies componentwise — bit-exactness drifts ≤1 cp per passer, within weight-tuning noise), and Phase 3 Tier-4 outcomes (`PassedPawnsOutcome` wrapping pre/post `PassedBreakdown` per side with 4-category per-passer-sub-term narration: "a passer pushed forward", "king race improved", "the promotion path cleared", "a passer reached an easier file" + worsened counterparts; `PiecesPositionalOutcome` wrapping pre/post `PiecesBreakdown` per side with 11-category narration: "a minor claimed an outpost", "a rook claimed the open file", "a bishop claimed the long diagonal", "a rook escaped its trap", etc., under "Your piece placement improved/weakened:" and "You weakened the opponent's piece placement:" subjects).
-- **2026-04-25 overhaul**: State-based positional outcomes (king safety, threats, pawn structure, mobility, passed pawns, pieces positional) now diff at **ply 1** (immediately after the user's move) via shared `analysis::post_user_move` helper; only `MaterialOutcome` still walks the PV to settled-ply. Per-term `TermId::timing()` split (`Outcome` for Material/Imbalance → settled-ply, `State` for everything else → ply-1) drives `compute_term_deltas` and the fallback "Also helped / hurt" line, fixing the systemic misattribution where settled-ply state shifts read as "your move did X." Three new cross-term multiplier narrators (closed-centre + own-piece barricade, castling-loss × trapped-rook, space dilution on captures) turn previously-invisible Stockfish heuristics into teaching lines. `PiecesPositionalOutcome` carries raw bishop-pawn-count fields and the narrator suppresses `BishopPawns` clauses when geometry didn't change (kills the phantom "a bishop got stuck behind its pawn chain" line on central pawn pushes). Pretty-label rewrites for obscure threat sub-terms.
-- **Tests**: **568 engine + 140 cli = 708 passing**, clippy clean, rustfmt clean.
+- **2026-04-25 overhaul**: State-based positional outcomes (king safety, threats, pawn structure, mobility, passed pawns, pieces positional) now diff at **ply 1** (immediately after the user's move) via shared `analysis::post_user_move` helper; only `MaterialOutcome` still walks the PV to settled-ply. Per-term `TermId::timing()` split (`Outcome` for the material-family + Imbalance → settled-ply, `State` for everything else → ply-1) drives `compute_term_deltas` and the fallback "Also helped / hurt" line, fixing the systemic misattribution where settled-ply state shifts read as "your move did X." Three new cross-term multiplier narrators (closed-centre + own-piece barricade, castling-loss × trapped-rook, space dilution on captures) turn previously-invisible Stockfish heuristics into teaching lines. `PiecesPositionalOutcome` carries raw bishop-pawn-count fields and the narrator suppresses `BishopPawns` clauses when geometry didn't change (kills the phantom "a bishop got stuck behind its pawn chain" line on central pawn pushes). Pretty-label rewrites for obscure threat sub-terms.
+- **2026-04-25 verdict + initiative + splits**: Two-axis verdict classifier (`absolute_swing` guards `Mistake`/`Blunder` so labels only fire when the move actually worsened the position; headline now reads `Mistake (Δ +X.XX vs Δ +Y.YY best)`). New `InitiativeOutcome` narrator surfaces the checks-over-threats forcing hierarchy via three templates (reinforcement / refutation / held-despite). Three follow-on splits: `MinorBehindPawn` rephrased to neutral "lost / gained pawn cover," `Material` decomposed into `MaterialPieceValue` (capture-driven) + `MaterialPsqPositional` (renamed "piece placement" in narration), `KingShelter` decomposed into `KingPawnShield` + `KingPawnStorm` + `KingPawnDistance` so shield narration stops mis-attributing storm-table shifts. Net `TermId` count grew from 42 to 45.
+- **Desktop GUI v1 shipped (2026-04-26/27)**: `chess-tutor-desktop` egui app (`desktop/`) — board + click-click moves with last-move/check highlights and legal-move dots, eval bar, two-column SAN move list with click-to-replay history navigation, retrospective panel, top bar (New Game dialog with color/FEN/depth, Takeback, Flip Board, Hint, Depth slider, Live), Hint panel with top-N candidates + score + PV. Engine plumbed via worker thread; analytical jobs use a cloned engine to keep play-engine TT clean.
+- **Narration crate split (Iteration A of GUI session)**: `core/narration/` (`chess-tutor-narration`) holds all per-term render code formerly in CLI's `retrospective/`. Public API: `format_retrospective(pre_move_pos, &[MoveAnalysis], user_move, &NarrationOptions) -> String`. CLI's `retrospective` now ~70 lines of orchestration; desktop crate consumes narration directly without a CLI dep.
+- **Tests**: **582 engine + 105 narration + 46 cli = 733 passing**, clippy clean.
 
 ```bash
-cd core && cargo test --release       # ~0.2s; debug mode ~1.4s due to magic search
-cd core && cargo clippy --all-targets
+cargo test --release       # ~0.2s; debug mode ~1.4s due to magic search
+cargo clippy --all-targets
 
 # For perf investigation — release-equivalent w/ debuginfo for VTune:
-cd core && cargo build --profile profiling --bin chess-tutor
-# Output: core/target/profiling/chess-tutor.exe
+cargo build --profile profiling --bin chess-tutor
+# Output: target/profiling/chess-tutor.exe
 ```
 
-## Next session: build out the GUIs
+## What landed in the 2026-04-26/27 GUI session
 
-The retrospective layer is in good shape after the 2026-04-25 overhaul (see "What landed in the 2026-04-25 retrospective-overhaul session" below). The user has flagged the proof-of-concept as solid — fast, plays at 2000 ELO, narrates per-move positional consequences honestly — and identified two priorities going forward:
+Two iterations on the egui desktop app. `chess-tutor-desktop` is now feature-complete against the v1 scope the user signed off on. Engine and narration unchanged; CLI retrospective module reorganised but observable behavior identical.
 
-1. **Build out the GUIs.** Per CLAUDE.md, the planned platform apps are Apple (Swift/SwiftUI for macOS/iPadOS/iOS), Android (Kotlin/Jetpack Compose), and Windows desktop (egui — Rust, single binary, no runtime install burden). The CLI stays in the workspace as the test/dev surface. The engine is the FFI source for all four targets; the FFI crate (`core/ffi/`) doesn't exist yet — first step is wiring it up. Most likely first GUI to ship is the egui app since the Rust toolchain is already in place.
-2. **Continue iterating retrospective narration from real-game playthroughs.** Every narrator has unit tests for shape but the wording and thresholds were picked a priori; ongoing real-game use is how they get fine-tuned. Workflow: `chess-tutor play` against a bot, read every retrospective line, file specific phrasing/threshold tweaks (the 2026-04-25 session logged several this way and is a model for the loop).
+### Workspace layout change
+
+Rust workspace `Cargo.toml` promoted from `core/Cargo.toml` to repo-root `Cargo.toml`. Members: `core/engine`, `core/narration`, `core/cli`, `desktop`. Cargo refuses workspace members above the workspace root, so `core/Cargo.toml` couldn't include `../desktop/`. Promoting also accommodates the planned `core/ffi/` and the `apple/` / `android/` directories cleanly when they land. `target/` is now at the repo root; `.gitignore`, CLAUDE.md, and the build commands in this file were updated to drop the `cd core` prefix.
+
+### Iteration A — narration crate split
+
+Pulled per-term rendering out of the CLI into a shared `chess-tutor-narration` crate so the GUI can format retrospective text without depending on the CLI binary. The structured outcomes in `engine/src/analysis/` are the stable contract; the narration crate is purely the prose renderer.
+
+- All `*_narration.rs` files (×11) plus `secondary_terms.rs`, `surprise_tag.rs`, `util.rs` moved to `core/narration/src/`. 105 tests came along with them.
+- `&mut io::StdoutLock<'_>` → `&mut dyn io::Write` across 13 sites (mechanical sed). `pub(super)` → `pub(crate)` (24 sites). `super::util::` → `crate::util::` (3 sites).
+- Public API: `chess_tutor_narration::format_retrospective(pre_move_pos, &[MoveAnalysis], user_move, &NarrationOptions) -> String`. Internally buffers to `Vec<u8>` via a private `render_report(&mut dyn Write, ...)`.
+- `core/cli/src/retrospective/` (1 dir + 14 files) collapsed to `core/cli/src/retrospective.rs` (single ~70-line file) — only the orchestration that calls `analyze_position` then `format_retrospective` and writes to stdout. `RetrospectiveConfig` and `run_and_render` signatures unchanged so `play.rs` callsite works as-is.
+
+### Iteration B — desktop GUI
+
+`desktop/` Rust egui app (`chess-tutor-desktop` binary), built on `eframe = "0.30"`. Single-window UI with all v1 features wired.
+
+#### Threading model
+
+One worker thread spawned at startup, owns a single `Engine` instance for play. UI sends `WorkerJob` over an `mpsc::Sender`; worker sends `WorkerResult` back. After each result the worker calls `egui::Context::request_repaint()` so the UI re-renders without polling.
+
+```rust
+enum WorkerJob {
+    NewGame,                                                    // clear engine TT/history
+    Search { pos, params, gen },                                // engine's own move
+    Retrospective { pre_move_pos, user_move, depth,
+                    game_history, gen, target_index },          // user-move analysis
+    Analyze { pos, depth, multi_pv, game_history, for_key },    // Hint button
+}
+
+enum WorkerResult {
+    Search { gen, line, elapsed },
+    Retrospective { gen, target_index, text },
+    Analyze { for_key, analyses },
+}
+```
+
+- `Search` uses the play engine directly (TT / history accumulate across moves, normal play).
+- `Retrospective` and `Analyze` clone the engine so analytical TT writes don't pollute play. Same pattern the CLI uses.
+- `gen: u64` cancellation: bumped on `start_new_game` and `takeback`. Stale results dropped on arrival. Search-only — Retrospective also checks gen, but the natural per-entry routing via `target_index` already handles staleness for normal moves.
+- `Analyze` uses `for_key: u64` (Zobrist hash) instead of `gen`: stale hint results from a position the user has since left are dropped without bumping a counter that retrospectives are using.
+
+#### State
+
+- `position: Position` — current live position. `position_keys: Vec<u64>` — Zobrist history for repetition-aware search.
+- `history: Vec<HistoryEntry>` — every ply played, with `mv`, `state` (StateInfo for undo), `san` (cached at do_move time), `moved_by: Color`, `position_after: Position` (snapshot for click-history — no replay-from-start cost), `retrospective_text: Option<String>` (filled by Retrospective worker result for user moves), `engine_info: Option<EngineInfo>` (filled by Search worker result for engine moves; carries score / depth / elapsed).
+- `viewing_index: Option<usize>` — `None` follows live; `Some(i)` views position after `history[i]`. Eval bar still reads from `latest_engine_info()` (most recent search score, white-POV) regardless of view; only the board / move-list selection / retrospective panel follow `viewing_index`.
+- `selected: Option<Square>` + `legal_from_selected: Vec<Move>` — current click-selection state.
+- `engine_plays: Option<Color>` — `Some(c)` means engine plays color `c`; `None` means user plays both colors (Both mode). `is_users_turn()` checks against `position.side_to_move()`.
+- `flipped: bool` — board orientation (false = white on bottom). Set at New Game time.
+- `depth: u32` — current engine search depth. Top-bar `DragValue` and dialog slider both write to this.
+- `engine_thinking: bool` — true while a Search job is in flight (gates user input).
+- `hint_open / hint_thinking / hint_result: Option<HintResult>` — Hint panel state. Auto-closed by `try_move_to`, `handle_search_outcome` (engine moved), `takeback`, `start_new_game`.
+- `new_game_form: Option<NewGameForm>` — Some while the New Game dialog is showing.
+
+#### UI surfaces
+
+- **Top bar**: New Game (opens dialog) / Takeback / Flip Board / Hint or Hide Hint / ▶ Live (only when viewing back) / Depth `DragValue` / engine-thinking spinner / game-over banner.
+- **Eval bar** (left, 56 px): vertical white-on-bottom bar, ±10 cp saturated, mate scores pin to ends and show as `M5` / `-M5`. Score below in pawn units.
+- **Side panel** (right, 320 px): Moves (two-column SAN, `SelectableLabel` per cell, click sets `viewing_index`, sticky-to-bottom in live mode) above + either Retrospective or Hint below.
+  - **Retrospective panel**: viewing live → most recent *user* move's `retrospective_text` (or "analyzing your move…" spinner while computing) so the engine's reply doesn't bury your move's analysis. Viewing back → that entry's stored content.
+  - **Hint panel**: spinner + "analyzing position…" while pending; then top-3 candidates as `1. e4    +0.30    depth 10` with PV-as-SAN below in weak monospace, plus `[settles ply N]` marker when present. Score from side-to-move POV.
+- **Board** (center): `viewed_position()` drives rendering. Last-move highlight from viewed entry's mv. Check tint on king. Selected-square + legal-move dots only render at live view. Click while viewing back snaps to live (the click itself doesn't otherwise act that frame).
+- **New Game dialog**: centered `egui::Window`. Color picker (radio buttons: White / Black / Random / Both). FEN paste field (empty = startpos; non-empty parsed via `Position::from_fen`, `Display`-formatted error shown inline on `Err`, dialog stays open). Depth slider 1..=20. Cancel / Start.
+
+#### Pieces are still Unicode glyphs
+
+`piece_glyph(piece) -> &'static str` returns U+2654..265F. They look acceptable but are a v0 placeholder. cburnett SVGs (CC-BY-SA from Lichess) are the planned art — see follow-ups below.
+
+#### Promotion auto-queens
+
+`try_move_to` finds candidate moves for the target square; when there's a promotion variant, picks queen unconditionally. No promotion picker UI yet. See follow-ups.
+
+## Open follow-ups from the GUI session
+
+These came up during the 2026-04-26/27 work and were intentionally deferred:
+
+- **Hint panel narration via narration crate refactor.** The Hint panel currently renders just `mv / score / PV` per candidate. The richer "why this move is good" prose should reuse the same per-term narrators the retrospective already runs (king safety, threats, mobility, etc.), not be reimplemented. Concretely: factor `narration::render_report`'s middle section (everything between the verdict headline and the surprise tag) into a private `render_per_term_narration(out, pre_move_pos, candidate, root_stm)` helper, then expose a public `format_candidate_explanation(pre_move_pos, &MoveAnalysis, root_stm) -> String` that uses it without the verdict-or-engine-preferred framing. Both `format_retrospective` and the new entry point would call the shared helper. Desktop's `draw_hint_panel` then renders the prose under each candidate.
+- **Real piece sprites (cburnett, CC-BY-SA from Lichess).** 12 SVGs — bundle via `include_bytes!` so the binary stays single-file. Drop-in replacement for `piece_glyph`'s caller; rendering layer changes from `painter.text(...)` to `painter.image(...)`. Adds an `image` decoding dep (already pulled in transitively by eframe).
+- **Promotion picker UI.** When `try_move_to` sees multiple candidate moves to the same square (the promotion case has 4: queen / rook / bishop / knight), surface a small overlay near the target square asking which piece. Most chess UIs do an inline 4-piece column. The current auto-queen is correct for ~95% of human play but excludes underpromotions.
+- **Visual annotations on the retrospective.** The user's plan has the GUI eventually draw arrows / highlights tied to specific narrator clauses (e.g., when "this blocks a pawn which hurts same-colored bishops" fires, highlight the blocking minor + the blocked pawn). Today the narration crate emits a flat `String`. The structured form would be a list of clauses, each with optional annotation payloads (square sets, arrows, kind tag); CLI would render text-only ignoring the payloads, GUI would render text + payloads. Significant API change to the narration crate; not urgent until the hint-panel narration above is in.
+- **Bot strength / bot customization framework.** The CLI's `play` command and the GUI both run the engine at full strength. The user wants a richer "configure a bot's openings, blunder profile, tactical eyesight" model long-term — a teaching tool that lets the student set up "this bot will occasionally hang a piece, can you spot it?" Out of scope until the basics solidify.
+- **Both-mode UX testing.** New Game → "Both" → user clicks both colors works mechanically (engine_plays=None, retrospective fires every ply, no engine reply queued). Hasn't been live-tested for hours-long sessions. Edge cases to watch: takeback semantics in Both mode (currently undoes a single ply, per the locked spec); retrospective-on-every-ply may feel chatty; Hint button behavior when there's no "user color."
+
+## Continuing the original priorities
+
+The 2026-04-25 HANDOFF flagged two long-running priorities that remain relevant alongside the GUI work:
+
+- **Continue iterating retrospective narration from real-game playthroughs.** Every narrator has unit tests for shape but the wording and thresholds were picked a priori; ongoing real-game use is how they get fine-tuned. Now possible with the GUI's retrospective panel as well as `chess-tutor play`.
+- **Mobile + Apple targets.** Per CLAUDE.md the planned platform apps are Apple (Swift/SwiftUI), Android (Kotlin/Compose), and Windows desktop (egui — done). The FFI crate (`core/ffi/`) doesn't exist yet; that's the prerequisite for the Swift/Kotlin work. Decisions like UniFFI vs raw C ABI, in-process vs out-of-process, and how to expose `MoveAnalysis` across the boundary are unresolved.
 
 ## What landed in the 2026-04-24 perf + correctness session
 
@@ -47,7 +138,7 @@ This session tackled the live-play hangs / perf / determinism issues that surfac
 
 ## Cargo profile: `[profile.profiling]`
 
-Added in `core/Cargo.toml`. Inherits `release` opts but keeps `debug = true` and `strip = false` so VTune / Superluminal / WPA show Rust function names. Build: `cargo build --profile profiling --bin chess-tutor` → `core/target/profiling/chess-tutor.exe`. Use this binary for any perf investigation.
+Added in the repo-root `Cargo.toml`. Inherits `release` opts but keeps `debug = true` and `strip = false` so VTune / Superluminal / WPA show Rust function names. Build: `cargo build --profile profiling --bin chess-tutor` → `target/profiling/chess-tutor.exe`. Use this binary for any perf investigation.
 
 **Critical:** plain `cargo run` is the **debug** build (~20-200× slower than release). The user spent a session investigating "4 s startup, 2 s retrospective" only to discover those were debug-mode artifacts; release/profiling builds run startup in ~0.2 s and retrospective in ~10 ms. **Always use `--release` or `--profile profiling` for any performance-sensitive testing.**
 
@@ -61,7 +152,7 @@ Stockfish has the same issue in principle; they tune contempt against benchmark 
 
 These all landed in the prior session (still-relevant context for understanding the retrospective layout):
 
-Phase 3 Tiers 1-4 are complete. Phase 0 sub-term splits cover every classical eval term that's splittable (pawns 6, pieces 11, mobility 4, threats 9, king 4, passed 4 = 38 granular sub-terms + 3 net + 1 aggregate Space). The teaching-analysis pipeline now has a `XxxOutcome` struct for every major term group except `Space` / `Imbalance` / `Initiative` (by design — see "don't split" section in the playbook).
+Phase 3 Tiers 1-4 are complete. Phase 0 sub-term splits cover every classical eval term that's splittable (pawns 6, pieces 11, mobility 4, threats 9, king 6 [post-shelter-split], passed 4 = 40 granular sub-terms + 4 net [the post-material-split `MaterialPieceValue` + `MaterialPsqPositional` + `Imbalance` + `Initiative`] + 1 aggregate Space = 45 TermIds). The teaching-analysis pipeline now has a `XxxOutcome` struct for every major term group except `Space` / `Imbalance` / `Initiative` (by design — see "don't split" section in the playbook). Note: `Initiative` does have an `InitiativeOutcome` for the *forcing-hierarchy* narrative, but it doesn't consume the `TermId::Initiative` eval term (the outcome is about move-relationship, not Stockfish's initiative complexity correction).
 
 ### Live-play feedback 2026-04-24 — landed quick wins
 
@@ -127,13 +218,20 @@ When `1.e4 e5` creates a blocked centre, Stockfish multiplies the `bishop_pawns`
 
 ### TermId coverage after this session
 
-40 of 42 `TermId` variants now have a dedicated narrator that consumes them under at least one path:
+After the splits, `TermId` has **45 variants**: 4 net (`MaterialPieceValue`, `MaterialPsqPositional`, `Imbalance`, `Initiative`) + 1 per-colour scalar (`Space`) + 6 Pawns + 11 Pieces + 4 Mobility + 9 Threats + 6 King + 4 Passed.
 
-- 38 state-based terms are consumed by a family narrator (king safety, threats, pawn structure, mobility, passed pawns, pieces positional) when that narrator fires at ply 1.
-- `Material` is consumed by `render_material_sequence` when captures are present.
+41 of 45 are consumed by a dedicated narrator under at least one path:
+
+- 38 state-based terms are consumed by a family narrator (king safety [shield only], threats, pawn structure, mobility, passed pawns, pieces positional) when that narrator fires at ply 1.
+- `MaterialPieceValue` + `MaterialPsqPositional` are both consumed by `render_material_sequence` when captures are present.
 - `Space` is consumed by `render_space` (only on user-captures of opponents with meaningful pre-move space).
-- `PiecesBishopPawns` and `PiecesTrappedRook` are double-listed: their primary consumer is `pieces_positional`, with `blocked_center` and `castling` as multiplier-driven secondary consumers.
-- **`Imbalance` and `Initiative` still fall through to the "Also helped / hurt" line** — neither has a dedicated narrator. `Imbalance` is the highest-leverage candidate for a future `BishopPairOutcome` narrator (the dominant teachable case in Stockfish's piece-pair table); `Initiative` is too abstract for 1200 ELO and stays deferred.
+- `PiecesBishopPawns` and `PiecesTrappedRook` are double-listed: primary consumer is `pieces_positional`, with `blocked_center` and `castling` as multiplier-driven secondary consumers.
+- **`Imbalance`, `Initiative`, `KingPawnStorm`, `KingPawnDistance` still fall through to the "Also helped / hurt" line.**
+  - `Imbalance` — highest-leverage candidate for a future `BishopPairOutcome` narrator (the dominant teachable case in Stockfish's piece-pair table).
+  - `Initiative` — too abstract for 1200 ELO; stays deferred.
+  - `KingPawnStorm` — Stockfish's storm tables are non-monotonic in rank, so directional verbs would lie about the user's intent on common pawn pushes. Defer narration; surface as raw cp in the fallback.
+  - `KingPawnDistance` — endgame-only signal, mostly noise outside endgames; surface as raw cp.
+- `MaterialPsqPositional` is also consumed by `render_material_sequence` but can fall through to the fallback when no captures occurred — surfaces as "piece placement" (the renamed pretty label), accurately framed as a positional shift rather than colloquial material loss.
 
 When a state-narrator's threshold isn't met (e.g., a 30 cp mobility shift below the 50 cp threshold), the underlying sub-term can still appear in the fallback line — that's by design.
 
@@ -141,14 +239,89 @@ When a state-narrator's threshold isn't met (e.g., a 30 cp mobility shift below 
 
 568 engine + 140 CLI = **708 tests passing**, clippy clean. Initial git commit landed at `f14cb88` on `main`.
 
-### Carry-over priorities from earlier sessions
+## What landed in the 2026-04-25 verdict + initiative + splits session
 
-These remain open from the 2026-04-24 work and are still on the table behind the top-level "Next session" priorities (GUI + ongoing retrospective iteration):
+This session was driven by a single thread: making sure every retrospective line attributes correctly to what the user's single move actually did, and making the verdict label match the chess intuition rather than the relative-eval math. Five interlocking changes:
 
-1. **Instrument profiling.** Don't guess at startup / retrospective latency — measure. The two suspected culprits for the 4 s startup (magic tables, opening-book SAN replay) and the ~2 s per-move retrospective (full-depth MultiPV-3 with `force_include`) are currently unverified. Add a `--trace-startup` or Criterion-style bench before tuning. See "Suspected-but-unverified" below.
-2. **After profiling, pick the highest-leverage item** from the medium-effort list.
+### Verdict redesign — two axes, swing-guarded labels
 
----
+`classify_move(user, best, pre)` now takes a third argument and uses two independent measurements:
+
+- `relative_loss = max(0, best_score − user_score)` — drives the band ladder (Best / Good / Inaccuracy / Mistake / Blunder).
+- `absolute_swing = user_score − pre_score` — gates the worst labels.
+
+When the band would land at `Mistake` or `Blunder` *but* `absolute_swing >= 0` (the move improved or held), the verdict caps at `Inaccuracy`. The student "missed something stronger" but did not actively hurt their position; calling that a Mistake (and slapping `?` on the SAN) is misleading.
+
+Headline format updated to surface both deltas:
+
+- Best: `You played Nf3 — Best (Δ +0.30).`
+- Good / Inaccuracy: `You played Ng5 — Inaccuracy (Δ +3.00 vs Δ +4.26 best).`
+- Mistake / Blunder (only when swing actually negative): `You played f3? — Mistake (Δ -2.66 vs Δ -0.02 best).`
+- BestAvailable keeps its existing "Position was already lost" framing.
+
+Implementation: `MoveAnalysis.pre_score: Value` populated once per `analyze_position` call (the value was already computed alongside `pre_move_trace`, just dropped). `MoveAnalysis::classify(best_score)` reads `self.pre_score`. Files: `engine/src/analysis/verdict.rs`, `engine/src/analysis/move_analysis.rs`, `cli/src/retrospective/mod.rs`.
+
+### `InitiativeOutcome` — forcing-hierarchy narrator
+
+New outcome + narrator that encodes the *checks > captures > threats > quiet* forcing hierarchy 1500+ ELO players carry as a procedural habit. Three templates picked by gating on the captured signals:
+
+- **Template 1 (reinforcement)**: user's move added pressure AND opponent's `pv[1]` is genuinely quiet → *"Your move creates a threat the opponent has to address — there's no check or capture available to play first."* Verified in real play on Qh5 setting up Qxf7#.
+- **Template 2 (refutation)**: opponent's reply is check or capture AND settled-ply eval swung against user (≥50 cp gate) → *"Your move creates a threat — but the opponent has Qa3+, a check that takes priority. Checks must be answered before any other threat, so yours doesn't get a chance to land."*
+- **Template 3 (held despite)**: opponent's reply is check or capture AND user is still favored at settled-ply → *"Your move creates a threat. The opponent's Qa3+ has to be answered first — checks come before threats — but after the dust settles, your threat still lands and you're better."*
+
+Check-dominates-capture rule applied in phrasing: `Bxh7+` narrates as "a check that takes priority," not "a capture." Outcome shape: `InitiativeOutcome { user_move_was_threat, opponent_reply_is_check, opponent_reply_is_capture, opponent_reply_san, eval_swing_cp, user_still_favored }`. Reuses `compute_threats_outcome` + `compute_king_safety_outcome` for the threat-detection signal so the gate matches what the existing narrators would consider a threat. Wired between `pieces_positional` and the cross-term multipliers; consumes nothing from `term_deltas` (move-relationship, not eval-term).
+
+Files: `engine/src/analysis/initiative_outcome.rs`, `cli/src/retrospective/initiative_narration.rs`.
+
+### Three "Stockfish-conflated values should be split signals" fixes
+
+Real-game retrospective on `1.e4 g6` exposed three classes of misleading attribution; user pushed back on threshold-tuning ("we already use the 50% cumulative cut-off; thresholds only exist for super-quiet moves") and asked for principled splits. All three landed:
+
+#### MinorBehindPawn phrasing — neutral wording
+
+Stockfish's `minor_behind_pawn` term fires on the *geometry* (any pawn directly in front of a minor), not on which piece moved. After `1.e4 g6` it fired because black's f8 bishop lost its g7 pawn cover — but the narration *"a minor stepped out from behind its pawn"* implied the minor moved. Rephrased to neutral wording in `pieces_positional_narration.rs`:
+
+- worsened: "a minor lost its pawn cover"
+- improved: "a minor gained pawn cover"
+
+Two-line change.
+
+#### Material split — `MaterialPieceValue` + `MaterialPsqPositional`
+
+`pos.psq_score()` (which our trace stored as `material`) bakes piece values into the PSQ tables, so `Material` shifted on every quiet move (PSQ delta from pieces moving), not just on captures. The fallback line surfaced "Also hurt: material -1.00" on `1.e4 g6` even though no captures occurred — purely a PSQ-positional shift mislabeled as colloquial material.
+
+Fix: split the trace's `material` field into two named components.
+
+- `MaterialBreakdown { piece_value, psq_positional }` replaces `material: Score` on `EvalTrace`. `total()` matches the pre-split aggregate exactly.
+- `piece_value` = `Σ count(pt) × piece_value(pt)` over `Pawn..Queen`, white-minus-black. Changes only on captures and promotions.
+- `psq_positional` = `psq_score - piece_value`. Captures the table-driven positional contribution; changes on every piece move.
+- New `TermId::MaterialPieceValue` (pretty: "material") + `TermId::MaterialPsqPositional` (pretty: "piece placement"). Both `Timing::Outcome` (settled-ply, like the old aggregate).
+- `MaterialOutcome` narrator unchanged — still capture-driven; consumes both new variants when it fires. When silent (no captures), `psq_positional` falls through to the fallback as "piece placement," accurately framed as a positional shift rather than colloquial material.
+- `eval_report` shows `material` (aggregate) above indented `piece-value` / `psq-positional` sub-rows.
+
+Files: `engine/src/eval/mod.rs` (struct + helper), `engine/src/analysis/term_id.rs`, `cli/src/eval_report.rs`, `cli/src/retrospective/mod.rs`.
+
+#### Shelter split — `KingPawnShield` + `KingPawnStorm` + `KingPawnDistance`
+
+`pawns::king_safety` returned a single Score combining three named chess concepts: friendly pawn shield (`SHELTER_BASE + Σ SHELTER_STRENGTH`), enemy pawn storm (`−Σ UNBLOCKED_STORM` or `−BLOCKED_STORM`), and endgame king-pawn-distance penalty. Stockfish's `UNBLOCKED_STORM` table is *non-monotonic* in rank (the values are empirically tuned), so a black g7→g6 pawn push produces a +30 cp shift on white's storm score — pre-split, this got narrated as "the opponent's king is safer: shelter strengthened." Misleading.
+
+Fix: same pattern as Material. Decompose the value into three named peers.
+
+- `pawns::ShelterComponents { pawn_shield, pawn_storm, king_pawn_distance }` returned by `king_safety`. `total()` matches the pre-split aggregate.
+- `evaluate_shelter` returns `(shield, storm)` as a pair; the castling-rights speculation in `king_safety` picks the candidate with the highest combined mg (existing behavior) and returns its components.
+- `KingBreakdown` now carries six fields: `pawn_shield`, `pawn_storm`, `king_pawn_distance`, `danger`, `pawnless_flank`, `flank_attacks`. `KingBreakdown::shelter_total()` sums the first three (used by king-danger formula's `mg_shelter` consumer; behavior unchanged).
+- `TermId::KingShelter` removed; `TermId::KingPawnShield`, `KingPawnStorm`, `KingPawnDistance` added. All three `Timing::State`.
+- `KingSafetySnapshot` carries shield + storm + king-pawn-distance components separately (replacing flat `shelter_mg`/`shelter_eg`).
+- King-safety narrator narrates **shield only** ("Your king is more exposed: pawn shield weakened..."). `KingPawnStorm` and `KingPawnDistance` fall through to the fallback as their own named terms — Stockfish's storm tables can't be cleanly editorialized into directional verbs without lying about the user's intent on common pawn pushes.
+- `consumed_terms` push when narrator fires: `KingPawnShield` (covered by the prose), `KingDanger`, `KingPawnlessFlank`, `KingFlankAttacks`. Storm and distance free to surface in the fallback line.
+
+The `1.e4 g6` retrospective now reads honestly: *"Your king is more exposed: pawn shield weakened (+2.22 → +1.28)"* — attributing to black's own shield drop (g7 was part of the shield, g6 isn't) instead of the prior misleading "opponent's king is safer."
+
+Files: `engine/src/pawns.rs` (split + components struct), `engine/src/eval/king.rs` (six-field breakdown), `engine/src/analysis/term_id.rs`, `engine/src/analysis/king_safety_outcome.rs`, `cli/src/retrospective/king_safety_narration.rs`, `cli/src/eval_report.rs`.
+
+### Tests + clippy
+
+582 engine + 151 cli = **733 tests passing** (+25 net since the prior 2026-04-25 overhaul commit: 4 verdict, 8 initiative outcome, 11 initiative narrator, 1 material-split exactness, 1 shelter-split exactness). Clippy clean. The split refactors required updating ~10 test fixtures across `term_delta.rs`, `move_analysis.rs`, `term_id.rs`, `king_safety_outcome.rs`, `pawns.rs`, `eval/king.rs`, `eval_report.rs`, `secondary_terms.rs`, `king_safety_narration.rs`.
 
 ## Open dockets and follow-ups
 
@@ -157,20 +330,11 @@ These sections collect open items across all prior sessions — not specific to 
 ### Medium-effort follow-ups still pending from the 2026-04-24 feedback
 
 - **REPL `analyze <move>`** — currently `analyze` takes `[N] [P]`; extending to `analyze <move>` would let the student analyze a specific candidate before committing, without violating the design-brief rule against pre-commit every-move analysis (this is user-initiated per move, not automatic). Partial alignment with the existing `on-demand` analysis mode in the pipeline design brief.
-- **Retrospective latency (~2 s per human move).** Runs a full-depth search with `multi_pv=3` + `force_include=[user_mv]` — same wall-time as the engine's own move. No fix on the roadmap; options to explore after profiling: cap retrospective depth below search depth, reuse the just-completed engine search's TT warmth, run async while the human picks their next move.
 - **Per-piece-type mobility raw square counts** — HANDOFF's older "per-piece-type mobility counts" docket item. Surface the raw squares-attacked-in-safe-area count alongside the cp value: "knight activity improved (+0.60 → +0.80 — sees 7 squares, up from 5)". Requires tracking popcount alongside the Score per type. Would help demystify the "activity" term when it fires on moves where no piece of that type actually moved.
-
-### Suspected-but-unverified (next session profiles these)
-
-- **~4 s CLI startup.** Two plausible contributors:
-  - Magic-bitboard search at `LazyLock` init (CLAUDE.md estimates "tens of ms" per process; may be wrong).
-  - Opening-book init: `engine/src/openings.rs` replays Lichess TSVs through the SAN parser at first use to build a ~3,500-entry `HashMap<EPD, OpeningIdentification>` — plausible 4 s culprit.
-  - Fix path: bake magics as `const` (CLAUDE.md "Deferred optimization"); pre-serialise the opening-book map and load via `bincode` or `rkyv`.
-- **~2 s per-move retrospective pause.** The retrospective runs a full-depth search — same cost as the engine's own move — but the student has already waited for that. Two extra costs on top: the MultiPV=3 slot-search + trace capture on every ply. Whether the 2 s is dominated by the extra MultiPV passes or the `analyze_position` bookkeeping is unknown pre-profile.
 
 ### Still on the docket from earlier tuning rounds
 
-**Priority for the next session** (after profiling): continue **playing real retrospective games** end-to-end. Every narrator has unit tests, but the phrasing was picked a priori — ongoing real-game use is how the thresholds + wording get fine-tuned. Expected workflow:
+**Priority for the next session**: continue **playing real retrospective games** end-to-end. Every narrator has unit tests, but the phrasing was picked a priori — ongoing real-game use is how the thresholds + wording get fine-tuned. Expected workflow:
 
 1. `chess-tutor play` against the engine (set a bot strength) for 10-20 moves.
 2. Read every retrospective line. Is the verdict right? Does the term attribution point at the right chess concept? Does a beginner understand the phrasing, or is it engine jargon leaking through?
@@ -192,36 +356,17 @@ These sections collect open items across all prior sessions — not specific to 
 
 ### Also on the docket
 
-- **Tune `MoveVerdict` thresholds** — `Good` firing at 47 cp in the opening still feels too harsh after earlier testing. Revisit `BEST_LOSS_MAX` / `GOOD_LOSS_MAX` in `engine/src/analysis.rs`.
-- **Verdict labels conflate "missed a stronger move" with "actually worsened the position."** Today's `classify_move` is purely relative: `verdict = f(user_score − best_score)`. A real-game test exposed the disconnect: Ng5 went from pre-move +5.23 to post-move +8.23 (a +3 pawn *improvement*) but classified as `Mistake` because cxd4 would have reached +9.49. The user's position actually got better; the label "Mistake" implies it got worse. Concrete redesign:
-  1. **Two axes instead of one.** `absolute_swing = user_score − pre_score` (user-POV; whether the move helped, hurt, or held). `relative_loss = best_score − user_score` (the existing axis; how much was missed). Both readily computable — `pre_score` derives from `MoveAnalysis.pre_move_trace`, `user.score` is already a field, `best.score` is `analyses[0].score`.
-  2. **Gate `Mistake` / `Blunder` labels on `absolute_swing < 0`.** When the user's move improves or holds the position, cap the label at `Inaccuracy` regardless of how much they missed. The `Best` / `Good` / `Inaccuracy` ladder still uses `relative_loss` to differentiate within that band.
-  3. **`?` / `??` annotations follow the labels.** Only fire on `Mistake` / `Blunder`, which now only fire when the move *actually* worsened the position. The annotation reads as "your move hurt your position" rather than "you missed something better" — much closer to the human "??" intuition.
-  4. **Headline shows both deltas:** `You played {SAN}{annot} — {verdict} (Δ +X.XX vs Δ +Y.YY best)` where the first is user's `absolute_swing` and the second is best's `absolute_swing` (`best_score − pre_score`). Omit the "vs … best" half when user played the absolute best.
-
-  Examples:
-  - User played the best move: *"You played Nf3 — Best (Δ +3.00)"*
-  - User missed a slightly stronger continuation: *"You played Ng5 — Inaccuracy (Δ +3.00 vs Δ +4.26 best)"*
-  - User actually worsened the position (default depth-10 view of Ng5 sees the mate-in-7): *"You played Ng5?? — Blunder (Δ -328.04 vs Δ +4.26 best)"*
-
-  The depth-10 case is what the user actually experiences in normal play; the depth-0 case is the "did the engine miss the refutation too" diagnostic case. The annotation differentiation makes the verdict at-a-glance honest: `??` means the move *actually* hurt, not just that a better move existed. Implementation: pass `pre_score` into `classify_move` alongside `best_score` and `user_score`. Update `verdict_label`, `verdict_annotation`, and the headline render in `cli/src/retrospective/mod.rs`. ~50–80 lines including tests.
-- **`InitiativeOutcome` narrator — forcing-hierarchy detection.** When the user's move was threat-creating (any of `theirs_hanging_delta` / `theirs_see_losing_delta` / `theirs_pressured_delta` / `theirs_attackers_count_delta` is positive at ply 1) but the opponent's `ma.pv[1]` is itself a check or a meaningful capture AND the eval at settled-ply is meaningfully worse than at ply 1, narrate the initiative reversal: *"You created a threat, but [Qa3+] is a check that takes priority over your threat."* Codifies the "checks > threats > captures > quiet" forcing hierarchy that ELO 1500+ players carry as a procedural habit. Doesn't need search-driven mate detection — depth ≥ 1 suffices because we just need the opponent's best one-ply reply (`pv[1]` plus an `in_check()` test after applying it). Shape:
-  - `InitiativeOutcome { user_move_was_threat: bool, opponent_reply_is_check: bool, opponent_reply_is_capture: bool, opponent_reply_san: Option<String>, eval_swing_cp: i32 }`
-  - new narrator at `cli/src/retrospective/initiative_narration.rs`
-  - wired into `retrospective/mod.rs` after `pieces_positional` and before the fallback Shifts line
-  - consumes nothing from `term_deltas` — this is about move-relationship rather than eval terms
-  - 50 cp gate on `eval_swing_cp` to suppress mutual-forcing-equal exchanges
-  - effort sized like `BlockedCenterOutcome` / `CastlingOutcome` (~300 lines including tests). Sits between the existing narrators and the deferred Phase-5 tactics library; you get the most common "your forcing move was outranked" teaching without pattern-matching named tactics.
-- **`MaterialOutcome` PSQ annotation** — currently captures drive material narration but PSQ shifts (e.g., knight moves to a better square, gaining ~15 cp of positional material) slip silently into `Shifts: material -1.24`. Could label those as "positional PSQ shift" when no captures are present.
+- **Tune `MoveVerdict` thresholds** — `Good` firing at 47 cp in the opening still feels too harsh after earlier testing. Revisit `BEST_LOSS_MAX` / `GOOD_LOSS_MAX` in `engine/src/analysis/verdict.rs`. (Distinct from the now-landed swing-guard, which only changes *what* triggers Mistake/Blunder; the band thresholds themselves are untouched.)
 - **Pre-existing-vs-newly-attacked threat distinction.** When the threats narrator lists pieces under "lose material to exchanges" or "hanging," it currently shows the post-move list without distinguishing pieces that *also* appeared on the pre-move list. Surfaced by a real game where d4 was already hanging before Ng5 — the narrator listed d4 alongside e6 (the actually-new threat from Ng5), missing the teaching moment *"d4 was already free; cxd4 grabs it."* Compare pre vs post `ours_hanging` / `theirs_hanging` / `ours_see_losing` / `theirs_see_losing` lists; phrase pre-existing entries differently (*"hanging pawn on d4 was available — your move didn't capture it"*) so missed opportunities flag clearly.
 - **Pawn-structure file-level detail** — deferred Tier-3 polish. Current narration says "doubled a pawn" without naming the file; a re-walk of `pawns.rs` classification with per-pawn data would let us say "doubled pawns on the c-file."
 - **Per-piece-type mobility counts** — current mobility narration shows cp (e.g., "+0.60 → +0.20"). Could also surface raw square counts ("knight sees 5 squares, down from 8") — requires tracking popcount alongside the mobility Score per type.
+- **Storm narration phrasing** — post-shelter-split, `KingPawnStorm` shifts surface in the fallback as a raw cp delta. If real-game play shows large storm shifts that would benefit from narration, design phrasings that respect the non-monotonic table values (don't say "storm pressure rose" if the user pushed forward into a less-threatening rank-table cell). Defer until real signals demand it.
 
 ### Deferred (will remain deferred a while)
 
 - **Cheap-pass evaluator** (Phase 5): depth-1 qsearch + SEE over every legal root move. Enables surprise tagging on moves below the MultiPV horizon — where "bad moves that look tempting to a 400-1000 player" live.
 - **Bishop-pair narrator** for `Imbalance`. The dominant teachable case in Stockfish's piece-pair table — *"You traded off the bishop pair"* / *"You held onto the bishop pair"* would consume `TermId::Imbalance` from the fallback. Detect by counting `Bishop` per side pre/post; narrate when either flips between 2 and 1. Low priority but the highest-leverage of the still-uncovered terms.
-- **Initiative narration**: too abstract for 1200 ELO; defer indefinitely. Will continue to fall through to "Also helped / hurt" when meaningful (rare).
+- **`TermId::Initiative` narration**: Stockfish's complexity-correction term itself is too abstract for 1200 ELO; defer indefinitely. Falls through to "Also helped / hurt" when meaningful (rare). (Distinct from the now-landed `InitiativeOutcome`, which is about move-relationship and has nothing to do with the eval term.)
 - **Phase 4**: signal-mask (zero each term, re-rank, record `MaskedHint`).
 - **Phase 5**: tactics library (absolute pin, relative pin, fork, skewer, double attack).
 - **Phase 6 — platform-specific renderers (Swift, Kotlin, egui)**: **moved out of "deferred"** — this is now the active "Next session" focus per the top of this file. Engine FFI crate (`core/ffi/`) is still TODO; first concrete step.
@@ -232,7 +377,7 @@ These sections collect open items across all prior sessions — not specific to 
 
 *(Canonical recipe. Re-read before starting any new sub-term split.)*
 
-A step-by-step checklist for decomposing a monolithic eval term into a `XxxBreakdown` with per-sub-term `Score` fields. This pattern was applied to pawns, pieces, mobility, threats, king, and passed — **every splittable term now has a breakdown**. This section remains as canonical reference in case a new term is added or a breakdown needs to be widened (e.g., per-passer detail on passed). Skip space / initiative / imbalance / material — see "don't split" at bottom.
+A step-by-step checklist for decomposing a monolithic eval term into a `XxxBreakdown` with per-sub-term `Score` fields. This pattern has been applied to **pawns, pieces, mobility, threats, king, passed, material, and the `KingShelter` sub-term itself** — when a Stockfish "value" combines two distinct chess concepts (PSQ tables conflate piece values + positional bonus; shelter conflates pawn-shield + pawn-storm + king-pawn-distance), splitting into named peers lets the teaching narrator attribute correctly rather than fake a unified story. This section is the canonical reference in case a new term is added or a breakdown needs to be widened (e.g., per-passer detail on passed). Skip space / initiative / imbalance — see "don't split" at bottom.
 
 ### The pattern in one sentence
 
@@ -319,7 +464,7 @@ None. All splittable terms are split. **Widening** candidates remain (per-passer
 - **Space** (`eval/space.rs`) — single counted value × piece-count scaling. No internal structure worth surfacing.
 - **Initiative** (`eval/initiative.rs`) — single complexity correction, already net (no colour split).
 - **Imbalance** (`material.rs`) — table lookup, monolithic.
-- **Material** (PSQ sum maintained incrementally in `Position`) — not an eval-pass term; not a split candidate.
+- ~~**Material**~~ — *was* in this list, but the 2026-04-25 verdict-and-splits session showed the PSQ sum *does* combine two named concepts (raw piece values + PSQT positional bonus) and the conflation actively misleads narration. Now split into `MaterialPieceValue` + `MaterialPsqPositional`. The pattern is: "if a Stockfish single-Score conflates two distinct chess concepts, split it" — applied here, and to `KingShelter` for the same reason.
 
 ---
 
@@ -629,57 +774,82 @@ Deferred: `KRKP`/`KRKB`/`KRKN`/`KQKR`/`KQKP` (user knows these manually), pawn-h
 
 ```
 chess-tutor-2/
-├── CLAUDE.md                    # evergreen guidance, auto-loaded
-├── HANDOFF.md                   # this file — current state snapshot
-├── reference/Stockfish-sf_11/   # extracted reference source, read-only
+├── CLAUDE.md                       # evergreen guidance, auto-loaded
+├── HANDOFF.md                      # this file — current state snapshot
+├── Cargo.toml                      # workspace root (members below)
+├── reference/Stockfish-sf_11/      # extracted reference source, read-only
 ├── rust-toolchain.toml
-└── core/
-    ├── Cargo.toml               # workspace root (members: engine, cli)
-    ├── engine/                  # chess-tutor-engine (lib)
-    │   └── src/
-    │       ├── lib.rs           # pub mod … (alphabetical)
-    │       ├── analysis.rs      # teaching pipeline: TermId, TermDelta, MoveAnalysis, analyze_position
-    │       ├── types.rs         # enums + newtypes + piece values
-    │       ├── bitboard.rs      # Bitboard + ops + const masks
-    │       ├── attacks.rs       # const attack tables
-    │       ├── magics.rs        # slider magic bitboards
-    │       ├── zobrist.rs       # hash keys (main + pawn + ep + side + castling)
-    │       ├── psqt.rs          # piece-square tables
-    │       ├── material.rs      # game phase, imbalance, scale factor
-    │       ├── position.rs      # board state, FEN, do/undo, blockers/pinners
-    │       ├── movegen.rs       # pseudo-legal + legal + perft
-    │       ├── pawns.rs         # pawn structure (PawnsBreakdown) + king shelter/storm
-    │       ├── tt.rs            # transposition table
-    │       ├── movepick.rs      # staged move picker + butterfly history
-    │       ├── search.rs        # alpha-beta + qsearch + pruning + MultiPV + settled-ply
-    │       ├── engine.rs        # public API: Engine, SearchParams, SearchLine
-    │       ├── san.rs           # Standard Algebraic Notation (parse + format)
-    │       ├── openings.rs      # ECO/name lookup via bundled Lichess TSVs
-    │       ├── traps/          # refutation-tree library
-    │       │   ├── mod.rs       # schema + invariants + validator + scan APIs + pending-trap FSM
-    │       │   └── damiano.rs   # Damiano Defense refutation
-    │       ├── bitbases.rs      # retrograde-computed endgame bitbases (KPK)
-    │       ├── endgame.rs       # specialised endgame evaluators (KXK, KBNK, KPK, KNNK, KNNKP)
-    │       └── eval/            # main evaluator (EvalTrace lives in mod.rs)
-    │           ├── mod.rs       # Evaluator + initialize + tapered assembly + scale_factor + EvalTrace
-    │           ├── pieces.rs    # per-piece-type positional terms + mobility (PiecesBreakdown)
-    │           ├── king.rs      # pawn-shelter + kingDanger + flank penalties
-    │           ├── threats.rs   # hanging / minor / rook / king / pawn-push / queen-attack
-    │           ├── passed.rs    # passed-pawn scoring
-    │           ├── space.rs     # middlegame space
-    │           └── initiative.rs  # complexity-driven mg/eg correction
-    └── cli/                     # chess-tutor-cli (bin name `chess-tutor`)
-        └── src/
-            ├── main.rs          # clap dispatch: board/moves/eval/opening/search/play
-            ├── board.rs         # ANSI board renderer
-            ├── uci.rs           # Move ↔ UCI string
-            ├── eval_report.rs   # EvalTrace pretty-printer
-            ├── analysis_report.rs  # MoveAnalysis pretty-printer (--analyze output)
-            ├── retrospective.rs    # post-move verdict renderer (auto-fires in play)
-            └── play.rs          # interactive REPL
+├── core/
+│   ├── engine/                     # chess-tutor-engine (lib)
+│   │   └── src/
+│   │       ├── lib.rs              # pub mod … (alphabetical)
+│   │       ├── types.rs            # enums + newtypes + piece values
+│   │       ├── bitboard.rs         # Bitboard + ops + const masks
+│   │       ├── attacks.rs          # const attack tables
+│   │       ├── magics.rs           # slider magic bitboards
+│   │       ├── zobrist.rs          # hash keys (main + pawn + ep + side + castling)
+│   │       ├── psqt.rs             # piece-square tables
+│   │       ├── material.rs         # game phase, imbalance, scale factor
+│   │       ├── position/           # board state, FEN, do/undo, blockers/pinners, queries
+│   │       ├── movegen.rs          # pseudo-legal + legal + perft + MoveList
+│   │       ├── pawns.rs            # pawn structure (PawnsBreakdown) + ShelterComponents
+│   │       ├── tt.rs               # transposition table (Clone-able)
+│   │       ├── movepick.rs         # staged move picker + butterfly history
+│   │       ├── search.rs           # alpha-beta + qsearch + pruning + MultiPV + settled-ply
+│   │       ├── engine.rs           # public API: Engine, SearchParams, SearchLine
+│   │       ├── san.rs              # Standard Algebraic Notation (parse + format)
+│   │       ├── openings.rs         # ECO/name lookup via bundled Lichess TSVs
+│   │       ├── traps/              # refutation-tree library
+│   │       │   ├── mod.rs          # schema + invariants + validator + scan APIs + pending-trap FSM
+│   │       │   └── damiano.rs      # Damiano Defense refutation
+│   │       ├── bitbases.rs         # retrograde-computed endgame bitbases (KPK)
+│   │       ├── endgame.rs          # KXK / KBNK / KPK / KNNK / KNNKP specialists
+│   │       ├── analysis/           # teaching pipeline structured outputs
+│   │       │   ├── mod.rs          # re-exports + post_user_move helper
+│   │       │   ├── term_id.rs      # 45-variant TermId enum + label/timing/net_score
+│   │       │   ├── term_delta.rs   # compute_term_deltas (Outcome/State timing-aware)
+│   │       │   ├── move_analysis.rs # MoveAnalysis + analyze_position
+│   │       │   ├── verdict.rs      # MoveVerdict + classify_move (two-axis, swing-guarded)
+│   │       │   ├── surprise.rs     # SurpriseKind (LooksGoodButBad / LooksBadButGood)
+│   │       │   ├── material_outcome.rs / threats_outcome.rs / king_safety_outcome.rs /
+│   │       │   ├── pawn_structure_outcome.rs / mobility_outcome.rs /
+│   │       │   ├── passed_pawns_outcome.rs / pieces_positional_outcome.rs /
+│   │       │   ├── space_outcome.rs / blocked_center_outcome.rs /
+│   │       │   ├── castling_outcome.rs / initiative_outcome.rs
+│   │       │   └── test_support.rs # shared eval-trace fixtures for the outcome tests
+│   │       └── eval/               # main evaluator (EvalTrace lives in mod.rs)
+│   │           ├── mod.rs          # Evaluator + initialize + tapered assembly + scale_factor + EvalTrace
+│   │           ├── pieces.rs       # per-piece-type positional terms (PiecesBreakdown)
+│   │           ├── king.rs         # KingBreakdown { pawn_shield, pawn_storm, king_pawn_distance, danger, … }
+│   │           ├── threats.rs      # ThreatsBreakdown (9 sub-terms)
+│   │           ├── passed.rs       # PassedBreakdown (4 sub-terms)
+│   │           ├── space.rs        # middlegame space
+│   │           └── initiative.rs   # complexity-driven mg/eg correction
+│   ├── narration/                  # chess-tutor-narration (lib) — structured outcomes → prose
+│   │   └── src/
+│   │       ├── lib.rs              # public: format_retrospective + NarrationOptions
+│   │       ├── util.rs             # piece names, attackers list, score formatters, verdict labels
+│   │       ├── surprise_tag.rs     # shallow-vs-deep surprise-phrase selector
+│   │       ├── secondary_terms.rs  # cumulative-prefix "Also helped / hurt" line
+│   │       └── *_narration.rs      # per-outcome render functions (×11)
+│   └── cli/                        # chess-tutor-cli (bin name `chess-tutor`)
+│       └── src/
+│           ├── main.rs             # clap dispatch: board/moves/eval/opening/search/play
+│           ├── board.rs            # ANSI board renderer (Unicode glyphs + chequered bg)
+│           ├── uci.rs              # Move ↔ UCI string
+│           ├── eval_report.rs      # EvalTrace pretty-printer
+│           ├── analysis_report.rs  # MoveAnalysis pretty-printer (--analyze output)
+│           ├── retrospective.rs    # ~70-line orchestrator: analyze_position + format_retrospective + stdout
+│           └── play.rs             # interactive REPL
+└── desktop/                        # chess-tutor-desktop (egui binary)
+    ├── Cargo.toml                  # eframe + engine + narration deps
+    └── src/main.rs                 # single-file app (~900 LOC); see "Iteration B" above for layout
 ```
 
 Future files (create when porting the corresponding piece):
+- `core/ffi/` — C ABI for Swift/Kotlin bindings (planned; first step toward Apple/Android apps)
+- `apple/` — Swift/SwiftUI multi-platform app
+- `android/` — Kotlin/Jetpack Compose app
 - `engine/src/tactics/` — Phase-5 tactic detectors
 - `engine/src/timeman.rs` — proper time management (eventual)
 

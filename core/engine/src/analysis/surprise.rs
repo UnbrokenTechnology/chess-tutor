@@ -108,6 +108,7 @@ mod tests {
             ply_traces: vec![trace],
             settled_ply: None,
             pre_move_trace: EvalTrace::zero(),
+            pre_score: Value::ZERO,
             term_deltas: Vec::new(),
         }
     }
@@ -161,6 +162,7 @@ mod tests {
             ply_traces: Vec::new(),
             settled_ply: None,
             pre_move_trace: EvalTrace::zero(),
+            pre_score: Value::ZERO,
             term_deltas: Vec::new(),
         };
         assert_eq!(detect_surprise(&ma, Color::White), None);

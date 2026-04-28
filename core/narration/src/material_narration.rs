@@ -8,16 +8,16 @@
 //! or only-legal-recaptures. The student often has real
 //! alternatives at each ply.
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::{MaterialOutcome, MoveAnalysis};
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, PieceType};
 
-use super::util::{piece_name, pv_to_san_through};
+use crate::util::{piece_name, pv_to_san_through};
 
-pub(super) fn render_material_sequence(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_material_sequence(
+    out: &mut dyn io::Write,
     pre_move_pos: &Position,
     user: &MoveAnalysis,
     outcome: &MaterialOutcome,

@@ -19,6 +19,7 @@ pub(super) fn ma_with_pv(pv: Vec<Move>, settled_ply: Option<usize>) -> MoveAnaly
         ply_traces: Vec::new(),
         settled_ply,
         pre_move_trace: EvalTrace::zero(),
+        pre_score: Value::ZERO,
         term_deltas: Vec::new(),
     }
 }

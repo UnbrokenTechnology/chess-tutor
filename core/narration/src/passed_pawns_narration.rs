@@ -2,7 +2,7 @@
 //! side, mirroring the pawn-structure and king-safety precedence
 //! (worsening wins over improving on the same side).
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::PassedPawnsOutcome;
 use chess_tutor_engine::eval::PassedBreakdown;
@@ -120,8 +120,8 @@ fn their_passed_improved_line(o: &PassedPawnsOutcome) -> Option<String> {
     ))
 }
 
-pub(super) fn render_passed_pawns(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_passed_pawns(
+    out: &mut dyn io::Write,
     outcome: &PassedPawnsOutcome,
 ) -> io::Result<bool> {
     let mut wrote = false;

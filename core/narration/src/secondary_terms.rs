@@ -4,7 +4,7 @@
 //! by magnitude. Whichever terms the specialised narrators already
 //! consumed are filtered out.
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::{cumulative_prefix, MoveAnalysis, TermId};
 use chess_tutor_engine::types::Color;
@@ -21,8 +21,8 @@ const RETROSPECTIVE_TOP_PERCENT: f32 = 50.0;
 /// magnitude. When a term has already been "used" by an earlier
 /// narration line (e.g. Material), pass it in `skip` so the list
 /// shows only the other contributors.
-pub(super) fn render_secondary_terms(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_secondary_terms(
+    out: &mut dyn io::Write,
     user: &MoveAnalysis,
     root_stm: Color,
     skip: &[TermId],
@@ -68,7 +68,7 @@ pub(super) fn render_secondary_terms(
 }
 
 fn write_sorted_line(
-    out: &mut io::StdoutLock<'_>,
+    out: &mut dyn io::Write,
     heading: &str,
     mut rows: Vec<(TermId, i32)>,
 ) -> io::Result<()> {
@@ -88,9 +88,9 @@ mod tests {
     fn partition_helped_and_hurt_from_white_pov() {
         // Raw deltas (white-POV): material +80, pawns connected -30.
         // Root = white, so sign=+1: material helps, connected hurts.
-        let rows: Vec<(TermId, i32)> = vec![(TermId::Material, 80), (TermId::PawnsConnected, -30)];
+        let rows: Vec<(TermId, i32)> = vec![(TermId::MaterialPieceValue, 80), (TermId::PawnsConnected, -30)];
         let (helped, hurt): (Vec<_>, Vec<_>) = rows.into_iter().partition(|(_, cp)| *cp > 0);
-        assert_eq!(helped, vec![(TermId::Material, 80)]);
+        assert_eq!(helped, vec![(TermId::MaterialPieceValue, 80)]);
         assert_eq!(hurt, vec![(TermId::PawnsConnected, -30)]);
     }
 
@@ -100,28 +100,28 @@ mod tests {
         // Root = black, sign = -1: material hurts, connected helps.
         let sign = -1;
         let rows: Vec<(TermId, i32)> = vec![
-            (TermId::Material, 80 * sign),
+            (TermId::MaterialPieceValue, 80 * sign),
             (TermId::PawnsConnected, -30 * sign),
         ];
         let (helped, hurt): (Vec<_>, Vec<_>) = rows.into_iter().partition(|(_, cp)| *cp > 0);
         assert_eq!(helped, vec![(TermId::PawnsConnected, 30)]);
-        assert_eq!(hurt, vec![(TermId::Material, -80)]);
+        assert_eq!(hurt, vec![(TermId::MaterialPieceValue, -80)]);
     }
 
     #[test]
     fn sort_descending_by_abs_magnitude() {
         let mut rows: Vec<(TermId, i32)> = vec![
-            (TermId::Material, 15),
-            (TermId::KingShelter, 80),
+            (TermId::MaterialPieceValue, 15),
+            (TermId::KingPawnShield, 80),
             (TermId::MobilityKnight, 40),
         ];
         rows.sort_by_key(|(_, cp)| std::cmp::Reverse(cp.abs()));
         assert_eq!(
             rows,
             vec![
-                (TermId::KingShelter, 80),
+                (TermId::KingPawnShield, 80),
                 (TermId::MobilityKnight, 40),
-                (TermId::Material, 15),
+                (TermId::MaterialPieceValue, 15),
             ],
         );
     }

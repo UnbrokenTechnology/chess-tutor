@@ -1,12 +1,12 @@
 //! King-safety narration — exposure and shelter shifts per side,
 //! with flank-aware phrasing and endgame shelter suppression.
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::KingSafetyOutcome;
 use chess_tutor_engine::types::Square;
 
-use super::util::format_shelter_pawns;
+use crate::util::format_shelter_pawns;
 
 /// Engine-cp threshold for narrating a shelter shift. ~0.25 of a
 /// pawn — small enough to catch a single pawn-shield break but
@@ -70,12 +70,16 @@ fn attackers_clause_safer(post_count: i32, pre_count: i32, king_sq: Square) -> S
 
 /// Build a single-line summary describing how *our* king's safety
 /// changed. Returns `None` when the change is too small to be worth
-/// narrating.
+/// narrating. Only the friendly **pawn-shield** component drives the
+/// shelter clause here — the storm component is non-monotonic in
+/// rank by Stockfish's tuning, so its shifts surface separately as
+/// the `king.pawn-storm` term in the fallback line rather than
+/// faking a "shelter strengthened/cracked" story.
 fn our_king_exposure_line(o: &KingSafetyOutcome) -> Option<String> {
     let attackers_up = o.ours_attackers_delta() > 0;
-    let shelter_down = !shelter_narration_suppressed(o)
-        && o.ours_shelter_mg_delta() <= -KING_SHELTER_DELTA_THRESHOLD_CP;
-    if !attackers_up && !shelter_down {
+    let shield_down = !shelter_narration_suppressed(o)
+        && o.ours_pawn_shield_mg_delta() <= -KING_SHELTER_DELTA_THRESHOLD_CP;
+    if !attackers_up && !shield_down {
         return None;
     }
     let mut parts = Vec::new();
@@ -86,11 +90,11 @@ fn our_king_exposure_line(o: &KingSafetyOutcome) -> Option<String> {
             o.ours_post.king_sq,
         ));
     }
-    if shelter_down {
+    if shield_down {
         parts.push(format!(
-            "shelter weakened ({} → {})",
-            format_shelter_pawns(o.ours_pre.shelter_mg),
-            format_shelter_pawns(o.ours_post.shelter_mg),
+            "pawn shield weakened ({} → {})",
+            format_shelter_pawns(o.ours_pre.pawn_shield_mg),
+            format_shelter_pawns(o.ours_post.pawn_shield_mg),
         ));
     }
     Some(format!("Your king is more exposed: {}.", parts.join(", ")))
@@ -99,9 +103,9 @@ fn our_king_exposure_line(o: &KingSafetyOutcome) -> Option<String> {
 /// Mirror of [`our_king_exposure_line`] for the opponent's king.
 fn their_king_exposure_line(o: &KingSafetyOutcome) -> Option<String> {
     let attackers_up = o.theirs_attackers_delta() > 0;
-    let shelter_down = !shelter_narration_suppressed(o)
-        && o.theirs_shelter_mg_delta() <= -KING_SHELTER_DELTA_THRESHOLD_CP;
-    if !attackers_up && !shelter_down {
+    let shield_down = !shelter_narration_suppressed(o)
+        && o.theirs_pawn_shield_mg_delta() <= -KING_SHELTER_DELTA_THRESHOLD_CP;
+    if !attackers_up && !shield_down {
         return None;
     }
     let mut parts = Vec::new();
@@ -112,11 +116,11 @@ fn their_king_exposure_line(o: &KingSafetyOutcome) -> Option<String> {
             o.theirs_post.king_sq,
         ));
     }
-    if shelter_down {
+    if shield_down {
         parts.push(format!(
-            "shelter cracked ({} → {})",
-            format_shelter_pawns(o.theirs_pre.shelter_mg),
-            format_shelter_pawns(o.theirs_post.shelter_mg),
+            "pawn shield cracked ({} → {})",
+            format_shelter_pawns(o.theirs_pre.pawn_shield_mg),
+            format_shelter_pawns(o.theirs_post.pawn_shield_mg),
         ));
     }
     Some(format!(
@@ -127,9 +131,9 @@ fn their_king_exposure_line(o: &KingSafetyOutcome) -> Option<String> {
 
 fn our_king_safer_line(o: &KingSafetyOutcome) -> Option<String> {
     let attackers_down = o.ours_attackers_delta() < 0;
-    let shelter_up = !shelter_narration_suppressed(o)
-        && o.ours_shelter_mg_delta() >= KING_SHELTER_DELTA_THRESHOLD_CP;
-    if !attackers_down && !shelter_up {
+    let shield_up = !shelter_narration_suppressed(o)
+        && o.ours_pawn_shield_mg_delta() >= KING_SHELTER_DELTA_THRESHOLD_CP;
+    if !attackers_down && !shield_up {
         return None;
     }
     let mut parts = Vec::new();
@@ -140,11 +144,11 @@ fn our_king_safer_line(o: &KingSafetyOutcome) -> Option<String> {
             o.ours_post.king_sq,
         ));
     }
-    if shelter_up {
+    if shield_up {
         parts.push(format!(
-            "shelter strengthened ({} → {})",
-            format_shelter_pawns(o.ours_pre.shelter_mg),
-            format_shelter_pawns(o.ours_post.shelter_mg),
+            "pawn shield strengthened ({} → {})",
+            format_shelter_pawns(o.ours_pre.pawn_shield_mg),
+            format_shelter_pawns(o.ours_post.pawn_shield_mg),
         ));
     }
     Some(format!("Your king is safer: {}.", parts.join(", ")))
@@ -152,9 +156,9 @@ fn our_king_safer_line(o: &KingSafetyOutcome) -> Option<String> {
 
 fn their_king_safer_line(o: &KingSafetyOutcome) -> Option<String> {
     let attackers_down = o.theirs_attackers_delta() < 0;
-    let shelter_up = !shelter_narration_suppressed(o)
-        && o.theirs_shelter_mg_delta() >= KING_SHELTER_DELTA_THRESHOLD_CP;
-    if !attackers_down && !shelter_up {
+    let shield_up = !shelter_narration_suppressed(o)
+        && o.theirs_pawn_shield_mg_delta() >= KING_SHELTER_DELTA_THRESHOLD_CP;
+    if !attackers_down && !shield_up {
         return None;
     }
     let mut parts = Vec::new();
@@ -165,11 +169,11 @@ fn their_king_safer_line(o: &KingSafetyOutcome) -> Option<String> {
             o.theirs_post.king_sq,
         ));
     }
-    if shelter_up {
+    if shield_up {
         parts.push(format!(
-            "shelter strengthened ({} → {})",
-            format_shelter_pawns(o.theirs_pre.shelter_mg),
-            format_shelter_pawns(o.theirs_post.shelter_mg),
+            "pawn shield strengthened ({} → {})",
+            format_shelter_pawns(o.theirs_pre.pawn_shield_mg),
+            format_shelter_pawns(o.theirs_post.pawn_shield_mg),
         ));
     }
     Some(format!(
@@ -181,8 +185,8 @@ fn their_king_safer_line(o: &KingSafetyOutcome) -> Option<String> {
 /// Render the king-safety lines (ours, theirs). Per side, exposure
 /// (worsening) takes precedence over safer (improving) when both
 /// fire — worsening is the more urgent teaching message.
-pub(super) fn render_king_safety(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_king_safety(
+    out: &mut dyn io::Write,
     outcome: &KingSafetyOutcome,
 ) -> io::Result<bool> {
     let mut wrote = false;
@@ -236,12 +240,19 @@ mod tests {
         theirs_pre: (i32, i32, i32, i32),
         theirs_post: (i32, i32, i32, i32),
     ) -> KingSafetyOutcome {
+        // Existing tests parameterise only the shield component (the
+        // tuple's 3rd/4th slots, originally `shelter_mg`/`shelter_eg`).
+        // Storm and king-pawn-distance default to zero — separate
+        // tests below exercise storm shifts explicitly.
         let snap = |king_sq: Square, t: (i32, i32, i32, i32)| KingSafetySnapshot {
             king_sq,
             attackers_count: t.0,
             attacks_count: t.1,
-            shelter_mg: t.2,
-            shelter_eg: t.3,
+            pawn_shield_mg: t.2,
+            pawn_shield_eg: t.3,
+            pawn_storm_mg: 0,
+            pawn_storm_eg: 0,
+            king_pawn_distance_eg: 0,
         };
         KingSafetyOutcome {
             ours_pre: snap(ours_kings.0, ours_pre),
@@ -275,7 +286,7 @@ mod tests {
         let line = our_king_exposure_line(&out).expect("shelter drop should fire");
         assert_eq!(
             line,
-            "Your king is more exposed: shelter weakened (+0.80 → +0.30)."
+            "Your king is more exposed: pawn shield weakened (+0.80 → +0.30)."
         );
     }
 
@@ -290,7 +301,7 @@ mod tests {
         let out = ks_outcome((1, 2, 80, 4), (3, 5, 30, 0), (0, 0, 80, 4), (0, 0, 80, 4));
         let line = our_king_exposure_line(&out).expect("both should fire");
         assert!(line.contains("3 attackers on the king ring (up from 1)"));
-        assert!(line.contains("shelter weakened (+0.80 → +0.30)"));
+        assert!(line.contains("pawn shield weakened (+0.80 → +0.30)"));
     }
 
     #[test]
@@ -305,7 +316,7 @@ mod tests {
     fn their_king_exposure_line_shelter_uses_cracked_verb() {
         let out = ks_outcome((0, 0, 80, 4), (0, 0, 80, 4), (0, 0, 90, 4), (0, 0, 50, 4));
         let line = their_king_exposure_line(&out).expect("their shelter drop should fire");
-        assert!(line.contains("shelter cracked (+0.90 → +0.50)"));
+        assert!(line.contains("pawn shield cracked (+0.90 → +0.50)"));
     }
 
     // ---- positive king-safety teaching ------------------------------
@@ -323,7 +334,7 @@ mod tests {
         let line = our_king_safer_line(&out).expect("shelter up should fire");
         assert_eq!(
             line,
-            "Your king is safer: shelter strengthened (+0.30 → +0.80)."
+            "Your king is safer: pawn shield strengthened (+0.30 → +0.80).",
         );
     }
 
@@ -439,7 +450,7 @@ mod tests {
         let mut out = ks_outcome((1, 2, 80, 4), (1, 2, 20, 4), (0, 0, 80, 4), (0, 0, 80, 4));
         out.phase = 64;
         let line = our_king_exposure_line(&out).expect("shelter drop should fire in mg");
-        assert!(line.contains("shelter weakened"));
+        assert!(line.contains("pawn shield weakened"));
     }
 
     #[test]

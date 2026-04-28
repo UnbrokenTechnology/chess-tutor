@@ -100,8 +100,14 @@ pub fn render(trace: &EvalTrace) -> String {
     }
 
     // Single-sided (already net) terms — show only the net columns.
+    // `material` is shown as an aggregate row above the two split
+    // sub-rows (piece value + PSQ positional) so the eval report
+    // mirrors the run-time decomposition without losing the legacy
+    // single-row sum that older snapshots compared against.
     let singles: &[(&str, Score)] = &[
-        ("material", trace.material),
+        ("material", trace.material.total()),
+        ("  piece-value", trace.material.piece_value),
+        ("  psq-positional", trace.material.psq_positional),
         ("imbalance", trace.imbalance),
         ("initiative", trace.initiative),
         ("TOTAL", trace.total),
@@ -143,7 +149,9 @@ fn king_sub_rows<'a>(
     b: &'a KingBreakdown,
 ) -> impl Iterator<Item = (&'static str, Score, Score)> + 'a {
     [
-        ("shelter", w.shelter, b.shelter),
+        ("pawn-shield", w.pawn_shield, b.pawn_shield),
+        ("pawn-storm", w.pawn_storm, b.pawn_storm),
+        ("pawn-distance", w.king_pawn_distance, b.king_pawn_distance),
         ("danger", w.danger, b.danger),
         ("pawnless-flank", w.pawnless_flank, b.pawnless_flank),
         ("flank-attacks", w.flank_attacks, b.flank_attacks),
@@ -318,13 +326,17 @@ mod tests {
 
     #[test]
     fn renders_king_sub_terms() {
-        // King split into 4 sub-terms — spot-check each surfaces under
-        // the aggregate "king" heading.
+        // King split into 6 sub-terms — pawn-shield, pawn-storm,
+        // pawn-distance (= former `shelter` aggregate), plus danger,
+        // pawnless-flank, flank-attacks. Spot-check each surfaces
+        // under the aggregate "king" heading.
         let pos = Position::startpos();
         let (_v, trace) = evaluate_with_trace(&pos);
         let out = render(&trace);
         assert!(out.contains("king"));
-        assert!(out.contains("shelter"));
+        assert!(out.contains("pawn-shield"));
+        assert!(out.contains("pawn-storm"));
+        assert!(out.contains("pawn-distance"));
         assert!(out.contains("danger"));
         assert!(out.contains("pawnless-flank"));
         assert!(out.contains("flank-attacks"));

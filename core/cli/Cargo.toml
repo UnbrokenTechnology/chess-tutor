@@ -11,5 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 chess-tutor-engine = { path = "../engine" }
+chess-tutor-narration = { path = "../narration" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

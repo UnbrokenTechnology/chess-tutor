@@ -42,9 +42,10 @@ pub enum Timing {
 ///
 /// The enum groups terms by how they appear in the trace:
 ///
-/// - *Net* terms (`Material`, `Imbalance`, `Initiative`) are already
-///   stored as `white - black` in the trace; their delta is a single
-///   signed number with no per-colour split.
+/// - *Net* terms (`MaterialPieceValue`, `MaterialPsqPositional`,
+///   `Imbalance`, `Initiative`) are already stored as `white - black`
+///   in the trace; their delta is a single signed number with no
+///   per-colour split.
 /// - *Per-colour scalar* terms (`Space`) appear as `[Score; 2]` in the
 ///   trace and are summed as `white - black` before diffing.
 /// - *Per-colour sub-terms* unpacked from `KingBreakdown`,
@@ -53,16 +54,24 @@ pub enum Timing {
 ///   aggregation as the per-colour scalar terms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TermId {
-    // Single-valued (already net)
-    Material,
+    // Single-valued (already net) — the two halves of Stockfish's
+    // PSQT score, split so colloquial "material" (piece counts)
+    // separates from PSQ positional contribution (every piece move).
+    MaterialPieceValue,
+    MaterialPsqPositional,
     Imbalance,
     Initiative,
 
     // Per-colour scalar
     Space,
 
-    // Per-colour KingBreakdown sub-terms
-    KingShelter,
+    // Per-colour KingBreakdown sub-terms — the pre-split `KingShelter`
+    // term decomposed into the three named chess concepts the
+    // pawns::king_safety calculation actually combines (friendly
+    // pawn shield, enemy pawn storm, endgame king-pawn distance).
+    KingPawnShield,
+    KingPawnStorm,
+    KingPawnDistance,
     KingDanger,
     KingPawnlessFlank,
     KingFlankAttacks,
@@ -116,12 +125,15 @@ impl TermId {
     /// Every [`TermId`] in a fixed order. Iteration order is the order
     /// diffs are emitted before sorting; callers that sort by absolute
     /// tapered delta see deterministic tie-breaking.
-    pub const ALL: [TermId; 42] = [
-        TermId::Material,
+    pub const ALL: [TermId; 45] = [
+        TermId::MaterialPieceValue,
+        TermId::MaterialPsqPositional,
         TermId::Imbalance,
         TermId::Initiative,
         TermId::Space,
-        TermId::KingShelter,
+        TermId::KingPawnShield,
+        TermId::KingPawnStorm,
+        TermId::KingPawnDistance,
         TermId::KingDanger,
         TermId::KingPawnlessFlank,
         TermId::KingFlankAttacks,
@@ -165,11 +177,14 @@ impl TermId {
     /// report aligns with the labels in `eval_report.rs`.
     pub const fn label(self) -> &'static str {
         match self {
-            TermId::Material => "material",
+            TermId::MaterialPieceValue => "material.piece-value",
+            TermId::MaterialPsqPositional => "material.psq-positional",
             TermId::Imbalance => "imbalance",
             TermId::Initiative => "initiative",
             TermId::Space => "space",
-            TermId::KingShelter => "king.shelter",
+            TermId::KingPawnShield => "king.pawn-shield",
+            TermId::KingPawnStorm => "king.pawn-storm",
+            TermId::KingPawnDistance => "king.pawn-distance",
             TermId::KingDanger => "king.danger",
             TermId::KingPawnlessFlank => "king.pawnless-flank",
             TermId::KingFlankAttacks => "king.flank-attacks",
@@ -219,11 +234,17 @@ impl TermId {
     /// [`label`]: Self::label
     pub const fn pretty_label(self) -> &'static str {
         match self {
-            TermId::Material => "material",
+            // Colloquial chess "material" — piece counts only.
+            TermId::MaterialPieceValue => "material",
+            // PSQT positional contribution — pieces ending up on
+            // better/worse squares per the piece-square tables.
+            TermId::MaterialPsqPositional => "piece placement",
             TermId::Imbalance => "piece imbalance",
             TermId::Initiative => "initiative",
             TermId::Space => "space",
-            TermId::KingShelter => "king shelter",
+            TermId::KingPawnShield => "king pawn shield",
+            TermId::KingPawnStorm => "enemy pawn storm",
+            TermId::KingPawnDistance => "king pawn distance",
             TermId::KingDanger => "king safety",
             TermId::KingPawnlessFlank => "pawnless flank",
             TermId::KingFlankAttacks => "flank attacks",
@@ -268,10 +289,14 @@ impl TermId {
     /// trace (Outcome) or the ply-1 trace (State). See [`Timing`].
     pub const fn timing(self) -> Timing {
         match self {
-            // Material captures / imbalance shifts are settled-ply
-            // outcomes — they describe the line's net trade, the same
-            // story the material narrator's capture sequence tells.
-            TermId::Material | TermId::Imbalance => Timing::Outcome,
+            // Both halves of the split material score are settled-ply
+            // outcomes — captures and PSQ shifts both describe the
+            // line's eventual landing, the same story the material
+            // narrator's capture sequence tells. Imbalance shifts
+            // when piece counts change and shares the same framing.
+            TermId::MaterialPieceValue
+            | TermId::MaterialPsqPositional
+            | TermId::Imbalance => Timing::Outcome,
             // Everything else is state immediately after the user's
             // move. Initiative is a complexity correction tied to the
             // current position; surfacing it at settled-ply would
@@ -286,13 +311,18 @@ impl TermId {
     /// [`EvalTrace`].
     pub(super) fn net_score(self, t: &EvalTrace) -> Score {
         match self {
-            TermId::Material => t.material,
+            TermId::MaterialPieceValue => t.material.piece_value,
+            TermId::MaterialPsqPositional => t.material.psq_positional,
             TermId::Imbalance => t.imbalance,
             TermId::Initiative => t.initiative,
 
             TermId::Space => t.space[0] - t.space[1],
 
-            TermId::KingShelter => t.king[0].shelter - t.king[1].shelter,
+            TermId::KingPawnShield => t.king[0].pawn_shield - t.king[1].pawn_shield,
+            TermId::KingPawnStorm => t.king[0].pawn_storm - t.king[1].pawn_storm,
+            TermId::KingPawnDistance => {
+                t.king[0].king_pawn_distance - t.king[1].king_pawn_distance
+            }
             TermId::KingDanger => t.king[0].danger - t.king[1].danger,
             TermId::KingPawnlessFlank => t.king[0].pawnless_flank - t.king[1].pawnless_flank,
             TermId::KingFlankAttacks => t.king[0].flank_attacks - t.king[1].flank_attacks,
@@ -364,11 +394,21 @@ mod tests {
     use crate::types::{Color, PieceType};
 
     #[test]
-    fn net_score_material_is_raw_material_field() {
-        // `material` on EvalTrace is already white-black net.
+    fn net_score_material_split_reads_each_component_separately() {
+        // Both halves of the split material breakdown are
+        // already-net Scores; the term-id net_score lookup just
+        // returns the relevant field.
         let mut t = EvalTrace::zero();
-        t.material = Score::new(42, -17);
-        assert_eq!(TermId::Material.net_score(&t), Score::new(42, -17));
+        t.material.piece_value = Score::new(42, -17);
+        t.material.psq_positional = Score::new(11, 5);
+        assert_eq!(
+            TermId::MaterialPieceValue.net_score(&t),
+            Score::new(42, -17)
+        );
+        assert_eq!(
+            TermId::MaterialPsqPositional.net_score(&t),
+            Score::new(11, 5)
+        );
     }
 
     #[test]
@@ -432,9 +472,17 @@ mod tests {
         );
         assert_eq!(TermId::KingDanger.pretty_label(), "king safety");
         assert_eq!(TermId::PawnsWeakUnopposed.pretty_label(), "weak pawns");
-        // Material is already plain English; the pretty form is the
-        // same as the technical form.
-        assert_eq!(TermId::Material.pretty_label(), "material");
+        // The split material score: piece_value reads as colloquial
+        // "material" in prose, psq_positional reads as "piece
+        // placement" — pieces ending up on better/worse squares.
+        assert_eq!(
+            TermId::MaterialPieceValue.pretty_label(),
+            "material",
+        );
+        assert_eq!(
+            TermId::MaterialPsqPositional.pretty_label(),
+            "piece placement",
+        );
     }
 
     #[test]

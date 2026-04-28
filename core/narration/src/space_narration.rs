@@ -6,7 +6,7 @@
 //! user's own piece count is invariant — their move can't remove
 //! their own pieces — so an "ours" line never fires.)
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::SpaceOutcome;
 
@@ -43,8 +43,8 @@ fn format_pawns(mg: i32) -> String {
     format!("{:+.2}", mg as f32 / 100.0)
 }
 
-pub(super) fn render_space(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_space(
+    out: &mut dyn io::Write,
     outcome: &SpaceOutcome,
 ) -> io::Result<bool> {
     if let Some(line) = theirs_line(outcome) {

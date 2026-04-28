@@ -90,22 +90,20 @@ Files of interest in the reference (in rough priority order for porting):
 
 ## Monorepo structure
 
-Planned layout (not yet created — flag with the user before creating):
+Current layout. The Rust workspace lives at the repo root so cross-directory members (`desktop/` next to `core/`) work cleanly — cargo refuses workspace members above their declared root, so a `core/Cargo.toml` workspace can't include `../desktop/`.
 
 ```
 chess-tutor-2/
 ├── CLAUDE.md                     # this file
+├── Cargo.toml                    # Rust workspace root
 ├── reference/Stockfish-sf_11/    # reference source (GPLv3, NOT shipped, NOT modified)
-├── core/                         # Rust workspace
-│   ├── Cargo.toml                # workspace root
+├── core/
 │   ├── engine/                   # chess-tutor-engine: the library (pure lib, no CLI deps)
-│   │   ├── src/
-│   │   └── Cargo.toml
-│   ├── cli/                      # chess-tutor-cli: interactive testing CLI (separate crate)
-│   └── ffi/                      # chess-tutor-ffi: C ABI for Swift/Kotlin bindings
-├── apple/                        # Swift/SwiftUI multi-platform app (macOS, iPadOS, iOS)
-├── android/                      # Kotlin/Jetpack Compose app
-└── desktop/                      # Rust egui app (Windows primary; Linux comes along for free)
+│   ├── cli/                      # chess-tutor-cli: interactive testing CLI
+│   └── ffi/                      # chess-tutor-ffi: C ABI for Swift/Kotlin bindings (TODO)
+├── desktop/                      # chess-tutor-desktop: Rust egui app (Windows primary)
+├── apple/                        # Swift/SwiftUI multi-platform app (TODO)
+└── android/                      # Kotlin/Jetpack Compose app (TODO)
 ```
 
 Confirmed decisions (2026-04-22):
@@ -149,7 +147,7 @@ A teaching tool that takes 5 seconds per move is not usable. Budget: sub-second 
 
 `cargo run` produces the **debug** profile, which is 20–200× slower than release. A startup that takes 200 ms in release can take 4 s in debug; a per-move retrospective at 10 ms in release can take 2 s in debug. **Any "this is too slow" observation needs to be made against a release or `profiling` build, never a debug build.** The user spent a full session investigating phantom slowness before realizing they'd been running `cargo run`.
 
-For day-to-day playtesting: `cargo build --release --bin chess-tutor`, run `core/target/release/chess-tutor.exe`. For perf investigation (VTune, Superluminal, WPA): `cargo build --profile profiling --bin chess-tutor` — same optimisations as release but with PDBs so symbolic profilers show Rust function names. The `profiling` profile is defined in `core/Cargo.toml`.
+For day-to-day playtesting: `cargo build --release --bin chess-tutor`, run `target/release/chess-tutor.exe`. For perf investigation (VTune, Superluminal, WPA): `cargo build --profile profiling --bin chess-tutor` — same optimisations as release but with PDBs so symbolic profilers show Rust function names. The `profiling` profile is defined in the repo-root `Cargo.toml`.
 
 ### Determinism is a teaching requirement
 

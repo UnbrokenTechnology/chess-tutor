@@ -8,7 +8,7 @@ use super::{post_user_move, MoveAnalysis};
 use crate::position::Position;
 use crate::types::{Color, Square};
 
-/// Raw king-safety signals captured at a single position. The four
+/// Raw king-safety signals captured at a single position. The
 /// scalars come straight from the Stockfish-11 king-safety
 /// machinery; `king_sq` is stored alongside so renderers can
 /// categorize the king's location (kingside / queenside / center)
@@ -20,8 +20,16 @@ use crate::types::{Color, Square};
 ///   [`crate::eval::Evaluator::king_attackers_count`].
 /// - `attacks_count` — total enemy attacks landing on squares
 ///   immediately adjacent to our king.
-/// - `shelter_mg` / `shelter_eg` — pawn-shelter score for our king.
-///   Positive = healthy shelter; negative = pawn-storm exposure.
+/// - `pawn_shield_mg` / `pawn_shield_eg` — friendly-pawn-shield
+///   bonus (positive = better shield). The teaching surface for
+///   "you castled" / "h-pawn push cracked your shield."
+/// - `pawn_storm_mg` / `pawn_storm_eg` — enemy-pawn-storm penalty,
+///   stored negated so positive = less storm pressure. Surfaced
+///   separately so storm shifts (which Stockfish's tables score
+///   non-monotonically in rank) don't get narrated as shield
+///   shifts.
+/// - `king_pawn_distance_eg` — endgame king-to-nearest-own-pawn
+///   penalty (mg = 0). Mostly noise outside endgames.
 ///
 /// Units: counts are raw; shelter components are in engine-cp.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -29,8 +37,11 @@ pub struct KingSafetySnapshot {
     pub king_sq: Square,
     pub attackers_count: i32,
     pub attacks_count: i32,
-    pub shelter_mg: i32,
-    pub shelter_eg: i32,
+    pub pawn_shield_mg: i32,
+    pub pawn_shield_eg: i32,
+    pub pawn_storm_mg: i32,
+    pub pawn_storm_eg: i32,
+    pub king_pawn_distance_eg: i32,
 }
 
 /// Pre/post snapshots of the king-safety signals on both sides.
@@ -59,11 +70,11 @@ impl KingSafetyOutcome {
     pub fn ours_attacks_delta(&self) -> i32 {
         self.ours_post.attacks_count - self.ours_pre.attacks_count
     }
-    pub fn ours_shelter_mg_delta(&self) -> i32 {
-        self.ours_post.shelter_mg - self.ours_pre.shelter_mg
+    pub fn ours_pawn_shield_mg_delta(&self) -> i32 {
+        self.ours_post.pawn_shield_mg - self.ours_pre.pawn_shield_mg
     }
-    pub fn ours_shelter_eg_delta(&self) -> i32 {
-        self.ours_post.shelter_eg - self.ours_pre.shelter_eg
+    pub fn ours_pawn_storm_mg_delta(&self) -> i32 {
+        self.ours_post.pawn_storm_mg - self.ours_pre.pawn_storm_mg
     }
     pub fn theirs_attackers_delta(&self) -> i32 {
         self.theirs_post.attackers_count - self.theirs_pre.attackers_count
@@ -71,11 +82,11 @@ impl KingSafetyOutcome {
     pub fn theirs_attacks_delta(&self) -> i32 {
         self.theirs_post.attacks_count - self.theirs_pre.attacks_count
     }
-    pub fn theirs_shelter_mg_delta(&self) -> i32 {
-        self.theirs_post.shelter_mg - self.theirs_pre.shelter_mg
+    pub fn theirs_pawn_shield_mg_delta(&self) -> i32 {
+        self.theirs_post.pawn_shield_mg - self.theirs_pre.pawn_shield_mg
     }
-    pub fn theirs_shelter_eg_delta(&self) -> i32 {
-        self.theirs_post.shelter_eg - self.theirs_pre.shelter_eg
+    pub fn theirs_pawn_storm_mg_delta(&self) -> i32 {
+        self.theirs_post.pawn_storm_mg - self.theirs_pre.pawn_storm_mg
     }
 }
 
@@ -100,8 +111,11 @@ fn snapshot_king_safety(pos: &Position, our_color: Color) -> KingSafetySnapshot 
         king_sq: pos.king_square(our_color),
         attackers_count: e.king_attackers_count[enemy.index()],
         attacks_count: e.king_attacks_count[enemy.index()],
-        shelter_mg: shelter.mg().0,
-        shelter_eg: shelter.eg().0,
+        pawn_shield_mg: shelter.pawn_shield.mg().0,
+        pawn_shield_eg: shelter.pawn_shield.eg().0,
+        pawn_storm_mg: shelter.pawn_storm.mg().0,
+        pawn_storm_eg: shelter.pawn_storm.eg().0,
+        king_pawn_distance_eg: shelter.king_pawn_distance.eg().0,
     }
 }
 
@@ -146,12 +160,12 @@ mod tests {
         assert_eq!(w.attacks_count, 0);
         assert_eq!(b.attacks_count, 0);
         assert_eq!(
-            w.shelter_mg, b.shelter_mg,
-            "startpos shelter_mg should be symmetric"
+            w.pawn_shield_mg, b.pawn_shield_mg,
+            "startpos pawn_shield_mg should be symmetric"
         );
         assert_eq!(
-            w.shelter_eg, b.shelter_eg,
-            "startpos shelter_eg should be symmetric"
+            w.pawn_storm_mg, b.pawn_storm_mg,
+            "startpos pawn_storm_mg should be symmetric"
         );
         assert_eq!(w.king_sq, Square::E1);
         assert_eq!(b.king_sq, Square::E8);
@@ -180,11 +194,14 @@ mod tests {
         let exposed_fen = "4k3/8/8/8/8/5P1P/6P1/6K1 w - - 0 1";
         let s = snapshot_king_safety(&Position::from_fen(sheltered_fen).unwrap(), Color::White);
         let x = snapshot_king_safety(&Position::from_fen(exposed_fen).unwrap(), Color::White);
+        // The pawn-shield component is the friendly-pawn-cover term;
+        // an exposed king has gaps in the shield, so its mg is
+        // strictly smaller.
         assert!(
-            s.shelter_mg > x.shelter_mg,
-            "sheltered shelter_mg ({}) should beat exposed ({})",
-            s.shelter_mg,
-            x.shelter_mg,
+            s.pawn_shield_mg > x.pawn_shield_mg,
+            "sheltered pawn_shield_mg ({}) should beat exposed ({})",
+            s.pawn_shield_mg,
+            x.pawn_shield_mg,
         );
     }
 
@@ -217,40 +234,52 @@ mod tests {
                 king_sq: Square::E1,
                 attackers_count: 1,
                 attacks_count: 2,
-                shelter_mg: 80,
-                shelter_eg: 4,
+                pawn_shield_mg: 80,
+                pawn_shield_eg: 4,
+                pawn_storm_mg: -20,
+                pawn_storm_eg: 0,
+                king_pawn_distance_eg: -8,
             },
             ours_post: KingSafetySnapshot {
                 king_sq: Square::G1,
                 attackers_count: 3,
                 attacks_count: 5,
-                shelter_mg: 30,
-                shelter_eg: 0,
+                pawn_shield_mg: 30,
+                pawn_shield_eg: 0,
+                pawn_storm_mg: -50,
+                pawn_storm_eg: 0,
+                king_pawn_distance_eg: -8,
             },
             theirs_pre: KingSafetySnapshot {
                 king_sq: Square::E8,
                 attackers_count: 0,
                 attacks_count: 0,
-                shelter_mg: 90,
-                shelter_eg: 5,
+                pawn_shield_mg: 90,
+                pawn_shield_eg: 5,
+                pawn_storm_mg: -10,
+                pawn_storm_eg: 0,
+                king_pawn_distance_eg: -8,
             },
             theirs_post: KingSafetySnapshot {
                 king_sq: Square::E8,
                 attackers_count: 2,
                 attacks_count: 3,
-                shelter_mg: 50,
-                shelter_eg: 2,
+                pawn_shield_mg: 50,
+                pawn_shield_eg: 2,
+                pawn_storm_mg: -25,
+                pawn_storm_eg: 0,
+                king_pawn_distance_eg: -8,
             },
             phase: 128,
         };
         assert_eq!(outcome.ours_attackers_delta(), 2);
         assert_eq!(outcome.ours_attacks_delta(), 3);
-        assert_eq!(outcome.ours_shelter_mg_delta(), -50);
-        assert_eq!(outcome.ours_shelter_eg_delta(), -4);
+        assert_eq!(outcome.ours_pawn_shield_mg_delta(), -50);
+        assert_eq!(outcome.ours_pawn_storm_mg_delta(), -30);
         assert_eq!(outcome.theirs_attackers_delta(), 2);
         assert_eq!(outcome.theirs_attacks_delta(), 3);
-        assert_eq!(outcome.theirs_shelter_mg_delta(), -40);
-        assert_eq!(outcome.theirs_shelter_eg_delta(), -3);
+        assert_eq!(outcome.theirs_pawn_shield_mg_delta(), -40);
+        assert_eq!(outcome.theirs_pawn_storm_mg_delta(), -15);
     }
 
     #[test]

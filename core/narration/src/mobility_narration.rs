@@ -2,12 +2,12 @@
 //! with the largest |delta|, with phrasing tuned per sign (drop vs.
 //! improve, restrict vs. opponent-improved).
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::MobilityOutcome;
 use chess_tutor_engine::eval::MobilityBreakdown;
 
-use super::util::format_shelter_pawns;
+use crate::util::format_shelter_pawns;
 
 /// Engine-cp threshold for narrating a mobility shift on a single
 /// piece type. ~0.50 of a pawn — the earlier 30-cp setting fired on
@@ -71,8 +71,8 @@ fn their_mobility_line(o: &MobilityOutcome) -> Option<String> {
     }
 }
 
-pub(super) fn render_mobility(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_mobility(
+    out: &mut dyn io::Write,
     outcome: &MobilityOutcome,
 ) -> io::Result<bool> {
     let mut wrote = false;

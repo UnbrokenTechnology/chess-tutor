@@ -320,31 +320,74 @@ fn evaluate_color(pos: &Position, us: Color, eval: &mut PawnsEval) {
 // King safety
 // =========================================================================
 
+/// Decomposed shelter / storm result returned by [`king_safety`].
+/// The teaching layer surfaces each component as its own
+/// [`crate::analysis::TermId`] so a "you nudged the storm tables"
+/// move doesn't get narrated as if your pawn shield improved.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ShelterComponents {
+    /// Friendly pawn-shield bonus: `SHELTER_BASE +
+    /// Σ SHELTER_STRENGTH[file][rank]`. Mg-only in the reference
+    /// tables; eg part comes from `SHELTER_BASE` (which carries
+    /// `Score::new(5, 5)`) so this can be slightly non-zero in eg.
+    pub pawn_shield: Score,
+    /// Enemy pawn-storm penalty: `−Σ UNBLOCKED_STORM[file][rank]` (or
+    /// `−BLOCKED_STORM` on the special blocked-pair case). Stored
+    /// negated so `total()` adds.
+    pub pawn_storm: Score,
+    /// Endgame king-to-nearest-own-pawn penalty (mg = 0).
+    pub king_pawn_distance: Score,
+}
+
+impl ShelterComponents {
+    pub const fn zero() -> ShelterComponents {
+        ShelterComponents {
+            pawn_shield: Score::ZERO,
+            pawn_storm: Score::ZERO,
+            king_pawn_distance: Score::ZERO,
+        }
+    }
+
+    /// Sum of all three components — the value the pre-split
+    /// `king_safety` returned.
+    pub fn total(&self) -> Score {
+        self.pawn_shield + self.pawn_storm + self.king_pawn_distance
+    }
+}
+
 /// Pawn-shelter and pawn-storm evaluation for one colour's king, plus an
 /// endgame penalty proportional to king-to-nearest-own-pawn distance.
+/// Returns a [`ShelterComponents`] split into pawn-shield bonus,
+/// pawn-storm penalty, and king-pawn-distance penalty so the teaching
+/// layer can attribute eval shifts to the right named concept.
 ///
-/// When the king still has castling rights, the returned score is the
-/// maximum (by mg value) of the evaluation at its current square and at
-/// each legal castling destination — the evaluator assumes the side will
-/// pick the best shelter available.
-pub fn king_safety(pos: &Position, us: Color) -> Score {
+/// When the king still has castling rights, the returned (shield,
+/// storm) pair is taken from the candidate king square (current or
+/// castling target) with the highest combined mg shelter — the
+/// evaluator assumes the side will pick the best shelter available.
+pub fn king_safety(pos: &Position, us: Color) -> ShelterComponents {
     let king_sq = pos.king_square(us);
-    let mut best = evaluate_shelter(pos, us, king_sq);
+    let (mut best_shield, mut best_storm) = evaluate_shelter(pos, us, king_sq);
+    let mut best_mg = best_shield.mg().0 + best_storm.mg().0;
 
     let our_rights = pos.castling_rights() & CastlingRights::for_color(us);
+    let mut consider = |shield: Score, storm: Score| {
+        let mg = shield.mg().0 + storm.mg().0;
+        if mg > best_mg {
+            best_shield = shield;
+            best_storm = storm;
+            best_mg = mg;
+        }
+    };
     if our_rights.intersects(CastlingRights::KING_SIDE) {
         let target = Square::G1.from_perspective(us);
-        let candidate = evaluate_shelter(pos, us, target);
-        if candidate.mg().0 > best.mg().0 {
-            best = candidate;
-        }
+        let (shield, storm) = evaluate_shelter(pos, us, target);
+        consider(shield, storm);
     }
     if our_rights.intersects(CastlingRights::QUEEN_SIDE) {
         let target = Square::C1.from_perspective(us);
-        let candidate = evaluate_shelter(pos, us, target);
-        if candidate.mg().0 > best.mg().0 {
-            best = candidate;
-        }
+        let (shield, storm) = evaluate_shelter(pos, us, target);
+        consider(shield, storm);
     }
 
     // Endgame: bring the king close to our nearest pawn. The reference
@@ -353,14 +396,24 @@ pub fn king_safety(pos: &Position, us: Color) -> Score {
     // endgame penalty vanishes when there's no pawn to approach.
     let our_pawns = pos.pieces_of(us, PieceType::Pawn);
     let min_dist = nearest_own_pawn_distance(king_sq, our_pawns);
+    let king_pawn_distance = Score::new(0, -KING_TO_NEAREST_PAWN_PENALTY_EG * min_dist);
 
-    best - Score::new(0, KING_TO_NEAREST_PAWN_PENALTY_EG * min_dist)
+    ShelterComponents {
+        pawn_shield: best_shield,
+        pawn_storm: best_storm,
+        king_pawn_distance,
+    }
 }
 
-/// Evaluate pawn shelter + storm as if our king stood on `king_sq`. The
-/// square may differ from the actual king square when we're speculatively
-/// comparing castling options.
-fn evaluate_shelter(pos: &Position, us: Color, king_sq: Square) -> Score {
+/// Evaluate pawn shelter + storm as if our king stood on `king_sq`,
+/// returning `(pawn_shield, pawn_storm)` as a pair. The shield is the
+/// `SHELTER_BASE + SHELTER_STRENGTH` accumulation; the storm is the
+/// `−UNBLOCKED_STORM` / `−BLOCKED_STORM` accumulation, stored negated
+/// so the caller can sum the two for the legacy aggregate.
+///
+/// The square may differ from the actual king square when we're
+/// speculatively comparing castling options.
+fn evaluate_shelter(pos: &Position, us: Color, king_sq: Square) -> (Score, Score) {
     let them = !us;
 
     // Only pawns on our side of the king contribute to shelter / storm.
@@ -369,7 +422,11 @@ fn evaluate_shelter(pos: &Position, us: Color, king_sq: Square) -> Score {
     let our_pawns = relevant & pos.pieces_by_color(us);
     let their_pawns = relevant & pos.pieces_by_color(them);
 
-    let mut bonus = SHELTER_BASE;
+    // Two accumulators: shield gathers SHELTER_BASE + SHELTER_STRENGTH;
+    // storm gathers the negated UNBLOCKED_STORM / BLOCKED_STORM
+    // contributions. Their sum reproduces the pre-split aggregate.
+    let mut shield = SHELTER_BASE;
+    let mut storm = Score::ZERO;
 
     // Evaluate across the king's file and its two neighbours. Clamp the
     // center file to the b..g range so the three-file sweep never falls
@@ -402,7 +459,7 @@ fn evaluate_shelter(pos: &Position, us: Color, king_sq: Square) -> Score {
         };
 
         let folded = file.fold_to_queenside().index();
-        bonus += Score::new(SHELTER_STRENGTH[folded][our_rank as usize], 0);
+        shield += Score::new(SHELTER_STRENGTH[folded][our_rank as usize], 0);
 
         if our_rank > 0 && our_rank == their_rank - 1 {
             // Their pawn is immediately in front of ours — blocked storm.
@@ -410,14 +467,14 @@ fn evaluate_shelter(pos: &Position, us: Color, king_sq: Square) -> Score {
             // the heaviest penalty. `Rank::R3.index()` is 2 in 0-indexed
             // terms, which matches the reference's `RANK_3` enum value.
             if their_rank == Rank::R3.index() as i32 {
-                bonus -= BLOCKED_STORM;
+                storm -= BLOCKED_STORM;
             }
         } else {
-            bonus -= Score::new(UNBLOCKED_STORM[folded][their_rank as usize], 0);
+            storm -= Score::new(UNBLOCKED_STORM[folded][their_rank as usize], 0);
         }
     }
 
-    bonus
+    (shield, storm)
 }
 
 /// Chebyshev distance from `king_sq` to the nearest own pawn, for use as
@@ -577,8 +634,8 @@ mod tests {
         // all three shelter pawns pushed one rank forward (weaker shelter).
         let intact = Position::from_fen("4k3/8/8/8/8/8/5PPP/6K1 w - - 0 1").unwrap();
         let pushed = Position::from_fen("4k3/8/8/8/8/5PPP/8/6K1 w - - 0 1").unwrap();
-        let a = king_safety(&intact, Color::White);
-        let b = king_safety(&pushed, Color::White);
+        let a = king_safety(&intact, Color::White).total();
+        let b = king_safety(&pushed, Color::White).total();
         assert!(
             a.mg().0 > b.mg().0,
             "intact f2/g2/h2 shelter ({}) should beat f3/g3/h3 ({})",
@@ -596,8 +653,8 @@ mod tests {
         let w = Position::from_fen(white_fen).unwrap();
         let b = Position::from_fen(black_fen).unwrap();
         assert_eq!(
-            king_safety(&w, Color::White).mg(),
-            king_safety(&b, Color::Black).mg(),
+            king_safety(&w, Color::White).total().mg(),
+            king_safety(&b, Color::Black).total().mg(),
             "mirrored king safety should agree"
         );
     }
@@ -609,12 +666,35 @@ mod tests {
         // where the king sits next to the pawn.
         let far = Position::from_fen("4k3/7P/8/8/8/8/8/K7 w - - 0 1").unwrap();
         let near = Position::from_fen("4k3/7P/6K1/8/8/8/8/8 w - - 0 1").unwrap();
-        let a = king_safety(&far, Color::White);
-        let b = king_safety(&near, Color::White);
+        let a = king_safety(&far, Color::White).total();
+        let b = king_safety(&near, Color::White).total();
         assert!(
             a.eg().0 < b.eg().0,
             "distant king should score worse in the endgame half"
         );
+    }
+
+    #[test]
+    fn shelter_components_sum_to_legacy_aggregate() {
+        // The split must be exact: pawn_shield + pawn_storm +
+        // king_pawn_distance == the score the pre-split function
+        // returned (which equals SHELTER_BASE + SHELTER_STRENGTH +
+        // STORM penalties + KING_TO_NEAREST_PAWN_PENALTY_EG terms).
+        let positions = [
+            "4k3/8/8/8/8/8/5PPP/6K1 w - - 0 1",
+            "4k3/7P/8/8/8/8/8/K7 w - - 0 1",
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        ];
+        for fen in positions {
+            let pos = Position::from_fen(fen).unwrap();
+            let comps = king_safety(&pos, pos.side_to_move());
+            let summed = comps.pawn_shield + comps.pawn_storm + comps.king_pawn_distance;
+            assert_eq!(
+                comps.total(),
+                summed,
+                "components must sum to total for {fen}",
+            );
+        }
     }
 
     // ---- Determinism ------------------------------------------------

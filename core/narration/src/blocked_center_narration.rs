@@ -12,7 +12,7 @@
 //!   pawn can't push until the blocker moves first, so the bishop
 //!   diagonals that pawn would clear stay constrained.
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::BlockedCenterOutcome;
 
@@ -54,8 +54,8 @@ fn barricade_line(outcome: &BlockedCenterOutcome) -> Option<&'static str> {
     }
 }
 
-pub(super) fn render_blocked_center(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_blocked_center(
+    out: &mut dyn io::Write,
     outcome: &BlockedCenterOutcome,
 ) -> io::Result<bool> {
     let mut wrote = false;

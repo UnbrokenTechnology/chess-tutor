@@ -1,11 +1,13 @@
-//! Retrospective teaching output: after a human plays a move,
-//! analyze the *pre-move* position and report a per-move verdict.
+//! Per-move retrospective narration: turn the structured outcomes
+//! produced by the engine's analysis layer into human-readable text
+//! suitable for any UI surface (CLI stdout, egui panel, mobile app).
 //!
-//! The caller supplies a pre-move `Position` and the move just
-//! played; we call `analyze_position` with `force_include=[user_mv]`
-//! so the user's move is guaranteed to appear in the output (even
-//! if it was bad enough to fall outside the natural MultiPV top-k).
-//! Then we classify and render a short teaching paragraph:
+//! The crate's stable contract is the [`MoveAnalysis`] structured
+//! data the engine produces; this layer is only the prose renderer.
+//! UIs that want to surface visual annotations (highlights, arrows)
+//! consume the underlying `*Outcome` structs from
+//! `chess_tutor_engine::analysis` directly and may additionally use
+//! [`format_retrospective`] for the prose alongside.
 //!
 //! ```text
 //!   [retrospective] You played Qxf7?? — Blunder (Δ -8.60).
@@ -33,6 +35,7 @@
 
 mod blocked_center_narration;
 mod castling_narration;
+mod initiative_narration;
 mod king_safety_narration;
 mod material_narration;
 mod mobility_narration;
@@ -45,23 +48,22 @@ mod surprise_tag;
 mod threats_narration;
 mod util;
 
-use std::io::{self, Write};
-use std::time::Duration;
+use std::io;
 
 use chess_tutor_engine::analysis::{
-    analyze_position, compute_blocked_center_outcome, compute_castling_outcome,
+    compute_blocked_center_outcome, compute_castling_outcome, compute_initiative_outcome,
     compute_king_safety_outcome, compute_material_outcome, compute_mobility_outcome,
     compute_passed_pawns_outcome, compute_pawn_structure_outcome,
     compute_pieces_positional_outcome, compute_space_outcome, compute_threats_outcome,
     MoveAnalysis, MoveVerdict, SurpriseKind, TermId,
 };
-use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::types::{Color, Move};
 
 use blocked_center_narration::render_blocked_center;
 use castling_narration::render_castling;
+use initiative_narration::render_initiative;
 use king_safety_narration::render_king_safety;
 use material_narration::render_material_sequence;
 use mobility_narration::render_mobility;
@@ -77,15 +79,10 @@ use util::{
     sharp_or_verdict_annotation, verdict_label,
 };
 
-/// How many alternatives to pull from the search when running
-/// retrospective. Kept small (top 2 alternatives + the forced user
-/// move) so the pause is tolerable on every human move.
-const RETROSPECTIVE_MULTI_PV: usize = 3;
-
-/// Configuration for a single retrospective pass.
-pub struct RetrospectiveConfig {
-    pub max_depth: u32,
-    pub max_time_ms: Option<u64>,
+/// Knobs that change the shape of the rendered narration without
+/// affecting which terms are computed.
+#[derive(Clone, Debug, Default)]
+pub struct NarrationOptions {
     /// When true, a `Best` verdict still runs the full term-level
     /// narration instead of short-circuiting after the one-line
     /// headline. Useful when the student wants to understand *why*
@@ -93,58 +90,54 @@ pub struct RetrospectiveConfig {
     pub explain_best: bool,
 }
 
-/// Analyze `pre_move_pos` with the user's move forced into the
-/// output, classify the move, and write a short teaching paragraph
-/// to `out`.
+/// Format the retrospective for `user_move` given a slice of
+/// [`MoveAnalysis`] returned by the engine's `analyze_position`.
 ///
-/// `game_history` is the zobrist-key history up to and including
-/// the pre-move position (the search treats the last element as
-/// the root and the preceding ones as prior positions for
-/// repetition detection).
-pub fn run_and_render(
-    out: &mut io::StdoutLock<'_>,
-    pre_move_pos: &mut Position,
-    engine: &mut Engine,
-    cfg: &RetrospectiveConfig,
-    game_history: Vec<u64>,
-    user_mv: Move,
-) -> io::Result<()> {
-    let root_stm = pre_move_pos.side_to_move();
-    let params = SearchParams {
-        max_depth: cfg.max_depth,
-        max_nodes: None,
-        max_time: cfg.max_time_ms.map(Duration::from_millis),
-        multi_pv: RETROSPECTIVE_MULTI_PV,
-        game_history,
-        force_include: vec![user_mv],
-        verbose_progress: false,
-    };
-    let analyses = analyze_position(engine, pre_move_pos, params);
+/// `analyses[0]` must be the engine's preferred move (the ranking is
+/// defined by the search). `user_move` should appear somewhere in
+/// the slice — typically by passing `force_include = vec![user_move]`
+/// to `SearchParams` so it's guaranteed to be present even when the
+/// move is bad enough to fall outside the natural top-k.
+///
+/// Returns the rendered text. Empty when `analyses` is empty (a
+/// terminal-position search). When `user_move` isn't in `analyses`
+/// the returned string is the single line `"[retrospective
+/// unavailable]"`.
+pub fn format_retrospective(
+    pre_move_pos: &Position,
+    analyses: &[MoveAnalysis],
+    user_move: Move,
+    opts: &NarrationOptions,
+) -> String {
     if analyses.is_empty() {
-        return Ok(());
+        return String::new();
     }
 
     let best = &analyses[0];
-    let user = analyses.iter().find(|a| a.mv == user_mv);
-    let Some(user) = user else {
-        writeln!(out, "[retrospective unavailable]")?;
-        return Ok(());
+    let Some(user) = analyses.iter().find(|a| a.mv == user_move) else {
+        return String::from("[retrospective unavailable]\n");
     };
 
     let verdict = user.classify(best.score);
+    let mut buf: Vec<u8> = Vec::with_capacity(512);
+    // Writing to a Vec<u8> is infallible, so `expect` here would
+    // only fire on an out-of-memory panic, which the allocator
+    // would have already raised; pass it through.
     render_report(
-        out,
+        &mut buf,
         pre_move_pos,
-        root_stm,
+        pre_move_pos.side_to_move(),
         best,
         user,
         verdict,
-        cfg.explain_best,
+        opts.explain_best,
     )
+    .expect("writing to Vec<u8> never fails");
+    String::from_utf8(buf).expect("narration emits ASCII / UTF-8 only")
 }
 
 fn render_report(
-    out: &mut io::StdoutLock<'_>,
+    out: &mut dyn io::Write,
     pre_move_pos: &Position,
     root_stm: Color,
     best: &MoveAnalysis,
@@ -153,8 +146,17 @@ fn render_report(
     explain_best: bool,
 ) -> io::Result<()> {
     let user_san = san::format(pre_move_pos, user.mv);
-    let delta = user.score.0 - best.score.0;
-    let delta_str = format_delta_pawns(delta);
+
+    // Headline shows two deltas (root-STM POV):
+    // - `user_swing` = user.score - pre_score: did the user's move
+    //   improve, hurt, or hold the position?
+    // - `best_swing` = best.score - pre_score: how much the engine's
+    //   preferred move would have improved it.
+    // Both `user.pre_score` and `best.pre_score` reference the same
+    // shared pre-move evaluation; reading per-side keeps the math
+    // self-documenting.
+    let user_swing_str = format_delta_pawns(user.score.0 - user.pre_score.0);
+    let best_swing_str = format_delta_pawns(best.score.0 - best.pre_score.0);
 
     let verdict_label_str = verdict_label(verdict);
 
@@ -171,11 +173,22 @@ fn render_report(
     let annotation = sharp_or_verdict_annotation(verdict, user_is_sharp);
 
     // Line 1: headline.
+    //
+    // Best: one delta — the user *is* the best, no "vs … best" half
+    //   to add. *"You played Nf3 — Best (Δ +0.30)."*
+    // BestAvailable: keep the "Position was already lost" framing —
+    //   the absolute score tells the story; relative swing around a
+    //   catastrophic baseline would just add noise.
+    // Other verdicts: two deltas. The first reads as "your move did
+    //   X to your position"; the second as "the engine's preferred
+    //   move would have done Y." Differentiates "missed something
+    //   stronger" (positive swing, smaller than best's swing) from
+    //   "actually worsened the position" (negative swing).
     match verdict {
         MoveVerdict::Best => {
             writeln!(
                 out,
-                "[retrospective] You played {user_san}{annotation} — {verdict_label_str}."
+                "[retrospective] You played {user_san}{annotation} — {verdict_label_str} (Δ {user_swing_str})."
             )?;
             if user_is_sharp {
                 writeln!(
@@ -207,7 +220,7 @@ fn render_report(
         | MoveVerdict::Blunder => {
             writeln!(
                 out,
-                "[retrospective] You played {user_san}{annotation} — {verdict_label_str} (Δ {delta_str}).",
+                "[retrospective] You played {user_san}{annotation} — {verdict_label_str} (Δ {user_swing_str} vs Δ {best_swing_str} best)."
             )?;
         }
     }
@@ -232,11 +245,18 @@ fn render_report(
     let mut consumed_terms: Vec<TermId> = Vec::new();
 
     // Material narration (capture sequence or silent if no
-    // captures).
+    // captures). When the capture-driven narrator fires, it
+    // accounts for both halves of the split material score (pieces
+    // disappearing changes both `piece_value` and the captured
+    // square's `psq_positional` contribution), so consume both. When
+    // it stays silent (no captures), `psq_positional` may still
+    // surface in the fallback as "piece placement" — pure positional
+    // PSQ shifts from quiet moves, no longer mislabelled as material.
     let material_outcome = compute_material_outcome(user, pre_move_pos, root_stm);
     if !material_outcome.events.is_empty() {
         render_material_sequence(out, pre_move_pos, user, &material_outcome, root_stm)?;
-        consumed_terms.push(TermId::Material);
+        consumed_terms.push(TermId::MaterialPieceValue);
+        consumed_terms.push(TermId::MaterialPsqPositional);
     }
 
     // Threats narration (hanging / SEE-losing / pressured).
@@ -255,11 +275,19 @@ fn render_report(
         ]);
     }
 
-    // King-safety narration.
+    // King-safety narration. The narrator describes attackers and
+    // *pawn-shield* shifts; pawn-storm and king-pawn-distance shifts
+    // surface separately in the fallback line as their own named
+    // terms (Stockfish's storm tables are non-monotonic in rank, so
+    // narrating storm under the same "shelter" rubric mislabels
+    // common opening pawn pushes — see the 1.e4 g6 case). When the
+    // narrator fires we still consume KingPawnShield (covered by
+    // the prose) and the per-king attackers terms; KingPawnStorm /
+    // KingPawnDistance fall through to the fallback regardless.
     let king_safety_outcome = compute_king_safety_outcome(user, pre_move_pos, root_stm);
     if render_king_safety(out, &king_safety_outcome)? {
         consumed_terms.extend_from_slice(&[
-            TermId::KingShelter,
+            TermId::KingPawnShield,
             TermId::KingDanger,
             TermId::KingPawnlessFlank,
             TermId::KingFlankAttacks,
@@ -318,6 +346,14 @@ fn render_report(
             TermId::PiecesWeakQueen,
         ]);
     }
+
+    // Initiative / forcing-hierarchy narration. Sits between the
+    // state-based positional narrators and the cross-term
+    // multipliers because it's about the user's move-to-opponent's-
+    // reply *relationship* rather than a board-state shift. Doesn't
+    // consume any TermId — it's not summarising an eval term.
+    let initiative_outcome = compute_initiative_outcome(user, pre_move_pos, root_stm);
+    let _ = render_initiative(out, &initiative_outcome)?;
 
     // Cross-term multiplier narrators. These describe positional
     // signals that *scale* another eval term rather than contributing

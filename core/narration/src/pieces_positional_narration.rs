@@ -1,7 +1,7 @@
 //! Piece-placement narration — per-sub-term worsening / improving
 //! per side, drawing on the 11-sub-term [`PiecesBreakdown`].
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::PiecesPositionalOutcome;
 use chess_tutor_engine::eval::PiecesBreakdown;
@@ -75,7 +75,7 @@ impl PieceSubTerm {
         match self {
             PieceSubTerm::Outposts => "a minor lost its outpost",
             PieceSubTerm::ReachableOutposts => "an outpost route closed",
-            PieceSubTerm::MinorBehindPawn => "a minor stepped out from behind its pawn",
+            PieceSubTerm::MinorBehindPawn => "a minor lost its pawn cover",
             PieceSubTerm::KingProtector => "a minor drifted away from the king",
             PieceSubTerm::BishopPawns => "a bishop got stuck behind its pawn chain",
             PieceSubTerm::LongDiagonalBishop => "a bishop left the long diagonal",
@@ -91,7 +91,7 @@ impl PieceSubTerm {
         match self {
             PieceSubTerm::Outposts => "a minor claimed an outpost",
             PieceSubTerm::ReachableOutposts => "an outpost route opened",
-            PieceSubTerm::MinorBehindPawn => "a minor tucked behind its pawn",
+            PieceSubTerm::MinorBehindPawn => "a minor gained pawn cover",
             PieceSubTerm::KingProtector => "a minor rallied to the king",
             PieceSubTerm::BishopPawns => "a bishop freed itself from its pawn chain",
             PieceSubTerm::LongDiagonalBishop => "a bishop claimed the long diagonal",
@@ -199,8 +199,8 @@ fn their_pieces_improved_line(o: &PiecesPositionalOutcome) -> Option<String> {
     ))
 }
 
-pub(super) fn render_pieces_positional(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_pieces_positional(
+    out: &mut dyn io::Write,
     outcome: &PiecesPositionalOutcome,
 ) -> io::Result<bool> {
     let mut wrote = false;

@@ -2,12 +2,12 @@
 //! Stockfish-pattern pressure. The engine returns structured data
 //! (`ThreatsOutcome`); this module turns it into prose.
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::{HangingPiece, PressureKind, PressuredPiece, ThreatsOutcome};
 use chess_tutor_engine::types::Square;
 
-use super::util::{format_attackers, piece_name};
+use crate::util::{format_attackers, piece_name};
 
 /// Render threats narration lines given the structured
 /// [`ThreatsOutcome`]. Writes up to four possible lines — hanging
@@ -15,8 +15,8 @@ use super::util::{format_attackers, piece_name};
 /// whichever have positive deltas. Returns `true` if any line was
 /// written, so the caller can suppress the generic `threats` entry
 /// in the secondary-terms list.
-pub(super) fn render_threats(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_threats(
+    out: &mut dyn io::Write,
     outcome: &ThreatsOutcome,
 ) -> io::Result<bool> {
     let mut wrote = false;

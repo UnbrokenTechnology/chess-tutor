@@ -6,7 +6,7 @@
 //!
 //! [`trapped_rook`]: chess_tutor_engine::eval::PiecesBreakdown::trapped_rook
 
-use std::io::{self, Write};
+use std::io;
 
 use chess_tutor_engine::analysis::CastlingOutcome;
 
@@ -41,8 +41,8 @@ fn theirs_line(outcome: &CastlingOutcome) -> Option<&'static str> {
     )
 }
 
-pub(super) fn render_castling(
-    out: &mut io::StdoutLock<'_>,
+pub(crate) fn render_castling(
+    out: &mut dyn io::Write,
     outcome: &CastlingOutcome,
 ) -> io::Result<bool> {
     let mut wrote = false;

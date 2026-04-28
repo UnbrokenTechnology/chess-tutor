@@ -29,7 +29,7 @@ use chess_tutor_engine::analysis::{MoveVerdict, SurpriseKind};
 /// delta threshold is low enough that a move firing this tag isn't
 /// necessarily being refuted in any formal sense; it's just
 /// "deeper analysis doesn't like it as much."
-pub(super) fn select_surprise_phrase(
+pub(crate) fn select_surprise_phrase(
     verdict: MoveVerdict,
     surprise: Option<SurpriseKind>,
 ) -> Option<&'static str> {

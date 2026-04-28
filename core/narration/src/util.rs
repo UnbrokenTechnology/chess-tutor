@@ -1,5 +1,5 @@
 //! Shared formatting + SAN helpers used across retrospective
-//! narration modules. All `pub(super)` so sibling narrators can
+//! narration modules. All `pub(crate)` so sibling narrators can
 //! reuse them; nothing in this module is intended to leave the
 //! `retrospective` subtree.
 
@@ -10,7 +10,7 @@ use chess_tutor_engine::types::{Move, PieceType, Value};
 
 /// Full English name for a piece type, lower-cased for inline use
 /// in phrases.
-pub(super) fn piece_name(pt: PieceType) -> &'static str {
+pub(crate) fn piece_name(pt: PieceType) -> &'static str {
     match pt {
         PieceType::Pawn => "pawn",
         PieceType::Knight => "knight",
@@ -26,7 +26,7 @@ pub(super) fn piece_name(pt: PieceType) -> &'static str {
 /// `"attacked by the e3 pawn, b5 bishop, and d1 queen"`. The Oxford
 /// comma is there on purpose — multiple attackers are rare enough
 /// that clarity wins over brevity.
-pub(super) fn format_attackers(attackers: &[PieceLocation]) -> String {
+pub(crate) fn format_attackers(attackers: &[PieceLocation]) -> String {
     if attackers.is_empty() {
         // Shouldn't happen — a hanging piece has ≥ 1 enemy attacker
         // by construction. Render defensively rather than panic.
@@ -50,7 +50,7 @@ pub(super) fn format_attackers(attackers: &[PieceLocation]) -> String {
 
 /// Render the first `through_ply + 1` moves of `pv` as SAN, each
 /// formatted relative to the position it's played from.
-pub(super) fn pv_to_san_through(root: &Position, pv: &[Move], through_ply: usize) -> Vec<String> {
+pub(crate) fn pv_to_san_through(root: &Position, pv: &[Move], through_ply: usize) -> Vec<String> {
     let limit = (through_ply + 1).min(pv.len());
     let mut out = Vec::with_capacity(limit);
     let mut scratch = root.clone();
@@ -65,13 +65,13 @@ pub(super) fn pv_to_san_through(root: &Position, pv: &[Move], through_ply: usize
 /// pawn-equivalents with a leading sign — `+0.85`, `-0.30`. Matches
 /// the `{:+.2}` convention the secondary-terms list uses. Also
 /// reused for mobility deltas since both render as mg-scale cp.
-pub(super) fn format_shelter_pawns(cp: i32) -> String {
+pub(crate) fn format_shelter_pawns(cp: i32) -> String {
     format!("{:+.2}", cp as f32 / 100.0)
 }
 
 /// Format a `Value` score in pawn-equivalents. Mate scores render
 /// as `#5` / `-#3` rather than huge raw cp.
-pub(super) fn format_score_pawns(score: Value) -> String {
+pub(crate) fn format_score_pawns(score: Value) -> String {
     let abs = score.0.abs();
     let mate_threshold = Value::MATE.0 - Value::MAX_PLY;
     if abs >= mate_threshold {
@@ -88,12 +88,12 @@ pub(super) fn format_score_pawns(score: Value) -> String {
 }
 
 /// Format a delta (user_score - best_score) in pawn-equivalents.
-pub(super) fn format_delta_pawns(delta_cp: i32) -> String {
+pub(crate) fn format_delta_pawns(delta_cp: i32) -> String {
     format!("{:+.2}", delta_cp as f32 / 100.0)
 }
 
 /// Human-readable label for a [`MoveVerdict`].
-pub(super) fn verdict_label(v: MoveVerdict) -> &'static str {
+pub(crate) fn verdict_label(v: MoveVerdict) -> &'static str {
     match v {
         MoveVerdict::Best => "Best",
         MoveVerdict::Good => "Good",
@@ -113,7 +113,7 @@ pub(super) fn verdict_label(v: MoveVerdict) -> &'static str {
 ///   deeper engine sees through).
 /// - Empty string for a plain Good / Inaccuracy / Best /
 ///   BestAvailable.
-pub(super) fn sharp_or_verdict_annotation(v: MoveVerdict, is_sharp: bool) -> &'static str {
+pub(crate) fn sharp_or_verdict_annotation(v: MoveVerdict, is_sharp: bool) -> &'static str {
     if is_sharp {
         return "!";
     }
@@ -131,7 +131,7 @@ pub(super) fn sharp_or_verdict_annotation(v: MoveVerdict, is_sharp: bool) -> &'s
 /// when the engine's preferred move is itself sharp
 /// (LooksBadButGood from root STM's POV). Split out as a pure
 /// helper so the prose is unit-testable.
-pub(super) fn format_engine_preferred_line(
+pub(crate) fn format_engine_preferred_line(
     best_san: &str,
     best_score_str: &str,
     is_sharp: bool,

@@ -32,11 +32,13 @@ use crate::types::{Color, PieceType, Score};
 /// aggregate king score this colour contributes — see
 /// [`total`](KingBreakdown::total).
 ///
-/// Signs are baked in: `shelter` is the raw shelter/storm bonus (often
-/// positive); `danger`, `pawnless_flank`, and `flank_attacks` are
-/// already-negated penalty contributions (so their direct sum is the
-/// subtraction the aggregator applies). This keeps `total()` a simple
-/// field-sum without any sign flips at the call site.
+/// Signs are baked in: `pawn_shield`, `pawn_storm`, and
+/// `king_pawn_distance` are the three components of the pre-split
+/// `shelter` value (often net-positive); `danger`, `pawnless_flank`,
+/// and `flank_attacks` are already-negated penalty contributions (so
+/// their direct sum is the subtraction the aggregator applies). This
+/// keeps `total()` a simple field-sum without any sign flips at the
+/// call site.
 ///
 /// Mirrors the Phase-0 [`crate::pawns::PawnsBreakdown`] /
 /// [`super::PiecesBreakdown`] / [`super::MobilityBreakdown`] /
@@ -46,9 +48,25 @@ use crate::types::{Color, PieceType, Score};
 /// [`crate::analysis::TermId`] variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KingBreakdown {
-    /// Pawn shelter / storm bonus — the starting value the reference's
-    /// aggregator seeds the running score with.
-    pub shelter: Score,
+    /// Friendly pawn-shield bonus: `SHELTER_BASE + Σ
+    /// SHELTER_STRENGTH[file][rank]` summed across the king's file
+    /// and its two neighbours, evaluated at the best of the king's
+    /// current square or each available castling target. Already
+    /// `white-perspective` for the side this breakdown describes
+    /// (positive = better shield). Mg-only term in the reference
+    /// tables (eg components are zero except for the per-file
+    /// SHELTER_STRENGTH entries which carry mg only).
+    pub pawn_shield: Score,
+    /// Enemy pawn-storm penalty: `−Σ UNBLOCKED_STORM[file][rank]` (or
+    /// `−BLOCKED_STORM` on the special blocked-pair case). Stored
+    /// negated so `total()` adds. Stockfish's storm tables are
+    /// empirically tuned and not monotonic in rank, so the
+    /// teaching layer surfaces this as its own signal rather than
+    /// mixing it into a single "shelter" narration.
+    pub pawn_storm: Score,
+    /// Endgame-only penalty for our king being far from our nearest
+    /// pawn. Stored negated. Mg component is zero by construction.
+    pub king_pawn_distance: Score,
     /// Quadratic-in-mg, linear-in-eg penalty converted from the
     /// `king_danger` accumulator. Zero unless `king_danger > 100`.
     /// Stored as a negative [`Score`] so `total()` adds rather than
@@ -68,7 +86,9 @@ impl KingBreakdown {
     /// An all-zero breakdown.
     pub const fn zero() -> KingBreakdown {
         KingBreakdown {
-            shelter: Score::ZERO,
+            pawn_shield: Score::ZERO,
+            pawn_storm: Score::ZERO,
+            king_pawn_distance: Score::ZERO,
             danger: Score::ZERO,
             pawnless_flank: Score::ZERO,
             flank_attacks: Score::ZERO,
@@ -79,7 +99,21 @@ impl KingBreakdown {
     /// colour contributes (what the pre-split `king: [Score; 2]` field
     /// held).
     pub fn total(&self) -> Score {
-        self.shelter + self.danger + self.pawnless_flank + self.flank_attacks
+        self.pawn_shield
+            + self.pawn_storm
+            + self.king_pawn_distance
+            + self.danger
+            + self.pawnless_flank
+            + self.flank_attacks
+    }
+
+    /// Aggregate "shelter" matching what the pre-split single
+    /// `shelter` field carried (= pawn_shield + pawn_storm +
+    /// king_pawn_distance). Used for backward-compatible eval-report
+    /// rows and for the king-danger calculation that consumes
+    /// `mg_shelter` as a single value.
+    pub fn shelter_total(&self) -> Score {
+        self.pawn_shield + self.pawn_storm + self.king_pawn_distance
     }
 }
 
@@ -111,8 +145,13 @@ pub(crate) fn evaluate(e: &Evaluator<'_>, us: Color) -> KingBreakdown {
     let king_sq = pos.king_square(us);
 
     // Seed with pawn-shelter / pawn-storm evaluation. Same function the
-    // reference calls via `pe->king_safety<Us>(pos)`.
-    let shelter = pawns::king_safety(pos, us);
+    // reference calls via `pe->king_safety<Us>(pos)`. The returned
+    // [`pawns::ShelterComponents`] decomposes into shield, storm, and
+    // king-pawn-distance — three separate teaching signals — but the
+    // king-danger formula below still consumes the combined mg as a
+    // single number, matching the reference.
+    let shelter_components = pawns::king_safety(pos, us);
+    let shelter_total = shelter_components.total();
 
     let attacked_by_all_them = e.attacked_by_all[them_idx];
     let attacked_by_all_us = e.attacked_by_all[us_idx];
@@ -212,7 +251,7 @@ pub(crate) fn evaluate(e: &Evaluator<'_>, us: Color) -> KingBreakdown {
     let mg_mobility_diff = (e.mobility[them_idx].total() - e.mobility[us_idx].total())
         .mg()
         .0;
-    let mg_shelter = shelter.mg().0;
+    let mg_shelter = shelter_total.mg().0;
     let enemy_has_no_queen = pos.count(them, PieceType::Queen) == 0;
     let our_king_has_knight_defender = (attacked_by_us_knight & attacked_by_us_king).any();
 
@@ -251,7 +290,9 @@ pub(crate) fn evaluate(e: &Evaluator<'_>, us: Color) -> KingBreakdown {
     let flank_attacks = -(FLANK_ATTACKS * king_flank_attack);
 
     KingBreakdown {
-        shelter,
+        pawn_shield: shelter_components.pawn_shield,
+        pawn_storm: shelter_components.pawn_storm,
+        king_pawn_distance: shelter_components.king_pawn_distance,
         danger,
         pawnless_flank,
         flank_attacks,
@@ -341,7 +382,12 @@ mod tests {
         ];
         for fen in fens {
             let kb = king_breakdown(fen, Color::White);
-            let summed = kb.shelter + kb.danger + kb.pawnless_flank + kb.flank_attacks;
+            let summed = kb.pawn_shield
+                + kb.pawn_storm
+                + kb.king_pawn_distance
+                + kb.danger
+                + kb.pawnless_flank
+                + kb.flank_attacks;
             assert_eq!(kb.total(), summed, "total() must equal field-sum for {fen}",);
         }
     }

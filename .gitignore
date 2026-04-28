@@ -1,6 +1,6 @@
 # Rust build artifacts (release/debug binaries, profiling profile,
 # magic-bitboard tables, etc.)
-core/target/
+target/
 
 # The Stockfish 11 source archive — its contents are already
 # extracted under `reference/Stockfish-sf_11/`, so committing the
