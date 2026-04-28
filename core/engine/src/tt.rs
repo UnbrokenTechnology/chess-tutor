@@ -414,6 +414,18 @@ impl TranspositionTable {
         count * 1000 / (ENTRIES_PER_CLUSTER as i32 * cluster_count as i32)
     }
 
+    /// Issue a hardware prefetch for the cluster `key` will land in, so
+    /// the cache line is on its way from DRAM by the time a subsequent
+    /// [`probe`](Self::probe) touches it. Cheap (single instruction on
+    /// supported architectures, no-op elsewhere); pays off because TT
+    /// clusters are larger than L3 in any realistic configuration and
+    /// every probe is a near-guaranteed cache miss otherwise.
+    #[inline(always)]
+    pub fn prefetch(&self, key: u64) {
+        let cluster: *const Cluster = self.cluster_for(key);
+        crate::prefetch::prefetch_read(cluster);
+    }
+
     /// Number of clusters allocated. Exposed for diagnostics / tests.
     pub fn cluster_count(&self) -> usize {
         self.clusters.len()

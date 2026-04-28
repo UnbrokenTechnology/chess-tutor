@@ -28,10 +28,12 @@
 //! `pawns.cpp`, used under the idea/expression split. All code and
 //! identifiers are independently authored.
 //!
-//! Caching is deliberately not implemented yet. The reference caches the
-//! full entry in a 131 072-slot hash table keyed by `pawn_key`; we compute
-//! on demand. `Position::pawn_key()` is already plumbed through so a future
-//! cache is a drop-in addition.
+//! Caching: structure-only [`PawnsEval`] results are cached by
+//! `pos.pawn_key()` in a [`Table`]. Hit rate is high because pawn
+//! structure changes only on pawn moves and captures, while every search
+//! node calls into pawn evaluation. Shelter (`king_safety`) is not yet
+//! cached — it depends on king square and castling rights in addition to
+//! the pawn structure, so its cache key is more complex; deferring.
 
 use crate::attacks::{king_attacks, pawn_attacks_from, square_distance};
 use crate::bitboard::{
@@ -197,6 +199,83 @@ impl PawnsEval {
     /// Signed pawn score from white's perspective: `scores[white] − scores[black]`.
     pub fn score(&self) -> Score {
         self.scores[Color::White.index()] - self.scores[Color::Black.index()]
+    }
+}
+
+// =========================================================================
+// Cache
+// =========================================================================
+
+/// log2 of the [`Table`] slot count. 14 → 16384 slots → ~2.6 MB. Pawn
+/// structure changes rarely (only on pawn moves and captures), so even a
+/// modest table sees >95% hit rate in typical games.
+const TABLE_BITS: u32 = 14;
+const TABLE_SLOTS: usize = 1 << TABLE_BITS;
+const TABLE_MASK: u64 = (TABLE_SLOTS - 1) as u64;
+
+#[derive(Clone, Copy)]
+struct TableEntry {
+    /// Zobrist pawn-structure key. `0` indicates an empty slot —
+    /// [`crate::zobrist::no_pawns_key`] is non-zero, so a real pawn key
+    /// can never be 0 and the discriminator is unambiguous.
+    key: u64,
+    eval: PawnsEval,
+}
+
+impl TableEntry {
+    const EMPTY: Self = Self {
+        key: 0,
+        eval: PawnsEval {
+            scores: [Score::ZERO; 2],
+            breakdowns: [PawnsBreakdown::zero(); 2],
+            passed_pawns: [Bitboard::EMPTY; 2],
+            pawn_attacks: [Bitboard::EMPTY; 2],
+            pawn_attacks_span: [Bitboard::EMPTY; 2],
+        },
+    };
+}
+
+/// Direct-mapped pawn-structure cache. Replaces a per-node call to
+/// [`evaluate`] with a key-compare and (on hit) a copy of the cached
+/// [`PawnsEval`]. On miss the full computation runs and the slot is
+/// overwritten — no aging or replacement logic; pawn keys collide rarely
+/// enough that simple replacement is fine.
+#[derive(Clone)]
+pub struct Table {
+    entries: Box<[TableEntry]>,
+}
+
+impl Table {
+    pub fn new() -> Self {
+        Self {
+            entries: vec![TableEntry::EMPTY; TABLE_SLOTS].into_boxed_slice(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for e in self.entries.iter_mut() {
+            *e = TableEntry::EMPTY;
+        }
+    }
+
+    /// Probe-or-compute: returns the cached evaluation for `pos`'s pawn
+    /// structure, computing and caching it on miss.
+    pub fn evaluate(&mut self, pos: &Position) -> PawnsEval {
+        let key = pos.pawn_key();
+        let slot = (key & TABLE_MASK) as usize;
+        let entry = self.entries[slot];
+        if entry.key == key {
+            return entry.eval;
+        }
+        let eval = evaluate(pos);
+        self.entries[slot] = TableEntry { key, eval };
+        eval
+    }
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

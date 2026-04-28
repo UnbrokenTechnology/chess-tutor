@@ -431,12 +431,16 @@ fn play_engine_turn(
         }
     };
     let san_text = san::format(pos, mv);
+    let nodes = engine.last_nodes();
+    let nps_m = engine.last_nps() / 1.0e6;
     writeln!(
         out,
-        "played {} ({}) in {} ms",
+        "played {} ({}) in {} ms · {} nodes · {:.2} Mnps",
         san_text,
         format_score(line.score),
-        elapsed.as_millis()
+        elapsed.as_millis(),
+        nodes,
+        nps_m,
     )?;
     apply_move_and_scan(out, pos, mv, history, position_keys, pending_trap)?;
     Ok(())

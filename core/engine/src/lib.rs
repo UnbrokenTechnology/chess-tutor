@@ -20,6 +20,7 @@ pub mod movepick;
 pub mod openings;
 pub mod pawns;
 pub mod position;
+pub mod prefetch;
 pub mod psqt;
 pub mod san;
 pub mod search;

@@ -170,11 +170,21 @@ pub(crate) struct Evaluator<'a> {
 }
 
 impl<'a> Evaluator<'a> {
+    /// Build an evaluator that computes pawn structure on demand. Used
+    /// by analytical / UI callers that don't share a long-lived pawn
+    /// cache.
     pub(crate) fn new(pos: &'a Position) -> Evaluator<'a> {
+        Self::new_with_pawns(pos, pawns::evaluate(pos))
+    }
+
+    /// Build an evaluator from a precomputed [`PawnsEval`]. The hot
+    /// search path uses this so a per-engine [`pawns::Table`] can short-
+    /// circuit pawn evaluation across sibling and child nodes.
+    pub(crate) fn new_with_pawns(pos: &'a Position, pawns: PawnsEval) -> Evaluator<'a> {
         Evaluator {
             pos,
             material: material::evaluate(pos),
-            pawns: pawns::evaluate(pos),
+            pawns,
             mobility_area: [Bitboard::EMPTY; 2],
             mobility: [MobilityBreakdown::zero(); 2],
             attacked_by: [[Bitboard::EMPTY; 7]; 2],
@@ -476,10 +486,20 @@ impl EvalTrace {
 // =========================================================================
 
 /// Evaluate `pos` and return a [`Value`] from the side-to-move's point of
-/// view. This is the hot path that [`search`] calls millions of times per
-/// search — it does not build a trace.
+/// view. This form does not use a pawn cache — analytical / UI callers
+/// should use this; the search hot path goes through
+/// [`evaluate_with_pawn_cache`].
 pub fn evaluate(pos: &Position) -> Value {
-    evaluate_inner(pos, None)
+    evaluate_inner(pos, pawns::evaluate(pos), None)
+}
+
+/// Evaluate `pos` using the supplied pawn-structure cache. The hot path
+/// in [`crate::search`] calls this — pawn structure rarely changes
+/// between sibling and child nodes, and probing the cache avoids
+/// recomputing the most expensive single eval term (~20% of search time
+/// in profiling).
+pub fn evaluate_with_pawn_cache(pos: &Position, pawn_cache: &mut pawns::Table) -> Value {
+    evaluate_inner(pos, pawn_cache.evaluate(pos), None)
 }
 
 /// Evaluate `pos` and additionally capture a per-term [`EvalTrace`]. Use
@@ -488,7 +508,7 @@ pub fn evaluate(pos: &Position) -> Value {
 /// per-term scoring itself is the same cost.
 pub fn evaluate_with_trace(pos: &Position) -> (Value, EvalTrace) {
     let mut trace = EvalTrace::zero();
-    let v = evaluate_inner(pos, Some(&mut trace));
+    let v = evaluate_inner(pos, pawns::evaluate(pos), Some(&mut trace));
     (v, trace)
 }
 
@@ -518,8 +538,12 @@ fn piece_value_balance(pos: &Position) -> Score {
     Score::new(mg, eg)
 }
 
-fn evaluate_inner(pos: &Position, mut trace: Option<&mut EvalTrace>) -> Value {
-    let mut e = Evaluator::new(pos);
+fn evaluate_inner(
+    pos: &Position,
+    pawns_eval: PawnsEval,
+    mut trace: Option<&mut EvalTrace>,
+) -> Value {
+    let mut e = Evaluator::new_with_pawns(pos, pawns_eval);
 
     // If material reports a specialized endgame evaluator, trust it.
     // (Currently never fires — endgame.rs isn't ported yet.)

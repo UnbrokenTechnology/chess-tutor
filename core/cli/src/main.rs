@@ -295,6 +295,12 @@ fn main() -> Result<()> {
                         pv_san.get(settled).map(|s| s.as_str()).unwrap_or("?"),
                     );
                 }
+                println!(
+                    "nodes:    {} in {} ms ({:.2} Mnps)",
+                    engine.last_nodes(),
+                    engine.last_elapsed().as_millis(),
+                    engine.last_nps() / 1.0e6,
+                );
                 println!();
                 // The leaf trace is the last entry in ply_traces; that's
                 // what the existing renderer expects.

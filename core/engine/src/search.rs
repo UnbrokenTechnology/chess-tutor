@@ -17,8 +17,9 @@
 //! sophisticated time management are deferred to a follow-up; the
 //! scaffolding here should accept them without API churn.
 
-use crate::eval::{evaluate, evaluate_with_trace, EvalTrace};
+use crate::eval::{evaluate_with_pawn_cache, evaluate_with_trace, EvalTrace};
 use crate::movepick::{ButterflyHistory, MovePicker, BUTTERFLY_HISTORY_BOUND};
+use crate::pawns;
 use crate::position::{Position, StateInfo};
 use crate::tt::TranspositionTable;
 use crate::types::{Bound, Color, Depth, Move, Value};
@@ -125,6 +126,7 @@ struct RootMove {
 pub(crate) struct Search<'a> {
     tt: &'a TranspositionTable,
     history: &'a mut ButterflyHistory,
+    pawn_cache: &'a mut pawns::Table,
 
     /// Killer moves per ply: two slots, `killers[ply][0]` is the latest
     /// fail-high quiet found at that ply.
@@ -174,10 +176,15 @@ pub(crate) struct Search<'a> {
 }
 
 impl<'a> Search<'a> {
-    pub(crate) fn new(tt: &'a TranspositionTable, history: &'a mut ButterflyHistory) -> Search<'a> {
+    pub(crate) fn new(
+        tt: &'a TranspositionTable,
+        history: &'a mut ButterflyHistory,
+        pawn_cache: &'a mut pawns::Table,
+    ) -> Search<'a> {
         Search {
             tt,
             history,
+            pawn_cache,
             // `pv_length` is sized `MAX_PLY + 1` so the parent's
             // `update_pv` read of `pv_length[ply + 1]` is in bounds when
             // the child bailed at `ply == MAX_PLY`. The child still
@@ -200,6 +207,13 @@ impl<'a> Search<'a> {
             verbose_next_tick: 0,
             root_stm: Color::White,
         }
+    }
+
+    /// Total nodes visited by this `Search` so far. Read by
+    /// [`crate::engine::Engine::search`] after [`run`](Self::run) returns
+    /// to surface the count alongside the search lines.
+    pub(crate) fn node_count(&self) -> u64 {
+        self.nodes
     }
 
     /// Run a search under `params` and return up to `params.multi_pv`
@@ -592,7 +606,7 @@ impl<'a> Search<'a> {
         } else if tt_hit && probe.data.eval != Value::NONE {
             probe.data.eval
         } else {
-            evaluate(pos)
+            evaluate_with_pawn_cache(pos, self.pawn_cache)
         };
         let static_eval = self.apply_contempt(raw_static_eval, pos);
 
@@ -608,6 +622,7 @@ impl<'a> Search<'a> {
             let reduced = (depth - r).max(1);
 
             let saved = pos.do_null_move();
+            self.tt.prefetch(pos.key());
             self.path_keys.push(pos.key());
             let null_score = -self.negamax(
                 pos,
@@ -657,7 +672,12 @@ impl<'a> Search<'a> {
         let mut best_score = -Value::INFINITE;
         let mut best_move = Move::NONE;
         let mut move_count = 0usize;
-        let mut quiets_tried: Vec<Move> = Vec::new();
+        // Stack-allocated rather than Vec — at ~30–50 quiets per node and
+        // millions of nodes per search, the prior `Vec::new() + push` form
+        // reallocated through capacities 4→8→16→32→64 every frame. Per-frame
+        // cost is 512 bytes (Move is u16); MAX_PLY recursion stays under
+        // budget.
+        let mut quiets_tried = crate::movegen::MoveList::new();
         let mut raised_alpha = false;
 
         loop {
@@ -677,6 +697,7 @@ impl<'a> Search<'a> {
             // Legality check via do/undo. `pos.do_move` assumes pseudo-
             // legal input; the picker guarantees that.
             let state = pos.do_move(mv);
+            self.tt.prefetch(pos.key());
             let us_was = !pos.side_to_move();
             let our_king = pos.king_square(us_was);
             let still_attacked =
@@ -727,6 +748,7 @@ impl<'a> Search<'a> {
                     continue;
                 }
                 let _ = pos.do_move(mv);
+                self.tt.prefetch(pos.key());
             }
 
             self.path_keys.push(pos.key());
@@ -972,6 +994,7 @@ impl<'a> Search<'a> {
             }
 
             let state = pos.do_move(mv);
+            self.tt.prefetch(pos.key());
             let us_was = !pos.side_to_move();
             let our_king = pos.king_square(us_was);
             let still_attacked =
@@ -1036,14 +1059,15 @@ impl<'a> Search<'a> {
         }
     }
 
-    /// Contempt-adjusted static evaluation. The raw `evaluate(pos)`
+    /// Contempt-adjusted static evaluation. The raw `evaluate_with_pawn_cache(pos)`
     /// returns a position score from the side-to-move's POV; we add
     /// the appropriate contempt so non-drawing lines are preferred
     /// over drawing ones at the root. Leaf evaluations used in
     /// pruning decisions should go through this, but **not** values
     /// written into the TT — see `probe.save(..., raw_eval)` below.
-    fn search_eval(&self, pos: &Position) -> Value {
-        Value(evaluate(pos).0 + self.contempt_for_pov(pos.side_to_move()))
+    fn search_eval(&mut self, pos: &Position) -> Value {
+        let raw = evaluate_with_pawn_cache(pos, self.pawn_cache);
+        Value(raw.0 + self.contempt_for_pov(pos.side_to_move()))
     }
 
     /// Apply contempt to a raw eval pulled from the TT. Mirrors
@@ -1412,7 +1436,8 @@ mod tests {
         // recursion levels crashed with "index out of bounds".
         let tt = TranspositionTable::new(1);
         let mut history = crate::movepick::ButterflyHistory::new();
-        let mut search = Search::new(&tt, &mut history);
+        let mut pawn_cache = pawns::Table::new();
+        let mut search = Search::new(&tt, &mut history, &mut pawn_cache);
         let mut pos = Position::startpos();
 
         // Both entry points must survive being called at the cap.
@@ -1448,7 +1473,8 @@ mod tests {
         // plies have preceded this position."
         let tt = TranspositionTable::new(1);
         let mut history = crate::movepick::ButterflyHistory::new();
-        let mut search = Search::new(&tt, &mut history);
+        let mut pawn_cache = pawns::Table::new();
+        let mut search = Search::new(&tt, &mut history, &mut pawn_cache);
         let pos =
             Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 4 3").unwrap();
 

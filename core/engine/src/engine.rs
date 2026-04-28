@@ -13,12 +13,13 @@
 
 use crate::eval::EvalTrace;
 use crate::movepick::ButterflyHistory;
+use crate::pawns;
 use crate::position::Position;
 use crate::search::Search;
 use crate::tt::{TranspositionTable, DEFAULT_TT_MB};
 use crate::types::{Move, Value};
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Per-search knobs controlling when to stop and how many PVs to return.
 /// `Default` yields a sensible interactive setting (depth 10, single PV,
@@ -124,6 +125,11 @@ pub struct SearchLine {
 pub struct Engine {
     tt: TranspositionTable,
     history: ButterflyHistory,
+    pawn_cache: pawns::Table,
+    /// Diagnostic stats from the most recent [`Engine::search`] call.
+    /// Both fields are zero before any search has run.
+    last_nodes: u64,
+    last_elapsed: Duration,
 }
 
 impl Engine {
@@ -134,15 +140,19 @@ impl Engine {
         Engine {
             tt: TranspositionTable::new(tt_size_mb),
             history: ButterflyHistory::new(),
+            pawn_cache: pawns::Table::new(),
+            last_nodes: 0,
+            last_elapsed: Duration::ZERO,
         }
     }
 
     /// Clear everything that accumulated across prior searches: TT,
-    /// history counters. Call between games so learning from game N
-    /// doesn't pollute move ordering in game N+1.
+    /// history counters, pawn cache. Call between games so learning from
+    /// game N doesn't pollute move ordering in game N+1.
     pub fn new_game(&mut self) {
         self.tt.clear();
         self.history.clear();
+        self.pawn_cache.clear();
     }
 
     /// Run a search and return at most `params.multi_pv` ranked lines,
@@ -151,8 +161,37 @@ impl Engine {
     /// original state before returning. An empty vector indicates a
     /// terminal root position (checkmate or stalemate).
     pub fn search(&mut self, pos: &mut Position, params: SearchParams) -> Vec<SearchLine> {
-        let mut search = Search::new(&self.tt, &mut self.history);
-        search.run(pos, &params)
+        let started = Instant::now();
+        let mut search = Search::new(&self.tt, &mut self.history, &mut self.pawn_cache);
+        let lines = search.run(pos, &params);
+        self.last_nodes = search.node_count();
+        self.last_elapsed = started.elapsed();
+        lines
+    }
+
+    /// Total node count visited by the most recent [`search`](Self::search)
+    /// call (sum across IDS depths and PV slots). Zero before any search
+    /// has run.
+    pub fn last_nodes(&self) -> u64 {
+        self.last_nodes
+    }
+
+    /// Wall-clock duration of the most recent [`search`](Self::search)
+    /// call. `Duration::ZERO` before any search has run.
+    pub fn last_elapsed(&self) -> Duration {
+        self.last_elapsed
+    }
+
+    /// Convenience: nodes per second from the most recent search.
+    /// Returns `0.0` if no search has run or the elapsed time is zero
+    /// (search returned instantly on a terminal position).
+    pub fn last_nps(&self) -> f64 {
+        let secs = self.last_elapsed.as_secs_f64();
+        if secs > 0.0 {
+            self.last_nodes as f64 / secs
+        } else {
+            0.0
+        }
     }
 
     /// Exposed for diagnostics and tests.
