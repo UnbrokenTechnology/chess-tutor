@@ -324,6 +324,13 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                             game_hist,
                             mv,
                         )?;
+                        writeln!(
+                            &mut out,
+                            "[retrospective] {} ms · {} nodes · {:.2} Mnps",
+                            analysis_engine.last_elapsed().as_millis(),
+                            analysis_engine.last_nodes(),
+                            analysis_engine.last_nps() / 1.0e6,
+                        )?;
                     }
                 }
                 Err(e) => writeln!(out, "rejected: {e}")?,

@@ -39,6 +39,64 @@
 //!   pre-move against the position immediately after the user's
 //!   single move, so narration attributes board-state changes to
 //!   that move and not to the opponent's subsequent replies.
+//!
+//! ## Design principles
+//!
+//! Everything the UI says must trace back to concrete engine data
+//! — never pattern-matched templates against aggregate scores. This
+//! is the explicit anti-goal vs. consumer chess sites that
+//! "narrate" by guessing what a swing-of-X-cp probably means.
+//!
+//! **Cumulative-threshold term selection**, not top-N. Narration
+//! shows the smallest prefix of `term_deltas` that accounts for
+//! ≥ 75 % of total |delta|. A one-term blunder produces a one-term
+//! list; a subtle positional combo produces 4–5.
+//!
+//! **Two analysis triggers, no others.** On-demand (user hits a
+//! hint button — no latency budget) and retrospective (after the
+//! most-recently-played move). Every-move pre-commit analysis is
+//! explicitly NOT a mode — too expensive, too hand-holdy.
+//!
+//! ## Out of scope for this pipeline
+//!
+//! - **Traps.** Memorisation of named refutation patterns. Lives
+//!   in [`crate::traps`] with its own structured outputs.
+//! - **Opening identification.** Lives in [`crate::openings`];
+//!   may be referenced as *context* for narration but doesn't
+//!   drive verdict classification.
+//! - **Game-level post-game commentary** (blunder summary, ELO
+//!   estimate, etc.). Separate product surface, not built.
+//!
+//! ## Deferred work
+//!
+//! - **Cheap-pass + surprise detection (Phase 2).** Depth-1
+//!   qsearch + SEE for every legal move; compare cheap ranking
+//!   against full-depth MultiPV ranking to flag
+//!   `LooksGoodButBad` / `LooksBadButGood`. Today's workaround:
+//!   `multi_pv = legal_count` gives a real deep score for every
+//!   root move. Phase 2 is a latency optimisation, not a
+//!   correctness prerequisite.
+//! - **Signal-mask (Phase 4).** Zero each [`crate::eval::EvalTrace`]
+//!   term in turn and re-rank moves. If zeroing term X changes
+//!   the top move, attach a `MaskedHint` saying "you'd prefer
+//!   M' if you undervalued X — but X is what makes M the best."
+//! - **Tactic library (Phase 5).** Parallel to [`crate::traps`]
+//!   but for general patterns: absolute pin, relative pin, fork,
+//!   skewer, double attack, then discovered attack, deflection,
+//!   overloading, x-ray, interference. Each is a detector
+//!   `fn(&Position, Move) -> Option<TacticHit>`. Run on demand
+//!   only — the prior-attempt repo ran tactics inside search and
+//!   killed perf.
+//!
+//! ## Open questions (revisit when real output lands)
+//!
+//! - **Settled-ply threshold**: currently 25 cp. Real positions
+//!   may want higher, or a different metric (largest single jump?
+//!   variance-based?).
+//! - **Piece attribution**: Material/PSQ are trivial. Threats /
+//!   King Safety / Mobility aggregate over many pieces; richer
+//!   attribution may need scratch state on `Evaluator` or
+//!   pattern-matching at template time.
 
 pub mod blocked_center_outcome;
 pub mod castling_outcome;
