@@ -677,6 +677,19 @@ impl<'a> Search<'a> {
             Bound::None
         };
 
+        // Sticky PV flag (SF11 search.cpp:697). Once a position has
+        // been touched on the PV at any point in this or a prior
+        // iteration, it stays flagged in the TT — even when re-visited
+        // through a non-PV path later. Sticky semantics: union the
+        // call's PvNode-ness with whatever the TT already remembers.
+        //
+        // Currently consumed only by the `probe.save` site below, which
+        // writes the union back so the flag survives across iterative-
+        // deepening rounds. SF11's other consumer is the LMR reduction
+        // at search.cpp:1137 (`r -= 2`); see the LMR block below for
+        // why we don't fire that yet.
+        let tt_pv = is_pv || (tt_hit && probe.data.is_pv);
+
         if !is_pv && tt_hit && tt_depth >= depth && tt_value != Value::NONE {
             let usable = match tt_bound {
                 Bound::Exact => true,
@@ -1220,6 +1233,20 @@ impl<'a> Search<'a> {
                     r += 2;
                 }
 
+                // NOTE: SF11 search.cpp:1137 also has `r -= 2` when
+                // `tt_pv` is true. Measured in isolation (2026-05-12)
+                // as a +30-80 % wall-clock regression across the three
+                // reference positions — same missing-prerequisites
+                // pattern as singular extensions. The companion LMR
+                // relaxers in SF (`ttHitAverage`, `opp moveCount > 14`,
+                // `singularLMR`, escape-capture detection) tighten
+                // elsewhere to balance the tree; without those, this
+                // bump only loosens. Sticky ttPv *saving* still lands
+                // (see `tt_pv` definition above and the `probe.save`
+                // call site below) so the bit is available when those
+                // prerequisites arrive and we revisit `r -= 2`
+                // together with them.
+
                 // SF11 statScore: blend main + cont-history into a
                 // single quality estimate for the move we're about
                 // to search, then compare against the parent's
@@ -1506,7 +1533,7 @@ impl<'a> Search<'a> {
         probe.save(
             key,
             value_to_tt(best_score, ply as i32),
-            is_pv,
+            tt_pv,
             bound,
             Depth(depth),
             best_move,
