@@ -14,19 +14,47 @@
 //! known winning/drawish pattern, the main evaluator trusts the
 //! specialised number and skips the normal classical terms.
 //!
-//! **Scope of this module:** `KXK` (mate against a bare king with any
-//! winning configuration) and `KBNK` (mate with K+B+N, driving the
-//! loser toward the same-colour corner as the bishop). Future
-//! specialisations (KPK bitbase, drawish rook endings, KQKR, etc.) slot
-//! in via the same dispatcher below — add a signature detector, a
-//! scoring function, route it from `probe`.
+//! **Scope of this module:** all six "bare-king mate" / drawish-piece
+//! specialisations from Stockfish 11's `endgame.cpp`:
+//!
+//! - `KXK` — mate a lone king with any winning configuration.
+//! - `KBNK` — mate with K+B+N, driving the loser toward the
+//!   bishop-coloured corner.
+//! - `KPK` — bitbase-precise K+P vs K (handles wrong-rook-pawn etc.).
+//! - `KNNK` — unconditional draw (two knights can't force mate).
+//! - `KNNKP` — two knights vs K+P, a search-guided technical win.
+//! - `KQKR` — Q vs R technical mate (drive to edge + king proximity).
+//! - `KQKP` — Q vs P, won unless the 7th-rank rook/bishop-file fortress.
+//! - `KRKP` — R vs P, four geometric cases (king-in-front / far king /
+//!   king-supported pawn / generic).
+//! - `KRKB` — drawish; just an edge-push to dampen classical eval's
+//!   exuberance about being "up the exchange."
+//! - `KRKN` — drawish; edge-push plus a king/knight separation gradient.
+//!
+//! **Why the override.** `probe` returns `Option<Value>` and `eval` uses
+//! the value verbatim (no addition to classical terms). This is the
+//! right call for the lone-king mates (classical mobility / king-safety
+//! signals are nonsensical when one side is just a king) but it also
+//! means every term the classical evaluator would have contributed —
+//! mobility, threats, king tropism — is discarded. Where SF's bare
+//! formula carries no positional gradient (e.g. `KNNKP` is literally
+//! `2·Knight - Pawn + PushToEdges`), our search will see a flat plateau
+//! and wander. The fix is to bake the technique-relevant gradient into
+//! each specialist explicitly; see `evaluate_knnkp`. For the new
+//! specialists ported alongside this comment SF's existing formulas
+//! already include their own gradients (`PushClose`, `PushAway`,
+//! king-pawn distance), so the port is mostly a direct translation.
+//!
+//! Adding a new specialisation: write a signature detector, write a
+//! scoring function (with a gradient for any technique it's meant to
+//! drive), route it from `probe`.
 
 use crate::attacks::square_distance;
 use crate::bitbases;
-use crate::bitboard::{DARK_SQUARES, LIGHT_SQUARES};
+use crate::bitboard::{forward_file_bb, DARK_SQUARES, LIGHT_SQUARES};
 use crate::movegen::legal_moves_vec;
 use crate::position::Position;
-use crate::types::{Color, PieceType, Value};
+use crate::types::{Color, File, PieceType, Rank, Square, Value};
 
 // =========================================================================
 // Tuning tables
@@ -52,6 +80,12 @@ const PUSH_TO_EDGES: [i32; 64] = [
 /// for the strong side to actively support mate. Indexed by the
 /// Chebyshev (king-step) distance.
 const PUSH_CLOSE: [i32; 8] = [0, 0, 100, 80, 60, 40, 20, 10];
+
+/// Per-distance bonus for "two enemy pieces are far apart" — used in
+/// `KRKN` to reward the rook side for separating the defender's king
+/// and knight (a separated knight is easier to win against). Indexed
+/// by the Chebyshev distance between the two enemy pieces.
+const PUSH_AWAY: [i32; 8] = [0, 5, 20, 40, 60, 80, 90, 100];
 
 /// Per-square bonus for the weak king's position in the `KBNK` (king +
 /// bishop + knight vs king) endgame. The highest numbers sit in the
@@ -112,6 +146,26 @@ pub fn probe(pos: &Position) -> Option<Value> {
     // search-guided technique rather than a tablebase answer.
     if let Some(strong) = knnkp_strong_side(pos) {
         return Some(evaluate_knnkp(pos, strong));
+    }
+
+    // Piece-vs-piece endings (both sides have material; KXK / KPK do
+    // not apply). Order among these doesn't affect correctness — the
+    // material signatures are disjoint — but they're listed roughly
+    // by frequency in real play.
+    if let Some(strong) = piece_vs_piece_signature(pos, PieceType::Queen, PieceType::Rook) {
+        return Some(evaluate_kqkr(pos, strong));
+    }
+    if let Some(strong) = piece_vs_pawn_signature(pos, PieceType::Queen) {
+        return Some(evaluate_kqkp(pos, strong));
+    }
+    if let Some(strong) = piece_vs_pawn_signature(pos, PieceType::Rook) {
+        return Some(evaluate_krkp(pos, strong));
+    }
+    if let Some(strong) = piece_vs_piece_signature(pos, PieceType::Rook, PieceType::Bishop) {
+        return Some(evaluate_krkb(pos, strong));
+    }
+    if let Some(strong) = piece_vs_piece_signature(pos, PieceType::Rook, PieceType::Knight) {
+        return Some(evaluate_krkn(pos, strong));
     }
 
     // KXK: everything else where one side is down to a bare king and
@@ -515,6 +569,277 @@ fn evaluate_kxk(pos: &Position, strong: Color) -> Value {
 }
 
 // =========================================================================
+// Piece-vs-piece-and-pawn endings (KQKR / KQKP / KRKP / KRKB / KRKN)
+// =========================================================================
+//
+// Five evaluators that fire when *both* sides have material — a step
+// beyond the bare-king KXK family. KQKR is a textbook technical mate
+// (overrides classical eval with a KNOWN_WIN pedestal so search
+// commits). KRKB and KRKN are drawish; the whole point of the
+// specialist is to *dampen* classical eval's exuberance about being up
+// the exchange and prevent the engine from chasing a phantom win. KQKP
+// and KRKP are mixed: usually winning but with concrete drawish
+// sub-cases (fortress, king-supported pawn) where the specialist
+// returns a much smaller number.
+
+/// Returns `Some(strong)` when the material on the board is exactly
+/// K + `strong_piece` vs K + `weak_piece` (one of each, no pawns either
+/// side). Used to route KQKR / KRKB / KRKN.
+fn piece_vs_piece_signature(
+    pos: &Position,
+    strong_piece: PieceType,
+    weak_piece: PieceType,
+) -> Option<Color> {
+    let strong_npm = mg_value(strong_piece);
+    let weak_npm = mg_value(weak_piece);
+    for &c in Color::both().iter() {
+        let opp = !c;
+        if pos.count(c, PieceType::Pawn) != 0 || pos.count(opp, PieceType::Pawn) != 0 {
+            continue;
+        }
+        if pos.non_pawn_material(c) != strong_npm || pos.non_pawn_material(opp) != weak_npm {
+            continue;
+        }
+        // The npm check is strong but we additionally verify the exact
+        // piece counts to defend against weird edge cases (e.g. two
+        // knights matching a rook's npm, though that doesn't happen
+        // numerically — KnightMg*2 = 1562 ≠ RookMg = 1276).
+        if pos.count(c, strong_piece) == 1 && pos.count(opp, weak_piece) == 1 {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// Returns `Some(strong)` when the material is exactly K + `strong_piece`
+/// vs K + one pawn. Used to route KQKP / KRKP.
+fn piece_vs_pawn_signature(pos: &Position, strong_piece: PieceType) -> Option<Color> {
+    let strong_npm = mg_value(strong_piece);
+    for &c in Color::both().iter() {
+        let opp = !c;
+        if pos.count(c, PieceType::Pawn) != 0 {
+            continue;
+        }
+        if pos.non_pawn_material(c) != strong_npm || pos.count(c, strong_piece) != 1 {
+            continue;
+        }
+        if pos.non_pawn_material(opp) != Value::ZERO || pos.count(opp, PieceType::Pawn) != 1 {
+            continue;
+        }
+        return Some(c);
+    }
+    None
+}
+
+/// Middlegame piece value for the signature checks. Inlined small table;
+/// avoids depending on the broader `material` module for a five-line
+/// lookup.
+const fn mg_value(pt: PieceType) -> Value {
+    match pt {
+        PieceType::Pawn => Value::PAWN_MG,
+        PieceType::Knight => Value::KNIGHT_MG,
+        PieceType::Bishop => Value::BISHOP_MG,
+        PieceType::Rook => Value::ROOK_MG,
+        PieceType::Queen => Value::QUEEN_MG,
+        PieceType::King => Value::ZERO,
+    }
+}
+
+// -------------------------------------------------------------------------
+// KQKR — queen vs rook, technical mate
+// -------------------------------------------------------------------------
+
+fn evaluate_kqkr(pos: &Position, strong: Color) -> Value {
+    let weak = !strong;
+
+    // Stalemate guard: rare (the weak side still has a rook), but the
+    // queen can pin or smother in pathological setups.
+    if pos.side_to_move() == weak {
+        let mut scratch = pos.clone();
+        if legal_moves_vec(&mut scratch).is_empty() {
+            return Value::DRAW;
+        }
+    }
+
+    let winner_k = pos.king_square(strong);
+    let loser_k = pos.king_square(weak);
+    let distance = square_distance(winner_k, loser_k) as usize;
+
+    // SF11 returns just `QueenEg - RookEg + PushToEdges + PushClose`. We
+    // additionally ride the KNOWN_WIN pedestal: with our probe fully
+    // overriding the classical eval there's no other commitment signal
+    // pushing the search to stick with the technique.
+    let base = Value::QUEEN_EG.0 - Value::ROOK_EG.0
+        + PUSH_TO_EDGES[loser_k.index()]
+        + PUSH_CLOSE[distance];
+    let pedestal = Value::KNOWN_WIN.0;
+    let cap = Value::MATE.0 - Value::MAX_PLY - 1;
+    let score = (base + pedestal).min(cap);
+
+    Value(if strong == Color::White {
+        score
+    } else {
+        -score
+    })
+}
+
+// -------------------------------------------------------------------------
+// KQKP — queen vs pawn, won unless the 7th-rank fortress
+// -------------------------------------------------------------------------
+
+fn evaluate_kqkp(pos: &Position, strong: Color) -> Value {
+    let weak = !strong;
+
+    if pos.side_to_move() == weak {
+        let mut scratch = pos.clone();
+        if legal_moves_vec(&mut scratch).is_empty() {
+            return Value::DRAW;
+        }
+    }
+
+    let winner_k = pos.king_square(strong);
+    let loser_k = pos.king_square(weak);
+    let pawn_sq = pos.pieces_of(weak, PieceType::Pawn).lsb();
+
+    let distance = square_distance(winner_k, loser_k) as usize;
+    let mut score = PUSH_CLOSE[distance];
+
+    // The fortress: weak's pawn is on its 7th rank, adjacent to the weak
+    // king, on a file where the stalemate / queen-can't-approach trick
+    // works (a/c/f/h). Outside the fortress, the queen wins; add the
+    // queen-pawn material gap and the pedestal so search commits.
+    let pawn_relative_rank = pawn_sq.rank().from_perspective(weak);
+    let pawn_file = pawn_sq.file();
+    let in_fortress = pawn_relative_rank == Rank::R7
+        && square_distance(loser_k, pawn_sq) == 1
+        && matches!(pawn_file, File::A | File::C | File::F | File::H);
+
+    if !in_fortress {
+        let base = Value::QUEEN_EG.0 - Value::PAWN_EG.0;
+        let pedestal = Value::KNOWN_WIN.0;
+        let cap = Value::MATE.0 - Value::MAX_PLY - 1;
+        score = (score + base + pedestal).min(cap);
+    }
+
+    Value(if strong == Color::White {
+        score
+    } else {
+        -score
+    })
+}
+
+// -------------------------------------------------------------------------
+// KRKP — rook vs pawn, four geometric cases
+// -------------------------------------------------------------------------
+
+fn evaluate_krkp(pos: &Position, strong: Color) -> Value {
+    let weak = !strong;
+
+    if pos.side_to_move() == weak {
+        let mut scratch = pos.clone();
+        if legal_moves_vec(&mut scratch).is_empty() {
+            return Value::DRAW;
+        }
+    }
+
+    // Reframe the board with `strong` as the white side: the rest of
+    // this function reads cleanly in "white attacks, black defends with
+    // a pawn marching toward rank 1" terms.
+    let wksq = pos.king_square(strong).from_perspective(strong);
+    let bksq = pos.king_square(weak).from_perspective(strong);
+    let rsq = pos.pieces_of(strong, PieceType::Rook).lsb().from_perspective(strong);
+    let psq = pos.pieces_of(weak, PieceType::Pawn).lsb().from_perspective(strong);
+
+    // The pawn (weak side, post-flip) is marching toward rank 1; its
+    // queening square is on its file at rank 1.
+    let queening_sq = Square::new(psq.file(), Rank::R1);
+
+    // "Tempo" terms — if it's *their* move they get an extra step, so
+    // distance thresholds tighten by 1 ply.
+    let strong_to_move = pos.side_to_move() == strong;
+    let weak_to_move = !strong_to_move;
+
+    let raw_score: i32 = if forward_file_bb(Color::White, wksq).contains(psq) {
+        // (1) Strong king is in front of the pawn on the same file: win.
+        Value::ROOK_EG.0 - square_distance(wksq, psq) as i32
+    } else if square_distance(bksq, psq) as i32 >= 3 + i32::from(weak_to_move)
+        && square_distance(bksq, rsq) >= 3
+    {
+        // (2) Weak king is too far from both the pawn and the rook to
+        // defend: win.
+        Value::ROOK_EG.0 - square_distance(wksq, psq) as i32
+    } else if bksq.rank() <= Rank::R3
+        && square_distance(bksq, psq) == 1
+        && wksq.rank() >= Rank::R4
+        && square_distance(wksq, psq) as i32 > 2 + i32::from(strong_to_move)
+    {
+        // (3) Pawn is far advanced and supported by the defending king,
+        // and the attacking king is too distant: drawish.
+        80 - 8 * square_distance(wksq, psq) as i32
+    } else {
+        // (4) Generic: weight king-pawn distances and the pawn's
+        // distance from queening. SF's `psq + SOUTH` is "the square the
+        // pawn would step to next" — one rank toward queening, i.e.
+        // raw - 8 in white-relative coords.
+        let psq_south = Square::from_index(psq.raw() - 8);
+        200 - 8
+            * (square_distance(wksq, psq_south) as i32
+                - square_distance(bksq, psq_south) as i32
+                - square_distance(psq, queening_sq) as i32)
+    };
+
+    Value(if strong == Color::White {
+        raw_score
+    } else {
+        -raw_score
+    })
+}
+
+// -------------------------------------------------------------------------
+// KRKB — rook vs bishop, drawish (edge-push only)
+// -------------------------------------------------------------------------
+
+fn evaluate_krkb(pos: &Position, strong: Color) -> Value {
+    let weak = !strong;
+    let loser_k = pos.king_square(weak);
+
+    // No KNOWN_WIN pedestal: the whole purpose of this specialist is to
+    // *dampen* classical eval's claim that being up the exchange is
+    // ~+400 cp. Theoretical result is a draw with best defence, and
+    // SF11's score is intentionally small (≤100 cp) so the engine
+    // doesn't chase phantom wins.
+    let score = PUSH_TO_EDGES[loser_k.index()];
+
+    Value(if strong == Color::White {
+        score
+    } else {
+        -score
+    })
+}
+
+// -------------------------------------------------------------------------
+// KRKN — rook vs knight, drawish (edge-push + king/knight separation)
+// -------------------------------------------------------------------------
+
+fn evaluate_krkn(pos: &Position, strong: Color) -> Value {
+    let weak = !strong;
+    let loser_k = pos.king_square(weak);
+    let knight_sq = pos.pieces_of(weak, PieceType::Knight).lsb();
+
+    // PushAway rewards separating the defender's king from its knight —
+    // an isolated knight is much easier for the rook side to win
+    // against. Still drawish overall; no pedestal.
+    let dist = square_distance(loser_k, knight_sq) as usize;
+    let score = PUSH_TO_EDGES[loser_k.index()] + PUSH_AWAY[dist];
+
+    Value(if strong == Color::White {
+        score
+    } else {
+        -score
+    })
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -855,6 +1180,181 @@ mod tests {
             "pawn far from promoting must score higher ({} vs {})",
             v_far.0,
             v_near.0
+        );
+    }
+
+    // ---- KQKR --------------------------------------------------------
+
+    #[test]
+    fn kqkr_fires_and_scores_above_known_win() {
+        // White K + Q vs Black K + R. Q-vs-R technical mate.
+        let p = Position::from_fen("7k/8/5K2/8/3r4/8/3Q4/8 w - - 0 1").unwrap();
+        let v = probe(&p).expect("KQKR fires");
+        assert!(
+            v.0 >= Value::KNOWN_WIN.0,
+            "KQKR must sit on the KNOWN_WIN pedestal so search commits; got {}",
+            v.0
+        );
+    }
+
+    #[test]
+    fn kqkr_drives_loser_king_to_edge() {
+        // Same material, same strong-king position; loser king on the
+        // edge should score higher for white than loser king in the
+        // centre.
+        let p_edge = Position::from_fen("7k/8/5K2/8/3r4/8/3Q4/8 w - - 0 1").unwrap();
+        let p_centre = Position::from_fen("8/8/5K2/3k4/3r4/8/3Q4/8 w - - 0 1").unwrap();
+        let v_edge = probe(&p_edge).expect("KQKR fires");
+        let v_centre = probe(&p_centre).expect("KQKR fires");
+        assert!(
+            v_edge > v_centre,
+            "loser king on edge must score higher ({:?} vs {:?})",
+            v_edge,
+            v_centre
+        );
+    }
+
+    // ---- KQKP --------------------------------------------------------
+
+    #[test]
+    fn kqkp_fires_and_wins_outside_fortress() {
+        // White K + Q vs Black K + P with the pawn nowhere near a
+        // fortress draw — should sit on KNOWN_WIN pedestal.
+        let p = Position::from_fen("4k3/4p3/8/8/8/8/8/3QK3 w - - 0 1").unwrap();
+        let v = probe(&p).expect("KQKP fires");
+        assert!(
+            v.0 >= Value::KNOWN_WIN.0,
+            "non-fortress KQKP must sit above KNOWN_WIN; got {}",
+            v.0
+        );
+    }
+
+    #[test]
+    fn kqkp_fortress_scores_drawish() {
+        // Black pawn on a2 (relative-rank 7, A-file), black king on b2
+        // (adjacent to pawn). The classic stalemate-trick fortress: the
+        // queen can deliver perpetual but not mate. SF returns just
+        // PushClose here, well under KNOWN_WIN.
+        let p_fortress = Position::from_fen("8/8/8/8/8/2K5/pk6/3Q4 w - - 0 1").unwrap();
+        let v = probe(&p_fortress).expect("KQKP fires");
+        assert!(
+            v.0 < Value::KNOWN_WIN.0,
+            "fortress KQKP must score drawish (no pedestal); got {}",
+            v.0
+        );
+    }
+
+    #[test]
+    fn kqkp_fortress_only_on_a_c_f_h_files() {
+        // Same shape as the fortress test but with the pawn on b2 — the
+        // B file is *not* a fortress file, so the queen wins. Must sit
+        // above KNOWN_WIN.
+        let p = Position::from_fen("8/8/8/8/8/2K5/1pk5/3Q4 w - - 0 1").unwrap();
+        let v = probe(&p).expect("KQKP fires");
+        assert!(
+            v.0 >= Value::KNOWN_WIN.0,
+            "B-file pawn is not a fortress; must score as a win, got {}",
+            v.0
+        );
+    }
+
+    // ---- KRKP --------------------------------------------------------
+
+    #[test]
+    fn krkp_fires_and_wins_when_king_in_front_of_pawn() {
+        // White K on e6 stands directly in front of the black pawn on
+        // e4 — strong-king-in-front branch: winning.
+        let p = Position::from_fen("8/8/4K3/8/4p3/8/8/4k2R w - - 0 1").unwrap();
+        let v = probe(&p).expect("KRKP fires");
+        assert!(
+            v.0 > Value::ROOK_EG.0 / 2,
+            "king-in-front KRKP must score as winning; got {}",
+            v.0
+        );
+    }
+
+    #[test]
+    fn krkp_drawish_when_pawn_is_far_advanced_and_supported() {
+        // Black pawn on rank 2 (one from promoting), black king right
+        // next to it, white king and rook out of reach. SF's branch (3):
+        // drawish, score ~ 80 - 8*king_pawn_dist.
+        let p = Position::from_fen("8/8/8/7R/7K/8/2kp4/8 w - - 0 1").unwrap();
+        let v = probe(&p).expect("KRKP fires");
+        assert!(
+            v.0.abs() < Value::ROOK_EG.0 / 2,
+            "king-supported far-advanced pawn KRKP must score drawish; got {}",
+            v.0
+        );
+    }
+
+    #[test]
+    fn krkp_fires_when_strong_side_is_black() {
+        // Mirror: black has rook, white has the pawn. Value must be
+        // negative from white's POV.
+        let p = Position::from_fen("4K2r/8/8/8/4P3/4k3/8/8 w - - 0 1").unwrap();
+        let v = probe(&p).expect("KRKP fires with strong black");
+        assert!(v.0 < 0, "strong black must produce negative value; got {}", v.0);
+    }
+
+    // ---- KRKB --------------------------------------------------------
+
+    #[test]
+    fn krkb_fires_and_returns_drawish_score() {
+        // White rook vs black bishop — theoretical draw. Score must be
+        // well below the rook's value (no overconfident "up the
+        // exchange" claim).
+        let p = Position::from_fen("4k3/4b3/8/8/8/8/8/3RK3 w - - 0 1").unwrap();
+        let v = probe(&p).expect("KRKB fires");
+        assert!(
+            v.0.abs() < Value::ROOK_EG.0 / 4,
+            "KRKB must return a drawish score (≪ rook value); got {}",
+            v.0
+        );
+    }
+
+    #[test]
+    fn krkb_drives_loser_king_to_edge() {
+        let p_edge = Position::from_fen("k7/8/8/4b3/8/8/8/3RK3 w - - 0 1").unwrap();
+        let p_centre = Position::from_fen("8/8/4k3/4b3/8/8/8/3RK3 w - - 0 1").unwrap();
+        let v_edge = probe(&p_edge).expect("KRKB fires");
+        let v_centre = probe(&p_centre).expect("KRKB fires");
+        assert!(
+            v_edge > v_centre,
+            "loser king on edge must score higher in KRKB ({:?} vs {:?})",
+            v_edge,
+            v_centre
+        );
+    }
+
+    // ---- KRKN --------------------------------------------------------
+
+    #[test]
+    fn krkn_fires_and_returns_drawish_score() {
+        // Rook vs knight is drawish; score must stay well below rook
+        // value.
+        let p = Position::from_fen("4k3/4n3/8/8/8/8/8/3RK3 w - - 0 1").unwrap();
+        let v = probe(&p).expect("KRKN fires");
+        assert!(
+            v.0.abs() < Value::ROOK_EG.0 / 4,
+            "KRKN must return a drawish score; got {}",
+            v.0
+        );
+    }
+
+    #[test]
+    fn krkn_prefers_separating_king_and_knight() {
+        // Same weak-king square; knight adjacent vs knight far away. The
+        // PushAway gradient should score the separated case higher for
+        // the rook side.
+        let p_adjacent = Position::from_fen("4k3/4n3/8/8/8/8/8/3RK3 w - - 0 1").unwrap();
+        let p_separated = Position::from_fen("4k3/8/8/8/n7/8/8/3RK3 w - - 0 1").unwrap();
+        let v_adj = probe(&p_adjacent).expect("KRKN fires");
+        let v_sep = probe(&p_separated).expect("KRKN fires");
+        assert!(
+            v_sep > v_adj,
+            "separated king/knight must score higher in KRKN ({:?} vs {:?})",
+            v_sep,
+            v_adj
         );
     }
 }
