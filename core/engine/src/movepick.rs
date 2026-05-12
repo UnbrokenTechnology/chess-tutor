@@ -19,7 +19,7 @@
 
 use crate::movegen::{generate_pseudo_legal_moves, MoveList, MAX_MOVES};
 use crate::position::Position;
-use crate::types::{Color, Depth, Move, Square, Value};
+use crate::types::{Color, Depth, Move, PieceType, Square, Value};
 
 use std::cell::RefCell;
 use std::mem::MaybeUninit;
@@ -72,6 +72,305 @@ impl ButterflyHistory {
 }
 
 impl Default for ButterflyHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =========================================================================
+// Continuation history (Stockfish-style "piece-to" history per parent move)
+// =========================================================================
+
+/// Bound on stored continuation-history values. Matches Stockfish 11's
+/// `PieceToHistory` saturation, so the gravity-update math behaves
+/// identically.
+pub const CONT_HISTORY_BOUND: i32 = 29_952;
+
+/// Number of slots reserved per piece dimension. Matches Stockfish's
+/// `PIECE_NB = 16`: pieces are color-tagged with discriminants in
+/// `1..=6` (white) and `9..=14` (black); slots `0`, `7`, `8`, `15` are
+/// unused but allocated to keep indexing uniform.
+const PIECE_SLOTS: usize = 16;
+
+/// Inner table of [`ContinuationHistory`]: scores quiet moves by their
+/// `(moved_piece, to_sq)`. Sized 2 KB (16 × 64 × `i16`).
+pub type PieceToHistory = [[i16; 64]; PIECE_SLOTS];
+
+/// Stockfish 11's continuation history: a 4D table indexed by
+/// `(parent_piece, parent_to)` outer and `(child_piece, child_to)`
+/// inner. Engine owns four of these, partitioned by `(in_check,
+/// was_capture)` of the parent move so that fundamentally different
+/// regimes (in-check evasions vs. quiet sequences) don't pollute each
+/// other.
+///
+/// One instance is 2 MB (16 × 64 × 2 KB). Allocation is heap-only —
+/// the struct is too big to materialise on the stack.
+pub struct ContinuationHistory {
+    table: Box<[[PieceToHistory; 64]; PIECE_SLOTS]>,
+}
+
+impl ContinuationHistory {
+    /// Allocate a fresh zero-initialised table directly on the heap.
+    /// Sound because the all-zero bit pattern is a valid `i16` (zero) in
+    /// every slot; `Box::new(...)` would first materialise the 2 MB
+    /// array on the stack and overflow.
+    pub fn new() -> Self {
+        let mut b: Box<MaybeUninit<[[PieceToHistory; 64]; PIECE_SLOTS]>> =
+            Box::new_uninit();
+        unsafe {
+            std::ptr::write_bytes(b.as_mut_ptr(), 0u8, 1);
+            Self {
+                table: b.assume_init(),
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for outer in self.table.iter_mut() {
+            for sub in outer.iter_mut() {
+                for row in sub.iter_mut() {
+                    row.fill(0);
+                }
+            }
+        }
+    }
+
+    /// Borrow the inner [`PieceToHistory`] keyed by `(parent_piece,
+    /// parent_to)`. `parent_piece_idx` must be in `0..16` (typically
+    /// `Piece::index()`); the sentinel index `0` ("no piece") yields
+    /// the "no parent move" row, which is never updated and reads as
+    /// all zeros.
+    #[inline]
+    pub fn sub(&self, parent_piece_idx: usize, parent_to_idx: usize) -> &PieceToHistory {
+        &self.table[parent_piece_idx][parent_to_idx]
+    }
+
+    /// Mutable borrow of the inner [`PieceToHistory`] keyed by
+    /// `(parent_piece, parent_to)` for in-place updates on β-cutoff.
+    #[inline]
+    pub fn sub_mut(
+        &mut self,
+        parent_piece_idx: usize,
+        parent_to_idx: usize,
+    ) -> &mut PieceToHistory {
+        &mut self.table[parent_piece_idx][parent_to_idx]
+    }
+}
+
+impl Default for ContinuationHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for ContinuationHistory {
+    fn clone(&self) -> Self {
+        let mut b: Box<MaybeUninit<[[PieceToHistory; 64]; PIECE_SLOTS]>> =
+            Box::new_uninit();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &*self.table as *const _,
+                b.as_mut_ptr(),
+                1,
+            );
+            Self {
+                table: b.assume_init(),
+            }
+        }
+    }
+}
+
+/// Stockfish 11's gravity-update for a [`PieceToHistory`] entry. Same
+/// shape as butterfly history but with the cont-hist saturation bound.
+#[inline]
+pub fn cont_history_update(slot: &mut i16, bonus: i32) {
+    debug_assert!(bonus.abs() <= CONT_HISTORY_BOUND);
+    let prev = *slot as i32;
+    let next = prev + bonus - prev * bonus.abs() / CONT_HISTORY_BOUND;
+    *slot = next as i16;
+}
+
+/// Engine-wide store of the four [`ContinuationHistory`] arenas
+/// Stockfish maintains, partitioned by `[in_check][was_capture]` of
+/// the parent move. ~8 MB total. Heap-only construction; clone via
+/// per-arena clone to avoid stack overflow.
+pub struct ContHistStore {
+    pub tables: [[ContinuationHistory; 2]; 2],
+}
+
+impl ContHistStore {
+    pub fn new() -> Self {
+        Self {
+            tables: [
+                [ContinuationHistory::new(), ContinuationHistory::new()],
+                [ContinuationHistory::new(), ContinuationHistory::new()],
+            ],
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for row in self.tables.iter_mut() {
+            for t in row.iter_mut() {
+                t.clear();
+            }
+        }
+    }
+
+    /// Look up the `PieceToHistory` sub-table identified by the
+    /// `(in_check, was_capture, parent_piece_idx, parent_to_idx)` key.
+    /// Used to score quiet moves at the point of move generation.
+    #[inline]
+    pub fn sub_for_key(&self, key: (bool, bool, u8, u8)) -> &PieceToHistory {
+        let (ic, wc, p, t) = key;
+        self.tables[ic as usize][wc as usize].sub(p as usize, t as usize)
+    }
+
+    /// Mutable version of [`Self::sub_for_key`] for β-cutoff updates.
+    #[inline]
+    pub fn sub_for_key_mut(&mut self, key: (bool, bool, u8, u8)) -> &mut PieceToHistory {
+        let (ic, wc, p, t) = key;
+        self.tables[ic as usize][wc as usize].sub_mut(p as usize, t as usize)
+    }
+}
+
+impl Default for ContHistStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for ContHistStore {
+    fn clone(&self) -> Self {
+        Self {
+            tables: [
+                [self.tables[0][0].clone(), self.tables[0][1].clone()],
+                [self.tables[1][0].clone(), self.tables[1][1].clone()],
+            ],
+        }
+    }
+}
+
+// =========================================================================
+// Capture history
+// =========================================================================
+
+/// Bound on stored capture-history values. Matches Stockfish 11's
+/// `CapturePieceToHistory` saturation.
+pub const CAPTURE_HISTORY_BOUND: i32 = 10_692;
+
+/// Number of slots reserved per piece-type dimension. Matches
+/// Stockfish's `PIECE_TYPE_NB = 8`: piece kinds use discriminants
+/// `1..=6`; slots `0` (no piece) and `7` (unused) are allocated to
+/// keep indexing uniform — the `0` slot is also where en-passant
+/// captures land (Stockfish reads `piece_on(to)` which is empty for
+/// e.p.).
+const PIECE_TYPE_SLOTS: usize = 8;
+
+/// Stockfish 11's `CapturePieceToHistory`: scores capture moves by
+/// `(moving_piece, to_sq, captured_piece_type)`. ~16 KB heap-only
+/// allocation (16 × 64 × 8 × 2 bytes). Used as a tiebreaker on top of
+/// MVV-LVA when ordering good captures.
+pub struct CaptureHistory {
+    table: Box<[[[i16; PIECE_TYPE_SLOTS]; 64]; PIECE_SLOTS]>,
+}
+
+impl CaptureHistory {
+    pub fn new() -> Self {
+        let mut b: Box<MaybeUninit<[[[i16; PIECE_TYPE_SLOTS]; 64]; PIECE_SLOTS]>> =
+            Box::new_uninit();
+        unsafe {
+            std::ptr::write_bytes(b.as_mut_ptr(), 0u8, 1);
+            Self {
+                table: b.assume_init(),
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for outer in self.table.iter_mut() {
+            for sub in outer.iter_mut() {
+                sub.fill(0);
+            }
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, moved_piece_idx: u8, to_idx: u8, captured_pt_idx: u8) -> i16 {
+        self.table[moved_piece_idx as usize][to_idx as usize][captured_pt_idx as usize]
+    }
+
+    #[inline]
+    pub fn update(&mut self, moved_piece_idx: u8, to_idx: u8, captured_pt_idx: u8, bonus: i32) {
+        debug_assert!(bonus.abs() <= CAPTURE_HISTORY_BOUND);
+        let slot =
+            &mut self.table[moved_piece_idx as usize][to_idx as usize][captured_pt_idx as usize];
+        let prev = *slot as i32;
+        let next = prev + bonus - prev * bonus.abs() / CAPTURE_HISTORY_BOUND;
+        *slot = next as i16;
+    }
+}
+
+impl Default for CaptureHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for CaptureHistory {
+    fn clone(&self) -> Self {
+        let mut b: Box<MaybeUninit<[[[i16; PIECE_TYPE_SLOTS]; 64]; PIECE_SLOTS]>> =
+            Box::new_uninit();
+        unsafe {
+            std::ptr::copy_nonoverlapping(&*self.table as *const _, b.as_mut_ptr(), 1);
+            Self {
+                table: b.assume_init(),
+            }
+        }
+    }
+}
+
+// =========================================================================
+// Counter-move table
+// =========================================================================
+
+/// Per-(prev-piece-kind, prev-to-square) "what move refuted that move
+/// last time". Indexed by the parent ply's moved piece kind (1..=6) and
+/// destination square. The opposite-side ambiguity (a white knight to
+/// f3 and a black knight to f3 share a slot) is intentional: the table
+/// is a heuristic for move ordering, not a correctness mechanism, and
+/// keeping it color-agnostic halves its size.
+///
+/// Slot 0 is unused — `PieceType` discriminants start at 1.
+#[derive(Clone)]
+pub struct CounterMoveTable {
+    table: Box<[[Move; 64]; 7]>,
+}
+
+impl CounterMoveTable {
+    pub fn new() -> Self {
+        Self {
+            table: Box::new([[Move::NONE; 64]; 7]),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for row in self.table.iter_mut() {
+            row.fill(Move::NONE);
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, prev_piece: PieceType, prev_to: Square) -> Move {
+        self.table[prev_piece.index()][prev_to.index()]
+    }
+
+    #[inline]
+    pub fn set(&mut self, prev_piece: PieceType, prev_to: Square, mv: Move) {
+        self.table[prev_piece.index()][prev_to.index()] = mv;
+    }
+}
+
+impl Default for CounterMoveTable {
     fn default() -> Self {
         Self::new()
     }
@@ -204,6 +503,7 @@ enum Stage {
     GoodCapture,
     Killer0,
     Killer1,
+    CounterMove,
     QuietInit,
     Quiet,
     BadCapture,
@@ -231,9 +531,27 @@ enum Stage {
 /// Callers must pass the *same* position (by value equality, not
 /// identity) on every call — the picker's buffers assume generation
 /// happened against that position.
+/// Continuation-history lookup keys for the four ply offsets Stockfish
+/// 11 reads at quiet scoring time (1, 2, 4, 6 plies ago). Each entry is
+/// `(in_check, was_capture, parent_piece_idx, parent_to_idx)`. A
+/// sentinel "no parent" slot uses `parent_piece_idx = 0`, which selects
+/// a sub-table that is never updated and reads as all zeros.
+pub type ContHistKeys = [(bool, bool, u8, u8); 4];
+
+/// Sentinel keys for callers that have no parent move (qsearch entry,
+/// root, regression tests). Reads from this set always score zero.
+pub const NO_CONT_HIST: ContHistKeys = [(false, false, 0, 0); 4];
+
 pub struct MovePicker {
     tt_move: Move,
     killers: [Move; 2],
+    counter_move: Move,
+    /// Keys identifying the four parent-move sub-tables to read at
+    /// quiet scoring time. Set at construction; resolved against
+    /// `&ContinuationHistory` only inside [`MovePicker::generate_quiets`]
+    /// so the caller's mutable borrow on the cont-history store can
+    /// coexist with the move loop's β-cutoff updates.
+    cont_keys: ContHistKeys,
     depth: Depth,
     recapture_square: Option<Square>,
     stage: Stage,
@@ -297,7 +615,14 @@ impl MovePicker {
     /// TT move and decide whether we're in check); subsequent calls to
     /// [`MovePicker::next_move`] must pass the same position back in
     /// alongside the history table used for quiet-move scoring.
-    pub fn new_main(pos: &Position, tt_move: Move, depth: Depth, killers: [Move; 2]) -> Self {
+    pub fn new_main(
+        pos: &Position,
+        tt_move: Move,
+        depth: Depth,
+        killers: [Move; 2],
+        counter_move: Move,
+        cont_keys: ContHistKeys,
+    ) -> Self {
         debug_assert!(depth.0 > 0);
 
         let in_check = pos.in_check();
@@ -321,6 +646,8 @@ impl MovePicker {
         Self {
             tt_move,
             killers,
+            counter_move,
+            cont_keys,
             depth,
             recapture_square: None,
             stage,
@@ -342,6 +669,7 @@ impl MovePicker {
         tt_move: Move,
         depth: Depth,
         recapture_square: Option<Square>,
+        cont_keys: ContHistKeys,
     ) -> Self {
         debug_assert!(depth.0 <= 0);
 
@@ -368,6 +696,8 @@ impl MovePicker {
         Self {
             tt_move,
             killers: [Move::NONE; 2],
+            counter_move: Move::NONE,
+            cont_keys,
             depth,
             recapture_square,
             stage,
@@ -392,6 +722,8 @@ impl MovePicker {
         &mut self,
         pos: &Position,
         history: Option<&ButterflyHistory>,
+        cont_history: Option<&ContHistStore>,
+        capture_history: Option<&CaptureHistory>,
         skip_quiets: bool,
     ) -> Move {
         loop {
@@ -412,7 +744,7 @@ impl MovePicker {
 
                 // ---- Main pipeline: captures, killers, quiets, bad ----
                 Stage::CaptureInit => {
-                    self.generate_captures(pos);
+                    self.generate_captures(pos, capture_history);
                     self.cur = 0;
                     self.stage = Stage::GoodCapture;
                     continue;
@@ -433,10 +765,18 @@ impl MovePicker {
                     continue;
                 }
                 Stage::Killer1 => {
-                    self.stage = Stage::QuietInit;
+                    self.stage = Stage::CounterMove;
                     let k = self.killers[1];
                     if self.is_valid_killer(pos, k) && k != self.killers[0] {
                         return k;
+                    }
+                    continue;
+                }
+                Stage::CounterMove => {
+                    self.stage = Stage::QuietInit;
+                    let cm = self.counter_move;
+                    if self.is_valid_counter_move(pos, cm) {
+                        return cm;
                     }
                     continue;
                 }
@@ -446,7 +786,7 @@ impl MovePicker {
                         self.cur = 0;
                         continue;
                     }
-                    self.generate_quiets(pos, history);
+                    self.generate_quiets(pos, history, cont_history);
                     let limit = QUIET_SORT_BASE * self.depth.0;
                     partial_insertion_sort(&mut self.quiets, limit);
                     self.cur = 0;
@@ -462,7 +802,11 @@ impl MovePicker {
                     while self.cur < self.quiets.len() {
                         let mv = self.quiets[self.cur].mv;
                         self.cur += 1;
-                        if mv == self.tt_move || mv == self.killers[0] || mv == self.killers[1] {
+                        if mv == self.tt_move
+                            || mv == self.killers[0]
+                            || mv == self.killers[1]
+                            || mv == self.counter_move
+                        {
                             continue;
                         }
                         return mv;
@@ -486,7 +830,7 @@ impl MovePicker {
 
                 // ---- Evasion pipeline: unified captures + quiets ----
                 Stage::EvasionInit => {
-                    self.generate_evasions(pos, history);
+                    self.generate_evasions(pos, history, cont_history);
                     self.cur = 0;
                     self.stage = Stage::Evasion;
                     continue;
@@ -510,7 +854,7 @@ impl MovePicker {
 
                 // ---- Qsearch pipeline: captures only (recapture-restricted at deep qs) ----
                 Stage::QCaptureInit => {
-                    self.generate_captures(pos);
+                    self.generate_captures(pos, capture_history);
                     self.cur = 0;
                     self.stage = Stage::QCapture;
                     continue;
@@ -552,8 +896,24 @@ impl MovePicker {
         mv.is_valid() && mv != self.tt_move && !pos.is_capture(mv) && is_pseudo_legal(pos, mv)
     }
 
-    /// Generate every pseudo-legal capture and score it with MVV-LVA.
-    fn generate_captures(&mut self, pos: &Position) {
+    /// Counter-move validation: same constraints as a killer, plus
+    /// dedupe against the killers themselves so the picker doesn't
+    /// return the same move twice.
+    fn is_valid_counter_move(&self, pos: &Position, mv: Move) -> bool {
+        mv.is_valid()
+            && mv != self.tt_move
+            && mv != self.killers[0]
+            && mv != self.killers[1]
+            && !pos.is_capture(mv)
+            && is_pseudo_legal(pos, mv)
+    }
+
+    /// Generate every pseudo-legal capture and score it with MVV-LVA
+    /// plus Stockfish 11's capture-history tiebreaker (`captureHistory
+    /// [moved_piece][to_sq][captured_piece_type]`). The capture-hist
+    /// borrow is used only inside this call so β-cutoff updates can
+    /// take `&mut` afterwards.
+    fn generate_captures(&mut self, pos: &Position, capture_history: Option<&CaptureHistory>) {
         self.captures.clear();
         self.bad_captures.clear();
         let mut all = MoveList::new();
@@ -562,27 +922,65 @@ impl MovePicker {
             if !pos.is_capture(mv) {
                 continue;
             }
-            self.captures.push(ScoredMove {
-                mv,
-                score: mvv_lva(pos, mv),
-            });
+            let mut score = mvv_lva(pos, mv);
+            if let Some(ch) = capture_history {
+                let moved_piece_idx = pos.moved_piece(mv).index() as u8;
+                let to_idx = mv.to().index() as u8;
+                // Mirror Stockfish: read `piece_on(to)` directly (en
+                // passant resolves to slot 0 because the to-square is
+                // empty, which matches Stockfish's behaviour).
+                let captured_pt_idx = pos
+                    .piece_on(mv.to())
+                    .map(|p| p.kind().index() as u8)
+                    .unwrap_or(0);
+                score += ch.get(moved_piece_idx, to_idx, captured_pt_idx) as i32;
+            }
+            self.captures.push(ScoredMove { mv, score });
         }
     }
 
     /// Generate every pseudo-legal quiet (non-capture) and score by
-    /// butterfly history.
-    fn generate_quiets(&mut self, pos: &Position, history: Option<&ButterflyHistory>) {
+    /// butterfly history plus Stockfish 11's continuation-history sum
+    /// (1-ply, 2-ply, 4-ply, 6-ply with weights 2/2/2/1). The
+    /// `cont_history` borrow is used only inside this call so the
+    /// caller's mutable borrow on the same store can resume after
+    /// `next_move` returns the next quiet.
+    fn generate_quiets(
+        &mut self,
+        pos: &Position,
+        history: Option<&ButterflyHistory>,
+        cont_history: Option<&ContHistStore>,
+    ) {
         self.quiets.clear();
         let history =
             history.expect("generate_quiets: main picker must be called with a history reference");
         let us = pos.side_to_move();
+        // Resolve the four parent sub-tables once per call. If
+        // `cont_history` is absent (test harness without engine state),
+        // skip the cont-hist contribution entirely.
+        let cont_subs: Option<[&PieceToHistory; 4]> = cont_history.map(|store| {
+            [
+                store.sub_for_key(self.cont_keys[0]),
+                store.sub_for_key(self.cont_keys[1]),
+                store.sub_for_key(self.cont_keys[2]),
+                store.sub_for_key(self.cont_keys[3]),
+            ]
+        });
         let mut all = MoveList::new();
         generate_pseudo_legal_moves(pos, &mut all);
         for &mv in &all {
             if pos.is_capture(mv) {
                 continue;
             }
-            let score = history.get(us, mv.from(), mv.to()) as i32;
+            let mut score = history.get(us, mv.from(), mv.to()) as i32;
+            if let Some(subs) = &cont_subs {
+                let pi = pos.moved_piece(mv).index();
+                let ti = mv.to().index();
+                score += 2 * subs[0][pi][ti] as i32;
+                score += 2 * subs[1][pi][ti] as i32;
+                score += 2 * subs[2][pi][ti] as i32;
+                score += subs[3][pi][ti] as i32;
+            }
             self.quiets.push(ScoredMove { mv, score });
         }
     }
@@ -591,9 +989,18 @@ impl MovePicker {
     /// scored so captures come out ahead of quiets — the search relies on
     /// pick-best order for the typical "there's only one way out of
     /// check" case to be tried first.
-    fn generate_evasions(&mut self, pos: &Position, history: Option<&ButterflyHistory>) {
+    fn generate_evasions(
+        &mut self,
+        pos: &Position,
+        history: Option<&ButterflyHistory>,
+        cont_history: Option<&ContHistStore>,
+    ) {
         self.evasions.clear();
         let us = pos.side_to_move();
+        // Stockfish 11 evasion-quiet scoring uses the 1-ply-ago
+        // cont-hist sub-table only.
+        let cont_sub: Option<&PieceToHistory> =
+            cont_history.map(|store| store.sub_for_key(self.cont_keys[0]));
         let mut all = MoveList::new();
         generate_pseudo_legal_moves(pos, &mut all);
         for &mv in &all {
@@ -605,12 +1012,16 @@ impl MovePicker {
                 let attacker_pt = pos.moved_piece(mv).kind();
                 victim_mg - attacker_pt as i32
             } else {
-                // Quiets: history, pushed below every capture by a large
-                // constant so the picker returns captures first.
+                // Quiets: history + 1-ply cont-hist, pushed below every
+                // capture by a large constant so the picker returns
+                // captures first.
                 let h = history
                     .map(|h| h.get(us, mv.from(), mv.to()) as i32)
                     .unwrap_or(0);
-                h - EVASION_QUIET_PENALTY
+                let c = cont_sub
+                    .map(|sub| sub[pos.moved_piece(mv).index()][mv.to().index()] as i32)
+                    .unwrap_or(0);
+                h + c - EVASION_QUIET_PENALTY
             };
             self.evasions.push(ScoredMove { mv, score });
         }
@@ -759,6 +1170,97 @@ mod tests {
         assert_eq!(h.get(Color::Black, Square::E7, Square::E5), 0);
     }
 
+    // ---- Continuation history ----------------------------------------
+
+    #[test]
+    fn cont_history_starts_at_zero_in_every_slot() {
+        let store = ContHistStore::new();
+        // Pick a few arbitrary keys, all should read zero.
+        let key_a = (false, false, 1u8, 0u8);
+        let key_b = (true, true, 14u8, 63u8);
+        for inner_p in [0usize, 1, 6, 14] {
+            for inner_t in [0usize, 7, 32, 63] {
+                assert_eq!(store.sub_for_key(key_a)[inner_p][inner_t], 0);
+                assert_eq!(store.sub_for_key(key_b)[inner_p][inner_t], 0);
+            }
+        }
+    }
+
+    #[test]
+    fn cont_history_update_moves_toward_bonus_and_saturates() {
+        let mut store = ContHistStore::new();
+        let key = (false, false, 1u8, 16u8);
+        let inner_p = 2usize;
+        let inner_t = 32usize;
+        cont_history_update(
+            &mut store.sub_for_key_mut(key)[inner_p][inner_t],
+            5_000,
+        );
+        let v = store.sub_for_key(key)[inner_p][inner_t] as i32;
+        assert!(v > 0 && v <= 5_000);
+        for _ in 0..50 {
+            cont_history_update(
+                &mut store.sub_for_key_mut(key)[inner_p][inner_t],
+                5_000,
+            );
+        }
+        let saturated = store.sub_for_key(key)[inner_p][inner_t] as i32;
+        assert!(saturated > v);
+        assert!(saturated <= CONT_HISTORY_BOUND);
+    }
+
+    #[test]
+    fn cont_history_clear_zeros_every_arena() {
+        let mut store = ContHistStore::new();
+        // Touch one slot in each (inCheck, was_capture) arena.
+        for ic in [false, true] {
+            for wc in [false, true] {
+                let key = (ic, wc, 4u8, 28u8);
+                cont_history_update(&mut store.sub_for_key_mut(key)[5][30], 1_000);
+            }
+        }
+        store.clear();
+        for ic in [false, true] {
+            for wc in [false, true] {
+                let key = (ic, wc, 4u8, 28u8);
+                assert_eq!(store.sub_for_key(key)[5][30], 0);
+            }
+        }
+    }
+
+    // ---- Capture history ---------------------------------------------
+
+    #[test]
+    fn capture_history_starts_at_zero() {
+        let ch = CaptureHistory::new();
+        assert_eq!(ch.get(1, 0, 1), 0);
+        assert_eq!(ch.get(14, 63, 6), 0);
+    }
+
+    #[test]
+    fn capture_history_update_moves_toward_bonus_and_saturates() {
+        let mut ch = CaptureHistory::new();
+        ch.update(2, 32, 5, 3_000);
+        let v = ch.get(2, 32, 5) as i32;
+        assert!(v > 0 && v <= 3_000);
+        for _ in 0..50 {
+            ch.update(2, 32, 5, 3_000);
+        }
+        let saturated = ch.get(2, 32, 5) as i32;
+        assert!(saturated > v);
+        assert!(saturated <= CAPTURE_HISTORY_BOUND);
+    }
+
+    #[test]
+    fn capture_history_clear_resets_all_slots() {
+        let mut ch = CaptureHistory::new();
+        ch.update(1, 0, 1, 500);
+        ch.update(14, 63, 6, -500);
+        ch.clear();
+        assert_eq!(ch.get(1, 0, 1), 0);
+        assert_eq!(ch.get(14, 63, 6), 0);
+    }
+
     // ---- Picker: main search -----------------------------------------
 
     #[test]
@@ -767,8 +1269,8 @@ mod tests {
         let h = history();
         // A valid opening move used as TT hint.
         let tt = Move::normal(Square::E2, Square::E4);
-        let mut mp = MovePicker::new_main(&pos, tt, Depth(4), [Move::NONE; 2]);
-        assert_eq!(mp.next_move(&pos, Some(&h), false), tt);
+        let mut mp = MovePicker::new_main(&pos, tt, Depth(4), [Move::NONE; 2], Move::NONE, NO_CONT_HIST);
+        assert_eq!(mp.next_move(&pos, Some(&h), None, None, false), tt);
     }
 
     #[test]
@@ -777,8 +1279,8 @@ mod tests {
         let h = history();
         // Not a legal move in startpos: no white piece on e4.
         let bogus = Move::normal(Square::E4, Square::E5);
-        let mut mp = MovePicker::new_main(&pos, bogus, Depth(4), [Move::NONE; 2]);
-        let first = mp.next_move(&pos, Some(&h), false);
+        let mut mp = MovePicker::new_main(&pos, bogus, Depth(4), [Move::NONE; 2], Move::NONE, NO_CONT_HIST);
+        let first = mp.next_move(&pos, Some(&h), None, None, false);
         assert_ne!(first, bogus);
         assert_ne!(first, Move::NONE);
     }
@@ -788,10 +1290,10 @@ mod tests {
         let pos = Position::startpos();
         let h = history();
         let tt = Move::normal(Square::E2, Square::E4);
-        let mut mp = MovePicker::new_main(&pos, tt, Depth(4), [Move::NONE; 2]);
+        let mut mp = MovePicker::new_main(&pos, tt, Depth(4), [Move::NONE; 2], Move::NONE, NO_CONT_HIST);
         let mut seen = Vec::new();
         loop {
-            let m = mp.next_move(&pos, Some(&h), false);
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
             if m == Move::NONE {
                 break;
             }
@@ -807,10 +1309,10 @@ mod tests {
         // move exactly once, regardless of order.
         let pos = Position::startpos();
         let h = history();
-        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2]);
+        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2], Move::NONE, NO_CONT_HIST);
         let mut seen = Vec::new();
         loop {
-            let m = mp.next_move(&pos, Some(&h), false);
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
             if m == Move::NONE {
                 break;
             }
@@ -836,12 +1338,12 @@ mod tests {
         // quiets are also available. Captures should lead quiets.
         let pos = Position::from_fen("4k3/8/8/3r4/8/8/8/3QK3 w - - 0 1").unwrap();
         let h = history();
-        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2]);
+        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2], Move::NONE, NO_CONT_HIST);
         let mut first_quiet_index: Option<usize> = None;
         let mut last_capture_index: Option<usize> = None;
         let mut i = 0;
         loop {
-            let m = mp.next_move(&pos, Some(&h), false);
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
             if m == Move::NONE {
                 break;
             }
@@ -870,10 +1372,10 @@ mod tests {
         // (losing capture: Q takes P, recaptured by pawn).
         let pos = Position::from_fen("4k3/8/6p1/3r3p/8/8/8/3QK3 w - - 0 1").unwrap();
         let h = history();
-        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2]);
+        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2], Move::NONE, NO_CONT_HIST);
         let mut order = Vec::new();
         loop {
-            let m = mp.next_move(&pos, Some(&h), false);
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
             if m == Move::NONE {
                 break;
             }
@@ -904,10 +1406,10 @@ mod tests {
         // Two arbitrary legal quiet openings as killers.
         let k0 = Move::normal(Square::G1, Square::F3);
         let k1 = Move::normal(Square::B1, Square::C3);
-        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [k0, k1]);
+        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [k0, k1], Move::NONE, NO_CONT_HIST);
         let mut seen = Vec::new();
         loop {
-            let m = mp.next_move(&pos, Some(&h), false);
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
             if m == Move::NONE {
                 break;
             }
@@ -927,15 +1429,126 @@ mod tests {
         assert_eq!(seen.iter().filter(|m| **m == k1).count(), 1);
     }
 
+    // ---- Picker: counter move ----------------------------------------
+
+    #[test]
+    fn counter_move_returned_after_killers_before_unrelated_quiet() {
+        let pos = Position::startpos();
+        let h = history();
+        let k0 = Move::normal(Square::G1, Square::F3);
+        let k1 = Move::normal(Square::B1, Square::C3);
+        // Pick a quiet move that is neither tt nor a killer.
+        let counter = Move::normal(Square::E2, Square::E4);
+        let mut mp =
+            MovePicker::new_main(&pos, Move::NONE, Depth(4), [k0, k1], counter, NO_CONT_HIST);
+        let mut seen = Vec::new();
+        loop {
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
+            if m == Move::NONE {
+                break;
+            }
+            seen.push(m);
+        }
+        let k1_idx = seen.iter().position(|m| *m == k1).unwrap();
+        let counter_idx = seen.iter().position(|m| *m == counter).unwrap();
+        let pawn_push_idx = seen
+            .iter()
+            .position(|m| *m == Move::normal(Square::H2, Square::H3))
+            .unwrap();
+        assert!(
+            k1_idx < counter_idx,
+            "counter must come after killer1, got {k1_idx} vs {counter_idx}"
+        );
+        assert!(
+            counter_idx < pawn_push_idx,
+            "counter must come before unrelated quiets"
+        );
+        // Counter appears exactly once.
+        assert_eq!(seen.iter().filter(|m| **m == counter).count(), 1);
+    }
+
+    #[test]
+    fn counter_move_suppressed_when_equals_killer() {
+        let pos = Position::startpos();
+        let h = history();
+        let k0 = Move::normal(Square::G1, Square::F3);
+        // Counter same as killer0 → should NOT be re-emitted.
+        let mut mp = MovePicker::new_main(
+            &pos,
+            Move::NONE,
+            Depth(4),
+            [k0, Move::NONE],
+            k0,
+            NO_CONT_HIST,
+        );
+        let mut count = 0;
+        loop {
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
+            if m == Move::NONE {
+                break;
+            }
+            if m == k0 {
+                count += 1;
+            }
+        }
+        assert_eq!(count, 1, "killer-equal counter must not duplicate");
+    }
+
+    #[test]
+    fn counter_move_suppressed_when_capture() {
+        // Position where a tactical capture exists. Setting that capture
+        // as the "counter move" must NOT promote it ahead of GoodCapture
+        // ordering — counter moves are quiets only.
+        let pos = Position::from_fen(
+            "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+        )
+        .unwrap();
+        let h = history();
+        let capture = Move::normal(Square::E4, Square::D5);
+        let mut mp = MovePicker::new_main(
+            &pos,
+            Move::NONE,
+            Depth(4),
+            [Move::NONE; 2],
+            capture,
+            NO_CONT_HIST,
+        );
+        let mut seen = Vec::new();
+        loop {
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
+            if m == Move::NONE {
+                break;
+            }
+            seen.push(m);
+        }
+        // The capture appears exactly once (in GoodCapture, not CounterMove).
+        assert_eq!(seen.iter().filter(|m| **m == capture).count(), 1);
+    }
+
+    #[test]
+    fn counter_move_table_round_trip() {
+        let mut t = CounterMoveTable::new();
+        let mv = Move::normal(Square::G1, Square::F3);
+        assert_eq!(t.get(PieceType::Pawn, Square::E4), Move::NONE);
+        t.set(PieceType::Pawn, Square::E4, mv);
+        assert_eq!(t.get(PieceType::Pawn, Square::E4), mv);
+        // Other slots stay empty.
+        assert_eq!(t.get(PieceType::Knight, Square::E4), Move::NONE);
+        assert_eq!(t.get(PieceType::Pawn, Square::D4), Move::NONE);
+        // Clear wipes the slot.
+        t.clear();
+        assert_eq!(t.get(PieceType::Pawn, Square::E4), Move::NONE);
+    }
+
     #[test]
     fn duplicate_killers_do_not_return_twice() {
         let pos = Position::startpos();
         let h = history();
         let k = Move::normal(Square::G1, Square::F3);
-        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [k, k]);
+        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [k, k], Move::NONE, NO_CONT_HIST);
         let mut count = 0;
         loop {
-            let m = mp.next_move(&pos, Some(&h), false);
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
             if m == Move::NONE {
                 break;
             }
@@ -956,9 +1569,9 @@ mod tests {
         // in the BadCapture stage).
         let pos = Position::from_fen("4k3/8/6p1/3r3p/8/8/8/3QK3 w - - 0 1").unwrap();
         let h = history();
-        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2]);
+        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2], Move::NONE, NO_CONT_HIST);
         loop {
-            let m = mp.next_move(&pos, Some(&h), true);
+            let m = mp.next_move(&pos, Some(&h), None, None, true);
             if m == Move::NONE {
                 break;
             }
@@ -975,10 +1588,10 @@ mod tests {
     #[test]
     fn qs_picker_returns_only_captures_at_nonrecapture_depth() {
         let pos = Position::from_fen("4k3/8/8/3r4/8/8/8/3QK3 w - - 0 1").unwrap();
-        let mut mp = MovePicker::new_qs(&pos, Move::NONE, Depth::QS_CHECKS, None);
+        let mut mp = MovePicker::new_qs(&pos, Move::NONE, Depth::QS_CHECKS, None, NO_CONT_HIST);
         let mut seen = Vec::new();
         loop {
-            let m = mp.next_move(&pos, None, false);
+            let m = mp.next_move(&pos, None, None, None, false);
             if m == Move::NONE {
                 break;
             }
@@ -994,10 +1607,16 @@ mod tests {
         // deepest qs ply, restrict to destination d5 — only QxR should
         // come out.
         let pos = Position::from_fen("4k3/8/6p1/3r3p/8/8/8/3QK3 w - - 0 1").unwrap();
-        let mut mp = MovePicker::new_qs(&pos, Move::NONE, Depth::QS_RECAPTURES, Some(Square::D5));
+        let mut mp = MovePicker::new_qs(
+            &pos,
+            Move::NONE,
+            Depth::QS_RECAPTURES,
+            Some(Square::D5),
+            NO_CONT_HIST,
+        );
         let mut seen = Vec::new();
         loop {
-            let m = mp.next_move(&pos, None, false);
+            let m = mp.next_move(&pos, None, None, None, false);
             if m == Move::NONE {
                 break;
             }
@@ -1017,13 +1636,13 @@ mod tests {
         let pos = Position::from_fen("k7/8/8/8/8/2Q5/8/r3K3 w - - 0 1").unwrap();
         assert!(pos.in_check(), "test precondition");
         let h = history();
-        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2]);
+        let mut mp = MovePicker::new_main(&pos, Move::NONE, Depth(4), [Move::NONE; 2], Move::NONE, NO_CONT_HIST);
         let qxr = Move::normal(Square::C3, Square::A1);
         let mut idx_qxr: Option<usize> = None;
         let mut first_quiet: Option<usize> = None;
         let mut i = 0;
         loop {
-            let m = mp.next_move(&pos, Some(&h), false);
+            let m = mp.next_move(&pos, Some(&h), None, None, false);
             if m == Move::NONE {
                 break;
             }

@@ -29,6 +29,16 @@ use chess_tutor_engine::san;
 
 use crate::board::{render as render_board, RenderOptions};
 
+// Heap profiler. When the `dhat-heap` feature is enabled, every
+// allocation goes through dhat's wrapping allocator, which records the
+// source line of every alloc/dealloc and writes a `dhat-heap.json`
+// next to the binary on exit. View the result at
+// https://nnethercote.github.io/dh_view/dh_view.html (runs locally in
+// the browser; doesn't upload). Adds ~30 % runtime overhead.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 const STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 #[derive(Parser)]
@@ -174,6 +184,11 @@ pub enum EngineColor {
 }
 
 fn main() -> Result<()> {
+    // Hold the dhat profiler for the lifetime of `main` so it writes
+    // its report on Drop after the actual work is done.
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     match Cli::parse().command {
         Command::Board {
             fen,
@@ -301,6 +316,18 @@ fn main() -> Result<()> {
                     engine.last_elapsed().as_millis(),
                     engine.last_nps() / 1.0e6,
                 );
+                // TEMPORARY: pawn-cache hit rate for perf investigation.
+                let (hits, misses) = engine.pawn_cache_stats();
+                let total = hits + misses;
+                if total > 0 {
+                    println!(
+                        "pawn$:    {} probes, {} hits, {} misses ({:.2}% hit rate)",
+                        total,
+                        hits,
+                        misses,
+                        100.0 * hits as f64 / total as f64,
+                    );
+                }
                 println!();
                 // The leaf trace is the last entry in ply_traces; that's
                 // what the existing renderer expects.

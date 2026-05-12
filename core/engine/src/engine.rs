@@ -12,7 +12,7 @@
 //! `&self`.
 
 use crate::eval::EvalTrace;
-use crate::movepick::ButterflyHistory;
+use crate::movepick::{ButterflyHistory, CaptureHistory, ContHistStore, CounterMoveTable};
 use crate::pawns;
 use crate::position::Position;
 use crate::search::Search;
@@ -125,6 +125,16 @@ pub struct SearchLine {
 pub struct Engine {
     tt: TranspositionTable,
     history: ButterflyHistory,
+    counter_moves: CounterMoveTable,
+    /// Stockfish-style continuation history: ~8 MB on the heap,
+    /// partitioned by `[in_check][was_capture]` of the parent move.
+    /// Persisted across moves of the same game so move ordering
+    /// learning compounds; cleared in [`Engine::new_game`].
+    cont_history: ContHistStore,
+    /// Capture-history table (~16 KB) used as a tiebreaker on top of
+    /// MVV-LVA when ordering good captures. Persists across moves of
+    /// the same game.
+    capture_history: CaptureHistory,
     pawn_cache: pawns::Table,
     /// Diagnostic stats from the most recent [`Engine::search`] call.
     /// Both fields are zero before any search has run.
@@ -140,6 +150,9 @@ impl Engine {
         Engine {
             tt: TranspositionTable::new(tt_size_mb),
             history: ButterflyHistory::new(),
+            counter_moves: CounterMoveTable::new(),
+            cont_history: ContHistStore::new(),
+            capture_history: CaptureHistory::new(),
             pawn_cache: pawns::Table::new(),
             last_nodes: 0,
             last_elapsed: Duration::ZERO,
@@ -147,11 +160,15 @@ impl Engine {
     }
 
     /// Clear everything that accumulated across prior searches: TT,
-    /// history counters, pawn cache. Call between games so learning from
-    /// game N doesn't pollute move ordering in game N+1.
+    /// butterfly history, counter-move table, continuation history,
+    /// capture history, pawn cache. Call between games so learning
+    /// from game N doesn't pollute move ordering in game N+1.
     pub fn new_game(&mut self) {
         self.tt.clear();
         self.history.clear();
+        self.counter_moves.clear();
+        self.cont_history.clear();
+        self.capture_history.clear();
         self.pawn_cache.clear();
     }
 
@@ -162,7 +179,14 @@ impl Engine {
     /// terminal root position (checkmate or stalemate).
     pub fn search(&mut self, pos: &mut Position, params: SearchParams) -> Vec<SearchLine> {
         let started = Instant::now();
-        let mut search = Search::new(&self.tt, &mut self.history, &mut self.pawn_cache);
+        let mut search = Search::new(
+            &self.tt,
+            &mut self.history,
+            &mut self.counter_moves,
+            &mut self.cont_history,
+            &mut self.capture_history,
+            &mut self.pawn_cache,
+        );
         let lines = search.run(pos, &params);
         self.last_nodes = search.node_count();
         self.last_elapsed = started.elapsed();
@@ -198,6 +222,20 @@ impl Engine {
     pub fn tt(&self) -> &TranspositionTable {
         &self.tt
     }
+
+    /// TEMPORARY (perf investigation): pawn-cache hit/miss counts since
+    /// engine construction or the last [`reset_pawn_cache_stats`].
+    /// Remove once we've used the data to decide on cache sizing.
+    pub fn pawn_cache_stats(&self) -> (u64, u64) {
+        self.pawn_cache.stats()
+    }
+
+    /// TEMPORARY (perf investigation): zero the pawn-cache hit/miss
+    /// counters so the next search reports fresh numbers.
+    pub fn reset_pawn_cache_stats(&mut self) {
+        self.pawn_cache.reset_stats();
+    }
+
 }
 
 impl Default for Engine {

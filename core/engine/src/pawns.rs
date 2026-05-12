@@ -29,11 +29,17 @@
 //! identifiers are independently authored.
 //!
 //! Caching: structure-only [`PawnsEval`] results are cached by
-//! `pos.pawn_key()` in a [`Table`]. Hit rate is high because pawn
-//! structure changes only on pawn moves and captures, while every search
-//! node calls into pawn evaluation. Shelter (`king_safety`) is not yet
-//! cached — it depends on king square and castling rights in addition to
-//! the pawn structure, so its cache key is more complex; deferring.
+//! `pos.pawn_key()` in a [`Table`]. Measured hit rate is 87-89 % in
+//! deep middlegame search and ~100 % in pawn-only endgames — pawn
+//! structure changes only on pawn moves and captures, while every
+//! search node calls into pawn evaluation. The cached form excludes
+//! `breakdowns` (only the teaching layer reads those, and it goes
+//! through [`evaluate`] directly without the cache), which keeps the
+//! per-entry footprint at 64 bytes — one cache line per probe.
+//!
+//! Shelter (`king_safety` below) is not cached here because its key
+//! also needs the king square and castling rights. A separate
+//! king-safety cache is on the perf docket.
 
 use crate::attacks::{king_attacks, pawn_attacks_from, square_distance};
 use crate::bitboard::{
@@ -206,34 +212,96 @@ impl PawnsEval {
 // Cache
 // =========================================================================
 
-/// log2 of the [`Table`] slot count. 14 → 16384 slots → ~2.6 MB. Pawn
-/// structure changes rarely (only on pawn moves and captures), so even a
-/// modest table sees >95% hit rate in typical games.
+/// log2 of the [`Table`] slot count. 14 → 16384 slots × 64 B/entry =
+/// 1 MB total, which fits L2 on most CPUs. Measured 87-89 % hit rate
+/// in deep middlegame search; an earlier experiment at 16 bits (4 MB,
+/// L3-resident) bumped hit rate to ~92 % but produced no measurable
+/// NPS improvement — the colder cache offset the fewer misses. Stay
+/// at 14 bits unless we revisit the eval pipeline to reduce the
+/// per-miss cost (which is what would actually be paying for the
+/// extra slots if it were a real bottleneck).
 const TABLE_BITS: u32 = 14;
 const TABLE_SLOTS: usize = 1 << TABLE_BITS;
 const TABLE_MASK: u64 = (TABLE_SLOTS - 1) as u64;
 
+/// The subset of [`PawnsEval`] that the search hot path actually reads:
+/// `scores` (used directly in eval), and the three bitboards that other
+/// eval terms (mobility, threats, passed, space, king safety) consume.
+/// Notably **excludes** `breakdowns` — those are only read by the
+/// teaching layer via [`evaluate_with_trace`], which does not go through
+/// the cache. By dropping breakdowns from the cached form we shrink the
+/// per-entry footprint from 104 → 56 bytes, and combined with the
+/// 8-byte key the entry lands at exactly 64 bytes (one cache line).
 #[derive(Clone, Copy)]
+struct CachedPawnsEval {
+    scores: [Score; 2],
+    passed_pawns: [Bitboard; 2],
+    pawn_attacks: [Bitboard; 2],
+    pawn_attacks_span: [Bitboard; 2],
+}
+
+impl CachedPawnsEval {
+    const EMPTY: Self = Self {
+        scores: [Score::ZERO; 2],
+        passed_pawns: [Bitboard::EMPTY; 2],
+        pawn_attacks: [Bitboard::EMPTY; 2],
+        pawn_attacks_span: [Bitboard::EMPTY; 2],
+    };
+
+    /// Compute a cached form by dropping the breakdowns from a full
+    /// `PawnsEval`. The breakdowns are still computed during the miss
+    /// path (because they fall out of `evaluate_color`'s work for free)
+    /// but they're not retained in the cache.
+    #[inline(always)]
+    fn from_full(eval: &PawnsEval) -> Self {
+        Self {
+            scores: eval.scores,
+            passed_pawns: eval.passed_pawns,
+            pawn_attacks: eval.pawn_attacks,
+            pawn_attacks_span: eval.pawn_attacks_span,
+        }
+    }
+
+    /// Re-expand to a full `PawnsEval` for caller compatibility. The
+    /// breakdowns slot is filled with zeros — search-path callers never
+    /// read it (the teaching layer goes through a different code path
+    /// that computes the real breakdowns fresh).
+    #[inline(always)]
+    fn to_full(&self) -> PawnsEval {
+        PawnsEval {
+            scores: self.scores,
+            breakdowns: [PawnsBreakdown::zero(); 2],
+            passed_pawns: self.passed_pawns,
+            pawn_attacks: self.pawn_attacks,
+            pawn_attacks_span: self.pawn_attacks_span,
+        }
+    }
+}
+
+/// 64-byte cache-line-aligned table entry. Holds the discriminating
+/// Zobrist key (`0` means "empty slot" — real pawn keys are never zero)
+/// and the cached evaluation. Sized so a probe touches exactly one
+/// cache line and never straddles two.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
 struct TableEntry {
-    /// Zobrist pawn-structure key. `0` indicates an empty slot —
-    /// [`crate::zobrist::no_pawns_key`] is non-zero, so a real pawn key
-    /// can never be 0 and the discriminator is unambiguous.
     key: u64,
-    eval: PawnsEval,
+    eval: CachedPawnsEval,
 }
 
 impl TableEntry {
     const EMPTY: Self = Self {
         key: 0,
-        eval: PawnsEval {
-            scores: [Score::ZERO; 2],
-            breakdowns: [PawnsBreakdown::zero(); 2],
-            passed_pawns: [Bitboard::EMPTY; 2],
-            pawn_attacks: [Bitboard::EMPTY; 2],
-            pawn_attacks_span: [Bitboard::EMPTY; 2],
-        },
+        eval: CachedPawnsEval::EMPTY,
     };
 }
+
+// The whole point of the layout above is that a TableEntry occupies
+// exactly one cache line. If a field is added, removed, or its size
+// changes such that the entry grows to two lines (or pads out to more
+// than 64 bytes), this assert catches it at compile time so we can
+// re-decide the cache geometry rather than silently regress.
+const _: () = assert!(std::mem::size_of::<TableEntry>() == 64);
 
 /// Direct-mapped pawn-structure cache. Replaces a per-node call to
 /// [`evaluate`] with a key-compare and (on hit) a copy of the cached
@@ -243,12 +311,19 @@ impl TableEntry {
 #[derive(Clone)]
 pub struct Table {
     entries: Box<[TableEntry]>,
+    /// TEMPORARY: hit/miss counters for perf investigation. Read via
+    /// [`stats`](Self::stats); reset via [`reset_stats`](Self::reset_stats).
+    /// Remove once we've used them to decide on cache-sizing changes.
+    hits: u64,
+    misses: u64,
 }
 
 impl Table {
     pub fn new() -> Self {
         Self {
             entries: vec![TableEntry::EMPTY; TABLE_SLOTS].into_boxed_slice(),
+            hits: 0,
+            misses: 0,
         }
     }
 
@@ -258,6 +333,18 @@ impl Table {
         }
     }
 
+    /// TEMPORARY (perf investigation): return `(hits, misses)` since
+    /// construction or the last [`reset_stats`](Self::reset_stats).
+    pub fn stats(&self) -> (u64, u64) {
+        (self.hits, self.misses)
+    }
+
+    /// TEMPORARY (perf investigation): zero the hit/miss counters.
+    pub fn reset_stats(&mut self) {
+        self.hits = 0;
+        self.misses = 0;
+    }
+
     /// Probe-or-compute: returns the cached evaluation for `pos`'s pawn
     /// structure, computing and caching it on miss.
     pub fn evaluate(&mut self, pos: &Position) -> PawnsEval {
@@ -265,10 +352,15 @@ impl Table {
         let slot = (key & TABLE_MASK) as usize;
         let entry = self.entries[slot];
         if entry.key == key {
-            return entry.eval;
+            self.hits += 1;
+            return entry.eval.to_full();
         }
+        self.misses += 1;
         let eval = evaluate(pos);
-        self.entries[slot] = TableEntry { key, eval };
+        self.entries[slot] = TableEntry {
+            key,
+            eval: CachedPawnsEval::from_full(&eval),
+        };
         eval
     }
 }

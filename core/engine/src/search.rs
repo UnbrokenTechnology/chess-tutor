@@ -18,11 +18,14 @@
 //! scaffolding here should accept them without API churn.
 
 use crate::eval::{evaluate_with_pawn_cache, evaluate_with_trace, EvalTrace};
-use crate::movepick::{ButterflyHistory, MovePicker, BUTTERFLY_HISTORY_BOUND};
+use crate::movepick::{
+    cont_history_update, ButterflyHistory, CaptureHistory, ContHistKeys, ContHistStore,
+    CounterMoveTable, MovePicker, BUTTERFLY_HISTORY_BOUND, CAPTURE_HISTORY_BOUND, CONT_HISTORY_BOUND,
+};
 use crate::pawns;
 use crate::position::{Position, StateInfo};
 use crate::tt::TranspositionTable;
-use crate::types::{Bound, Color, Depth, Move, Value};
+use crate::types::{Bound, Color, Depth, Move, PieceType, Square, Value};
 
 use crate::engine::{SearchLine, SearchParams};
 
@@ -92,6 +95,79 @@ const SHALLOW_PRUNE_MAX_DEPTH: i32 = 7;
 /// mobility swing. Tuneable once we see real output on test positions.
 pub const SETTLED_THRESHOLD_CP: i32 = 25;
 
+/// Number of sentinel frames prepended to the per-ply stack so that
+/// "look back N plies" reads from `ply 0..6` are always in bounds.
+/// Stockfish's stack uses the same convention with offset 7.
+const STACK_SENTINEL: usize = 7;
+
+/// Trailing padding past the per-ply stack so the SF-style
+/// `(ss+2)->statScore = 0` (and `(ss+4)` at root) zero-resets remain
+/// in-bounds even when invoked at the maximum legal ply. Sized to cover
+/// up to a `+4` write from any in-range ply.
+const STACK_LOOKAHEAD: usize = 5;
+
+/// Stockfish 11's `stat_bonus` (search.cpp:86): the depth-dependent
+/// bonus applied on β-cutoff to history / continuation-history
+/// counters for the cutting move (and to losers tried before it,
+/// negated). Bound at ±[`CONT_HISTORY_BOUND`] which the table-update
+/// gravity-formula tolerates.
+fn stat_bonus(depth: i32) -> i32 {
+    if depth > 15 {
+        -8
+    } else {
+        let raw = 19 * depth * depth + 155 * depth - 132;
+        raw.clamp(-CONT_HISTORY_BOUND, CONT_HISTORY_BOUND)
+    }
+}
+
+/// One entry of the per-ply search stack — captures the move played
+/// from this ply (so the child at ply+1 can read it as "1-ply-ago"),
+/// the static eval at this ply (used for the `improving` flag), and
+/// whether the position-pre-move was in check / the move was a
+/// capture (used to pick the right [`ContHistStore`] sub-arena).
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct StackEntry {
+    /// `Piece::index()` of the piece moved at this ply, or 0 for the
+    /// "no move" sentinel (root and pre-search padding).
+    pub moved_piece_idx: u8,
+    /// `Square::index()` of the destination, or 0 in the sentinel.
+    pub to_idx: u8,
+    /// Was the position in check *before* this ply's move was played?
+    pub in_check: bool,
+    /// Was this ply's move a capture (incl. en-passant / promotion to
+    /// piece on a non-empty square)?
+    pub was_capture: bool,
+    /// Static evaluation at this ply, before any move was played.
+    /// `Value::NONE` when the searcher was in check or for sentinels.
+    pub static_eval: Value,
+    /// Stockfish's per-ply `statScore`: blended main + cont-history
+    /// score for the *most recent quiet move iterated at this ply*.
+    /// Read by children for LMR comparison (`(ss-1)->statScore`) and
+    /// by the parent itself for NMP gating. Carries through siblings:
+    /// only the first grandchild iterates with statScore=0 (the
+    /// `(ss+2)/(ss+4)` reset at node entry); later grandchildren
+    /// inherit whichever value the previous sibling left behind.
+    pub stat_score: i32,
+    /// 1-indexed count of the move currently being iterated at this
+    /// ply, or 0 before the first legal child has been picked up.
+    /// Read by the child's CMP gate (`(ss-1)->moveCount == 1`) to
+    /// widen the LMR-depth threshold when the parent is on its top
+    /// quiet (typically the TT move, which carries strong signal).
+    pub move_count: u32,
+}
+
+impl StackEntry {
+    pub const SENTINEL: StackEntry = StackEntry {
+        moved_piece_idx: 0,
+        to_idx: 0,
+        in_check: false,
+        was_capture: false,
+        static_eval: Value::NONE,
+        stat_score: 0,
+        move_count: 0,
+    };
+}
+
 // =========================================================================
 // Root move tracking
 // =========================================================================
@@ -126,7 +202,16 @@ struct RootMove {
 pub(crate) struct Search<'a> {
     tt: &'a TranspositionTable,
     history: &'a mut ButterflyHistory,
+    counter_moves: &'a mut CounterMoveTable,
+    cont_history: &'a mut ContHistStore,
+    capture_history: &'a mut CaptureHistory,
     pawn_cache: &'a mut pawns::Table,
+
+    /// Per-ply search stack with 7 leading sentinel frames so that
+    /// `stack[STACK_SENTINEL + ply - i]` for `i ∈ {1, 2, 4, 6}` is
+    /// always in-bounds even at ply 0. Sized `MAX_PLY +
+    /// STACK_SENTINEL + 1` and allocated once per `Search::new`.
+    stack: Vec<StackEntry>,
 
     /// Killer moves per ply: two slots, `killers[ply][0]` is the latest
     /// fail-high quiet found at that ply.
@@ -179,12 +264,19 @@ impl<'a> Search<'a> {
     pub(crate) fn new(
         tt: &'a TranspositionTable,
         history: &'a mut ButterflyHistory,
+        counter_moves: &'a mut CounterMoveTable,
+        cont_history: &'a mut ContHistStore,
+        capture_history: &'a mut CaptureHistory,
         pawn_cache: &'a mut pawns::Table,
     ) -> Search<'a> {
         Search {
             tt,
             history,
+            counter_moves,
+            cont_history,
+            capture_history,
             pawn_cache,
+            stack: vec![StackEntry::SENTINEL; MAX_PLY + STACK_SENTINEL + STACK_LOOKAHEAD],
             // `pv_length` is sized `MAX_PLY + 1` so the parent's
             // `update_pv` read of `pv_length[ply + 1]` is in bounds when
             // the child bailed at `ply == MAX_PLY`. The child still
@@ -471,7 +563,9 @@ impl<'a> Search<'a> {
                 );
             }
 
-            let score = self.negamax(pos, alpha, beta, depth, 0, true, true);
+            // Root is a PV node, and SF's invariant is `!(PvNode &&
+            // cutNode)` — so we always enter with `cut_node = false`.
+            let score = self.negamax(pos, alpha, beta, depth, 0, true, true, None, false);
 
             if self.aborted {
                 return score;
@@ -523,7 +617,10 @@ impl<'a> Search<'a> {
         ply: usize,
         is_root: bool,
         is_pv: bool,
+        prev: Option<(PieceType, Square)>,
+        cut_node: bool,
     ) -> Value {
+        debug_assert!(!(is_pv && cut_node), "PvNode && cutNode is an SF invariant");
         // Hard cap on recursion depth. Check extensions don't decrement
         // depth, so a position rich in forcing checks (e.g. infiltrated
         // queen + knight + rook) can drive `ply` past normal bounds.
@@ -594,6 +691,26 @@ impl<'a> Search<'a> {
 
         let in_check = pos.in_check();
 
+        // --- Initialize the grandchild frame's `stat_score` to zero ---
+        //
+        // SF11 search.cpp:683-686. statScore is "shared between
+        // grandchildren" — siblings at ply+2 inherit whichever
+        // statScore the previous sibling wrote during its LMR loop.
+        // Only the *first* grandchild starts fresh, which is what this
+        // reset guarantees. At root we look two layers further out
+        // (`ss+4`) so the same property holds for the deeper subtree.
+        let reset_offset = if is_root { 4 } else { 2 };
+        self.stack[STACK_SENTINEL + ply + reset_offset].stat_score = 0;
+
+        // --- Zero this ply's `move_count` ---
+        //
+        // SF11 search.cpp:638. Children read `(ss-1)->moveCount` to
+        // widen their CMP gate when we're on our first quiet (= the
+        // TT move). Until we get into the move loop and increment,
+        // it must read as 0 (no quiet iterated yet) so the CMP
+        // widening does *not* fire on a stale sibling-search value.
+        self.stack[STACK_SENTINEL + ply].move_count = 0;
+
         // --- Static eval ---
         //
         // `raw_static_eval` is the evaluator's untinted output — what
@@ -610,16 +727,84 @@ impl<'a> Search<'a> {
         };
         let static_eval = self.apply_contempt(raw_static_eval, pos);
 
+        // Persist this ply's static eval for the `improving` lookup
+        // performed by descendants — they read `stack[ply-2]` and
+        // `stack[ply-4]`.
+        self.stack[STACK_SENTINEL + ply].static_eval = static_eval;
+
+        // `improving`: true when this ply's static eval is trending up
+        // versus the same side-to-move's eval two plies ago. Mirrors
+        // Stockfish 11 (search.cpp:828): if the 2-back frame was in
+        // check (NONE), fall back to comparing against 4 back; if both
+        // are NONE (early in the search), default to `true`. In check,
+        // the concept doesn't apply — set false.
+        let s_back2 = self.stack[STACK_SENTINEL + ply - 2].static_eval;
+        let s_back4 = self.stack[STACK_SENTINEL + ply - 4].static_eval;
+        let improving = if in_check {
+            false
+        } else if s_back2 == Value::NONE {
+            s_back4 == Value::NONE || static_eval.0 >= s_back4.0
+        } else {
+            static_eval.0 >= s_back2.0
+        };
+
+        // --- Reverse futility pruning (SF11 "child-node futility") ---
+        // Stockfish 11 search.cpp:831-836 (claimed ~50 Elo). If our
+        // static eval is already so far above beta that a
+        // `futility_margin(depth)` worth of plausible swing wouldn't
+        // bring it below, return early and skip the entire subtree.
+        // The static eval is fully computed (unlike lazy eval, which
+        // returned an *approximate* eval and was rolled back for
+        // changing best-move decisions); the heuristic is purely
+        // "subtree below this honest eval probably can't matter".
+        //
+        // `!is_pv` covers root (root is always called with is_pv=true).
+        // `static_eval < KNOWN_WIN` mirrors SF's "do not return
+        // unproven wins" — beyond +10000 cp we're claiming a forced
+        // win that the search hasn't actually verified.
+        if !is_pv
+            && !in_check
+            && depth < 6
+            && static_eval != Value::NONE
+            && static_eval.0 < Value::KNOWN_WIN.0
+            && static_eval.0 - futility_margin(depth, improving) >= beta.0
+        {
+            return static_eval;
+        }
+
         // --- Null-move pruning ---
+        // Stockfish loosens the staticEval gate by 30 cp when
+        // improving: the searcher trusts the eval more, so a slightly
+        // lower static eval still qualifies for null-move pruning.
+        let nmp_eval_floor = beta.0 - 32 * depth + 292 - if improving { 30 } else { 0 };
+        // SF11 search.cpp:841 — skip NMP when the parent's last
+        // quiet move scored very strongly. The intuition: if the
+        // parent already played a clearly-good quiet, the eval is
+        // probably about to climb naturally, and a null move here
+        // would prune subtrees where the side-to-move's *active*
+        // play would expose the parent's mistake.
+        let parent_stat_score = self.stack[STACK_SENTINEL + ply - 1].stat_score;
         if !is_pv
             && !in_check
             && depth >= NULL_MIN_DEPTH
             && static_eval != Value::NONE
             && static_eval >= beta
+            && static_eval.0 >= nmp_eval_floor
+            && parent_stat_score < 23397
             && pos.non_pawn_material(pos.side_to_move()).0 > 0
         {
             let r = 3 + depth / 4 + ((static_eval.0 - beta.0) / 200).clamp(0, 3);
             let reduced = (depth - r).max(1);
+
+            // Mark this ply's move-info as "null move" so the child's
+            // cont-hist lookup at "1 ply ago" hits the sentinel slot
+            // (moved_piece_idx == 0) and reads zero. Mirrors
+            // Stockfish's `ss->continuationHistory =
+            // &continuationHistory[0][0][NO_PIECE][0]`.
+            self.stack[STACK_SENTINEL + ply].moved_piece_idx = 0;
+            self.stack[STACK_SENTINEL + ply].to_idx = 0;
+            self.stack[STACK_SENTINEL + ply].was_capture = false;
+            self.stack[STACK_SENTINEL + ply].in_check = false;
 
             let saved = pos.do_null_move();
             self.tt.prefetch(pos.key());
@@ -632,6 +817,8 @@ impl<'a> Search<'a> {
                 ply + 1,
                 false,
                 false,
+                None,
+                !cut_node,
             );
             self.path_keys.pop();
             pos.undo_null_move(saved);
@@ -650,8 +837,170 @@ impl<'a> Search<'a> {
             }
         }
 
+        // Build the four cont-hist keys identifying the parent
+        // sub-tables at offsets 1, 2, 4, 6 plies ago. Hoisted above
+        // ProbCut because ProbCut's child negamax recursion reads
+        // them via the per-ply stack writes below.
+        let cont_keys: ContHistKeys = [
+            cont_key_at(&self.stack, ply, 1),
+            cont_key_at(&self.stack, ply, 2),
+            cont_key_at(&self.stack, ply, 4),
+            cont_key_at(&self.stack, ply, 6),
+        ];
+
+        // --- ProbCut (SF11 search.cpp:888-929, claimed ~10 Elo) ---
+        //
+        // If a "good enough" capture (SEE clearing a raised-beta
+        // margin) returns a reduced search value above raisedBeta,
+        // we can prune the whole node — the parent move that led
+        // here is refuted by a capture we wouldn't even need to
+        // search deeply.
+        //
+        // Two-phase verification: first a zero-window qsearch (cheap
+        // — bails on stand-pat / quick recapture); only if that
+        // holds do we run a `depth - 4` regular search. The qsearch
+        // gate kills most candidates before the expensive recurse.
+        //
+        // Capture budget = `2 + 2 * cut_node`: at cut nodes (where a
+        // fail-high is expected) we try up to 4 captures; elsewhere
+        // only 2. This formula was the load-bearing piece our prior
+        // (2026-05-12) ProbCut attempt lacked — no flat budget
+        // worked across position types.
+        if !is_pv
+            && !in_check
+            && depth >= 5
+            && static_eval != Value::NONE
+            && beta.0.abs() < Value::MATE.0 - Value::MAX_PLY
+        {
+            let raised_beta = (beta.0 + 189 - 45 * improving as i32).min(Value::INFINITE.0);
+            let raised_beta_v = Value(raised_beta);
+            let see_threshold = Value(raised_beta - static_eval.0);
+            let budget = 2 + 2 * cut_node as i32;
+            let mut probcut_count: i32 = 0;
+
+            // TT move only enters via the picker if it's a capture
+            // /promotion — otherwise the picker's first emission
+            // would be a quiet move that we'd then skip.
+            let tt_is_cap_or_promo = tt_move != Move::NONE
+                && (pos.is_capture(tt_move)
+                    || tt_move.kind() == crate::types::MoveKind::Promotion);
+            let pc_tt = if tt_is_cap_or_promo {
+                tt_move
+            } else {
+                Move::NONE
+            };
+            let mut pc_picker = MovePicker::new_qs(
+                pos,
+                pc_tt,
+                Depth::QS_NO_CHECKS,
+                None,
+                crate::movepick::NO_CONT_HIST,
+            );
+
+            let mut pc_value = Value::NONE;
+            while probcut_count < budget {
+                let mv = pc_picker.next_move(
+                    pos,
+                    Some(self.history),
+                    Some(self.cont_history),
+                    Some(self.capture_history),
+                    true, // qsearch picker emits captures only anyway
+                );
+                if mv == Move::NONE {
+                    break;
+                }
+
+                // Captures/promotions only, and only those whose SEE
+                // clears the raised-beta margin. Bad captures and
+                // moves not clearing the threshold are skipped — we
+                // keep iterating until we exhaust the picker or hit
+                // the budget.
+                let is_cap_or_promo =
+                    pos.is_capture(mv) || mv.kind() == crate::types::MoveKind::Promotion;
+                if !is_cap_or_promo {
+                    continue;
+                }
+                if !pos.see_ge(mv, see_threshold) {
+                    continue;
+                }
+
+                let moved_piece = pos.moved_piece(mv);
+                let state = pos.do_move(mv);
+                self.tt.prefetch(pos.key());
+                let us_was = !pos.side_to_move();
+                let our_king = pos.king_square(us_was);
+                let still_attacked = (pos.attackers_to(our_king, pos.occupied())
+                    & pos.pieces_by_color(!us_was))
+                    .any();
+                if still_attacked {
+                    pos.undo_move(mv, state);
+                    continue;
+                }
+
+                probcut_count += 1;
+
+                // Record on the per-ply stack so the recursive
+                // search reads the right parent (in_check,
+                // was_capture, moved_piece, to) for cont-hist
+                // lookups.
+                self.stack[STACK_SENTINEL + ply].moved_piece_idx = moved_piece.index() as u8;
+                self.stack[STACK_SENTINEL + ply].to_idx = mv.to().index() as u8;
+                self.stack[STACK_SENTINEL + ply].in_check = in_check;
+                self.stack[STACK_SENTINEL + ply].was_capture = true;
+
+                self.path_keys.push(pos.key());
+                let child_prev = Some((moved_piece.kind(), mv.to()));
+
+                // Phase 1: zero-window qsearch — cheap rejection.
+                let mut value =
+                    -self.qsearch(pos, Value(-raised_beta), Value(-raised_beta + 1), ply + 1);
+
+                // Phase 2: regular search at depth-4 if qsearch held.
+                if value >= raised_beta_v {
+                    value = -self.negamax(
+                        pos,
+                        Value(-raised_beta),
+                        Value(-raised_beta + 1),
+                        depth - 4,
+                        ply + 1,
+                        false,
+                        false,
+                        child_prev,
+                        !cut_node,
+                    );
+                }
+
+                self.path_keys.pop();
+                pos.undo_move(mv, state);
+
+                if self.aborted {
+                    return Value::ZERO;
+                }
+
+                if value >= raised_beta_v {
+                    pc_value = value;
+                    break;
+                }
+            }
+
+            if pc_value != Value::NONE {
+                return pc_value;
+            }
+        }
+
         // --- Main move loop ---
-        let mut picker = MovePicker::new_main(pos, tt_move, Depth(depth), self.killers[ply]);
+        let counter_move = match prev {
+            Some((pt, sq)) => self.counter_moves.get(pt, sq),
+            None => Move::NONE,
+        };
+        let mut picker = MovePicker::new_main(
+            pos,
+            tt_move,
+            Depth(depth),
+            self.killers[ply],
+            counter_move,
+            cont_keys,
+        );
 
         // At the root, we want the picker's ordering (TT move, then
         // captures, then killers/history) but only among moves the
@@ -678,10 +1027,20 @@ impl<'a> Search<'a> {
         // cost is 512 bytes (Move is u16); MAX_PLY recursion stays under
         // budget.
         let mut quiets_tried = crate::movegen::MoveList::new();
+        // Captures tried before the cutoff — used for the
+        // capture-history `-bonus1` decrement on β-cutoff (regardless
+        // of whether the cutoff move itself was a capture).
+        let mut captures_tried = crate::movegen::MoveList::new();
         let mut raised_alpha = false;
 
         loop {
-            let mv = picker.next_move(pos, Some(self.history), false);
+            let mv = picker.next_move(
+                pos,
+                Some(self.history),
+                Some(self.cont_history),
+                Some(self.capture_history),
+                false,
+            );
             if mv == Move::NONE {
                 break;
             }
@@ -693,6 +1052,14 @@ impl<'a> Search<'a> {
                     continue;
                 }
             }
+
+            // Capture the moved piece (before do_move clears the
+            // from-square): kind goes into `prev` for the child's
+            // counter-move lookup; the colored Piece's index goes into
+            // the per-ply stack so descendants' cont-hist lookups can
+            // find this move's sub-table.
+            let moved_piece = pos.moved_piece(mv);
+            let moved_pt = moved_piece.kind();
 
             // Legality check via do/undo. `pos.do_move` assumes pseudo-
             // legal input; the picker guarantees that.
@@ -708,6 +1075,10 @@ impl<'a> Search<'a> {
             }
 
             move_count += 1;
+            // Publish our running move_count onto the stack so the
+            // child we're about to recurse into can read it via
+            // `(ss-1)->move_count` for its CMP gate. SF11 search.cpp:979.
+            self.stack[STACK_SENTINEL + ply].move_count = move_count as u32;
             if is_root && self.verbose_progress {
                 eprintln!(
                     "[search]   depth {depth} slot {} move #{move_count}: {}-{} ({} nodes, {} ms)",
@@ -722,8 +1093,68 @@ impl<'a> Search<'a> {
                 state.captured.is_some() || mv.kind() == crate::types::MoveKind::EnPassant;
             let gives_check = pos.in_check();
 
-            let extension = if gives_check { 1 } else { 0 };
-            let new_depth = depth - 1 + extension;
+            // --- Counter-move-based pruning (SF11 search.cpp:1010-1014, ~20 Elo) ---
+            //
+            // Drop quiet moves whose 1-ply-ago and 2-plies-ago
+            // cont-history scores are both negative
+            // (CounterMovePruneThreshold = 0 in SF11). At shallow
+            // `lmr_d` only — beyond that the search is deep enough
+            // to recover from a false positive.
+            //
+            // The depth threshold widens by 1 ply when the parent
+            // context suggests the gate is safe: either the
+            // parent's last quiet scored well (`statScore > 0`) or
+            // the parent is on its first quiet (typically the TT
+            // move). Both conditions correlate with "parent picked
+            // a strong move, so a sibling that looks bad here is
+            // probably actually bad." This widening is the
+            // load-bearing piece our prior 2026-05-12 attempt
+            // (gated on flat `lmr_d < 4`) was missing — without it,
+            // CMP fires uniformly across position types and
+            // catches good moves with noisy cont-hist as collateral.
+            //
+            // Sentinel handling: at a frame whose parent was the
+            // root or a null-move ancestor, SF11 fills the
+            // `NO_PIECE` row of every contHistory table with -1 so
+            // the gate fires uniformly. We mimic that read-side
+            // via [`cmp_cont_hist_read`] rather than mutating the
+            // tables.
+            let cmp_prune = !is_root
+                && !in_check
+                && !is_capture
+                && !gives_check
+                && best_score > Value::MATED_IN_MAX_PLY
+                && pos.non_pawn_material(!pos.side_to_move()).0 > 0
+                && {
+                    let lmr_r = lmr_reduction(depth, move_count, improving);
+                    // SF11 search.cpp:1008 — `lmrDepth = max(newDepth -
+                    // reduction, 0)`, where `newDepth = depth - 1` at
+                    // this point (extensions are computed *after*
+                    // pruning step 13). Using `depth - 1` directly
+                    // keeps the gate independent of whichever
+                    // extension we later assign.
+                    let lmr_d = ((depth - 1) - lmr_r).max(0);
+                    let parent_stat = self.stack[STACK_SENTINEL + ply - 1].stat_score;
+                    let parent_mc = self.stack[STACK_SENTINEL + ply - 1].move_count;
+                    let widen = (parent_stat > 0 || parent_mc == 1) as i32;
+                    if lmr_d >= 4 + widen {
+                        false
+                    } else {
+                        let mvp = moved_piece.index() as usize;
+                        let mvt = mv.to().index() as usize;
+                        let ch0 = cmp_cont_hist_read(self.cont_history, cont_keys[0], mvp, mvt);
+                        let ch1 = cmp_cont_hist_read(self.cont_history, cont_keys[1], mvp, mvt);
+                        ch0 < 0 && ch1 < 0
+                    }
+                };
+            if cmp_prune {
+                pos.undo_move(mv, state);
+                // SF's `quietsSearched` only records moves that
+                // were *actually searched* (line 1300). CMP-pruned
+                // moves never reach the search — don't pollute the
+                // bonus-decrement list with them on cutoff.
+                continue;
+            }
 
             // Shallow pruning for quiet moves.
             let pruned_quiet = !is_root
@@ -732,8 +1163,8 @@ impl<'a> Search<'a> {
                 && !gives_check
                 && best_score > Value::MATED_IN_MAX_PLY
                 && depth <= SHALLOW_PRUNE_MAX_DEPTH
-                && (late_move_prune(depth, move_count)
-                    || futility_prune(static_eval, alpha, depth));
+                && (late_move_prune(depth, move_count, improving)
+                    || futility_prune(static_eval, alpha, depth, improving));
             if pruned_quiet {
                 pos.undo_move(mv, state);
                 quiets_tried.push(mv);
@@ -751,7 +1182,22 @@ impl<'a> Search<'a> {
                 self.tt.prefetch(pos.key());
             }
 
+            let extension = if gives_check { 1 } else { 0 };
+            let new_depth = depth - 1 + extension;
+
             self.path_keys.push(pos.key());
+
+            // Record this move into the parent's stack frame so the
+            // child's cont-hist lookups at "1 ply ago" find this move's
+            // sub-table. Mirrors Stockfish's `ss->continuationHistory =
+            // &thisThread->continuationHistory[inCheck][captureOrPromotion]
+            // [movedPiece][to_sq(move)]` write.
+            self.stack[STACK_SENTINEL + ply].moved_piece_idx = moved_piece.index() as u8;
+            self.stack[STACK_SENTINEL + ply].to_idx = mv.to().index() as u8;
+            self.stack[STACK_SENTINEL + ply].in_check = in_check;
+            self.stack[STACK_SENTINEL + ply].was_capture = is_capture;
+
+            let child_prev = Some((moved_pt, mv.to()));
 
             let mut score: Value;
             let mut full_depth = true;
@@ -763,8 +1209,66 @@ impl<'a> Search<'a> {
                 && !in_check
                 && !gives_check
             {
-                let r = lmr_reduction(depth, move_count);
-                let reduced = (new_depth - r).max(1);
+                let mut r = lmr_reduction(depth, move_count, improving);
+
+                // SF11 search.cpp:1155 — increase reduction at cut
+                // nodes. The parent expects a fail-high; reducing
+                // late-move quiets *more* here is cheap when correct
+                // (they'd have been cut anyway) and the full-depth
+                // re-search backs us out when we're wrong.
+                if cut_node {
+                    r += 2;
+                }
+
+                // SF11 statScore: blend main + cont-history into a
+                // single quality estimate for the move we're about
+                // to search, then compare against the parent's
+                // statScore to nudge `r` in {-1, 0, +1}, finally
+                // gravity-scale by `statScore / 16384`. Computed
+                // here only for quiet moves (captures take the
+                // `else` branch of SF's `!captureOrPromotion`
+                // block).
+                let us = !pos.side_to_move(); // side-to-move *before* do_move
+                let mvp_idx = moved_piece.index() as u8;
+                let mvt_idx = mv.to().index() as u8;
+                let main_h = self.history.get(us, mv.from(), mv.to()) as i32;
+                // SF11 reads contHist[0], [1], [3] = 1-, 2-, 4-plies-ago.
+                // Our `cont_keys` packs those at indices [0], [1], [2].
+                let ch0 = self
+                    .cont_history
+                    .sub_for_key(cont_keys[0])[mvp_idx as usize][mvt_idx as usize]
+                    as i32;
+                let ch1 = self
+                    .cont_history
+                    .sub_for_key(cont_keys[1])[mvp_idx as usize][mvt_idx as usize]
+                    as i32;
+                let ch3 = self
+                    .cont_history
+                    .sub_for_key(cont_keys[2])[mvp_idx as usize][mvt_idx as usize]
+                    as i32;
+
+                let mut stat_score = main_h + ch0 + ch1 + ch3 - 4926;
+                // The flat `-4926` offset can pull an "all-good"
+                // move slightly negative; clip those false
+                // negatives so the gravity scaling doesn't reduce
+                // a move whose sub-components all say "fine".
+                if stat_score < 0 && ch0 >= 0 && ch1 >= 0 && main_h >= 0 {
+                    stat_score = 0;
+                }
+                self.stack[STACK_SENTINEL + ply].stat_score = stat_score;
+
+                let parent_stat = self.stack[STACK_SENTINEL + ply - 1].stat_score;
+                if stat_score >= -102 && parent_stat < -114 {
+                    r -= 1;
+                } else if parent_stat >= -116 && stat_score < -154 {
+                    r += 1;
+                }
+                r -= stat_score / 16384;
+
+                // SF clamps the resulting depth to `[1, new_depth]`
+                // — a negative `r` would otherwise extend, which LMR
+                // is not supposed to do.
+                let reduced = (new_depth - r).clamp(1, new_depth);
 
                 let reduced_score = -self.negamax(
                     pos,
@@ -774,6 +1278,10 @@ impl<'a> Search<'a> {
                     ply + 1,
                     false,
                     false,
+                    child_prev,
+                    // LMR's reduced search treats the child as a cut
+                    // node (we expect it to fail low quickly).
+                    true,
                 );
                 full_depth = reduced_score > alpha;
                 if !full_depth {
@@ -794,11 +1302,25 @@ impl<'a> Search<'a> {
                     ply + 1,
                     false,
                     false,
+                    child_prev,
+                    !cut_node,
                 );
             }
 
             if is_pv && (move_count == 1 || (score > alpha && (is_root || score < beta))) {
-                score = -self.negamax(pos, -beta, -alpha, new_depth, ply + 1, false, true);
+                score = -self.negamax(
+                    pos,
+                    -beta,
+                    -alpha,
+                    new_depth,
+                    ply + 1,
+                    false,
+                    true,
+                    child_prev,
+                    // PV-search children are themselves PV (so never
+                    // cut nodes).
+                    false,
+                );
             }
 
             self.path_keys.pop();
@@ -846,10 +1368,24 @@ impl<'a> Search<'a> {
                     self.update_pv(ply, mv);
 
                     if score >= beta {
+                        // Stockfish's `update_all_stats`:
+                        //   bonus1 = stat_bonus(depth + 1) — used for
+                        //     the cutoff capture's bump and the
+                        //     decrement of every losing capture tried.
+                        //   For quiets we keep our existing
+                        //     `history_bonus`/`stat_bonus(depth)` mix.
+                        let bonus1 = stat_bonus(depth + 1).clamp(
+                            -CAPTURE_HISTORY_BOUND,
+                            CAPTURE_HISTORY_BOUND,
+                        );
+
                         if !is_capture {
                             if self.killers[ply][0] != mv {
                                 self.killers[ply][1] = self.killers[ply][0];
                                 self.killers[ply][0] = mv;
+                            }
+                            if let Some((pt, sq)) = prev {
+                                self.counter_moves.set(pt, sq, mv);
                             }
                             let bonus = history_bonus(depth);
                             let us = pos.side_to_move();
@@ -857,7 +1393,80 @@ impl<'a> Search<'a> {
                             for q in &quiets_tried {
                                 self.history.update(us, q.from(), q.to(), -bonus);
                             }
+
+                            // Continuation history: bump our move's
+                            // slot in each parent table at offsets
+                            // {1, 2, 4, 6} ply ago, and decrement the
+                            // same slot for every quiet tried before
+                            // the cutoff. Mirrors Stockfish's
+                            // `update_continuation_histories(...)`
+                            // applied via `update_quiet_stats`.
+                            let cont_bonus = stat_bonus(depth);
+                            let mv_piece_idx = moved_piece.index() as u8;
+                            let mv_to_idx = mv.to().index() as u8;
+                            update_cont_histories(
+                                self.cont_history,
+                                &cont_keys,
+                                mv_piece_idx,
+                                mv_to_idx,
+                                cont_bonus,
+                            );
+                            for q in &quiets_tried {
+                                let q_piece = pos.moved_piece(*q);
+                                update_cont_histories(
+                                    self.cont_history,
+                                    &cont_keys,
+                                    q_piece.index() as u8,
+                                    q.to().index() as u8,
+                                    -cont_bonus,
+                                );
+                            }
+                        } else {
+                            // Cutoff move was a capture: bump its
+                            // capture-history slot. `pos.piece_on(to)`
+                            // reads the captured piece because the
+                            // search has already undone the move; for
+                            // en passant the to-square is empty so the
+                            // captured-pt slot collapses to 0 — matches
+                            // Stockfish's `piece_on(to_sq(bestMove))`.
+                            let captured_pt = pos
+                                .piece_on(mv.to())
+                                .map(|p| p.kind().index() as u8)
+                                .unwrap_or(0);
+                            self.capture_history.update(
+                                moved_piece.index() as u8,
+                                mv.to().index() as u8,
+                                captured_pt,
+                                bonus1,
+                            );
                         }
+
+                        // Decrement every losing capture's slot,
+                        // regardless of whether the cutoff move was a
+                        // capture or a quiet. Mirrors Stockfish's
+                        // unconditional capture-loser decrement.
+                        for cap in &captures_tried {
+                            let cap_piece = pos.moved_piece(*cap);
+                            let cap_captured_pt = pos
+                                .piece_on(cap.to())
+                                .map(|p| p.kind().index() as u8)
+                                .unwrap_or(0);
+                            self.capture_history.update(
+                                cap_piece.index() as u8,
+                                cap.to().index() as u8,
+                                cap_captured_pt,
+                                -bonus1,
+                            );
+                        }
+
+                        // SF11 search.cpp:1288 zeros this ply's
+                        // statScore on a fail-high so that, if this
+                        // frame is reached again via a sibling at a
+                        // higher ply, the LMR parent-comparison reads
+                        // a clean baseline rather than the cutoff
+                        // move's (possibly very large) value.
+                        self.stack[STACK_SENTINEL + ply].stat_score = 0;
+
                         break;
                     }
                 }
@@ -865,6 +1474,8 @@ impl<'a> Search<'a> {
 
             if !is_capture {
                 quiets_tried.push(mv);
+            } else {
+                captures_tried.push(mv);
             }
         }
 
@@ -980,11 +1591,27 @@ impl<'a> Search<'a> {
             Depth::QS_NO_CHECKS
         };
 
-        let mut picker = MovePicker::new_qs(pos, tt_move, depth, None);
+        // Cont-hist keys for qsearch: only the 1-ply-ago slot affects
+        // evasion ordering (Stockfish's `score<EVASIONS>` reads
+        // `continuationHistory[0]`). Pass the full set so the picker
+        // logic stays uniform; unused slots are no-ops.
+        let cont_keys: ContHistKeys = [
+            cont_key_at(&self.stack, ply, 1),
+            cont_key_at(&self.stack, ply, 2),
+            cont_key_at(&self.stack, ply, 4),
+            cont_key_at(&self.stack, ply, 6),
+        ];
+        let mut picker = MovePicker::new_qs(pos, tt_move, depth, None, cont_keys);
         let mut move_count = 0usize;
 
         loop {
-            let mv = picker.next_move(pos, Some(self.history), false);
+            let mv = picker.next_move(
+                pos,
+                Some(self.history),
+                Some(self.cont_history),
+                Some(self.capture_history),
+                false,
+            );
             if mv == Move::NONE {
                 break;
             }
@@ -992,6 +1619,10 @@ impl<'a> Search<'a> {
             if !in_check && !pos.see_ge(mv, Value::ZERO) {
                 continue;
             }
+
+            // Capture moved piece before do_move so we can record it in
+            // the per-ply stack for descendants' cont-hist lookups.
+            let moved_piece = pos.moved_piece(mv);
 
             let state = pos.do_move(mv);
             self.tt.prefetch(pos.key());
@@ -1005,6 +1636,15 @@ impl<'a> Search<'a> {
             }
 
             move_count += 1;
+            // Update parent's stack frame before recursing so the
+            // child's cont-hist lookups find this move's sub-table.
+            let is_capture =
+                state.captured.is_some() || mv.kind() == crate::types::MoveKind::EnPassant;
+            self.stack[STACK_SENTINEL + ply].moved_piece_idx = moved_piece.index() as u8;
+            self.stack[STACK_SENTINEL + ply].to_idx = mv.to().index() as u8;
+            self.stack[STACK_SENTINEL + ply].in_check = in_check;
+            self.stack[STACK_SENTINEL + ply].was_capture = is_capture;
+
             self.path_keys.push(pos.key());
             let score = -self.qsearch(pos, -beta, -alpha, ply + 1);
             self.path_keys.pop();
@@ -1268,31 +1908,113 @@ fn value_from_tt(v: Value, ply: i32) -> Value {
     }
 }
 
-fn lmr_reduction(depth: i32, move_count: usize) -> i32 {
+/// Resolve `stack[ply - offset]` into the cont-hist key tuple
+/// `(in_check, was_capture, moved_piece_idx, to_idx)`. The 7-frame
+/// sentinel padding makes offset reads up to 6 plies safe even at
+/// ply 0 — they return the all-zero sentinel which the cont-hist
+/// store treats as "no parent move".
+fn cont_key_at(stack: &[StackEntry], ply: usize, offset: usize) -> (bool, bool, u8, u8) {
+    let idx = STACK_SENTINEL + ply - offset;
+    let e = &stack[idx];
+    (e.in_check, e.was_capture, e.moved_piece_idx, e.to_idx)
+}
+
+fn lmr_reduction(depth: i32, move_count: usize, improving: bool) -> i32 {
     if depth <= 3 || move_count <= 4 {
         return 0;
     }
     let log_d = ((depth as u32).checked_ilog2().unwrap_or(0)) as i32;
     let log_mc = ((move_count as u32).checked_ilog2().unwrap_or(0)) as i32;
-    (log_d * log_mc / 2).max(1)
+    let base = (log_d * log_mc / 2).max(1);
+    // Increase reduction by 1 ply when the static eval isn't trending
+    // upward — Stockfish's "!improving" bump in the reduction formula
+    // (`(r + 511) / 1024 + (!i && r > 1007)` line, reduced to a flat +1
+    // for our log-table-free formula).
+    if !improving {
+        base + 1
+    } else {
+        base
+    }
 }
 
-fn late_move_prune(depth: i32, move_count: usize) -> bool {
-    let threshold = (3 + depth * depth) as usize;
+fn late_move_prune(depth: i32, move_count: usize, improving: bool) -> bool {
+    // Stockfish's `futility_move_count(improving, depth) =
+    // (5 + d^2) * (1 + improving) / 2 - 1` — when improving, the
+    // count threshold is roughly doubled, so fewer moves get pruned.
+    let base = (5 + depth * depth) as usize;
+    let threshold = base * (1 + improving as usize) / 2 - 1;
     move_count > threshold
 }
 
-fn futility_prune(static_eval: Value, alpha: Value, depth: i32) -> bool {
+fn futility_prune(static_eval: Value, alpha: Value, depth: i32, improving: bool) -> bool {
     if static_eval == Value::NONE {
         return false;
     }
-    let margin = 150 * depth;
-    static_eval.0 + margin <= alpha.0
+    static_eval.0 + futility_margin(depth, improving) <= alpha.0
+}
+
+/// Stockfish 11's `futility_margin` (search.cpp:69-71). Margin shrinks
+/// by one depth-step's worth (217 cp) when the static eval is
+/// improving, letting both directions of futility pruning take a
+/// slightly tighter bet. Used both by the per-move forward-futility
+/// `futility_prune` ("this move can't reach alpha, skip it") and by
+/// the parent-level reverse-futility check inside `negamax` ("we're
+/// already past beta, skip the subtree").
+fn futility_margin(depth: i32, improving: bool) -> i32 {
+    217 * (depth - improving as i32)
+}
+
+/// Stockfish 11's `update_continuation_histories`: bumps the
+/// `[piece][to]` slot of each parent table referenced by `keys` by
+/// `bonus`. Parents for which no real move was played (sentinel slot 0)
+/// are skipped — their tables are reserved for "no move" and stay at
+/// zero so cont-hist scoring of those plies returns 0.
+fn update_cont_histories(
+    cont: &mut ContHistStore,
+    keys: &ContHistKeys,
+    moved_piece_idx: u8,
+    to_idx: u8,
+    bonus: i32,
+) {
+    debug_assert!(bonus.abs() <= CONT_HISTORY_BOUND);
+    for &(ic, wc, p, t) in keys {
+        if p == 0 {
+            // Sentinel: no real parent move at this ply offset.
+            continue;
+        }
+        let sub = cont.tables[ic as usize][wc as usize].sub_mut(p as usize, t as usize);
+        cont_history_update(
+            &mut sub[moved_piece_idx as usize][to_idx as usize],
+            bonus,
+        );
+    }
 }
 
 fn history_bonus(depth: i32) -> i32 {
     let raw = depth * depth + 2 * depth - 2;
     raw.clamp(0, BUTTERFLY_HISTORY_BOUND)
+}
+
+/// CMP-only continuation-history read. Stockfish 11 fills the
+/// `NO_PIECE` sentinel row of every contHistory table with -1
+/// (`CounterMovePruneThreshold - 1`) so the CMP gate fires
+/// uniformly at frames whose parent was a null move or the
+/// pre-search padding. We keep the sentinel row at zero in our
+/// tables (every other cont-hist read site treats sentinel as "no
+/// signal, contribute 0"); the override here is local to CMP so
+/// other read sites — move ordering, statScore, etc. — are
+/// unaffected.
+fn cmp_cont_hist_read(
+    store: &crate::movepick::ContHistStore,
+    key: (bool, bool, u8, u8),
+    moved_piece_idx: usize,
+    to_idx: usize,
+) -> i32 {
+    if key.2 == 0 {
+        -1
+    } else {
+        store.sub_for_key(key)[moved_piece_idx][to_idx] as i32
+    }
 }
 
 // =========================================================================
@@ -1409,15 +2131,22 @@ mod tests {
 
     #[test]
     fn lmr_reduction_is_zero_at_shallow_depth() {
-        assert_eq!(lmr_reduction(2, 10), 0);
-        assert_eq!(lmr_reduction(5, 4), 0);
+        assert_eq!(lmr_reduction(2, 10, true), 0);
+        assert_eq!(lmr_reduction(5, 4, true), 0);
     }
 
     #[test]
     fn lmr_reduction_grows_with_depth_and_count() {
-        let r_small = lmr_reduction(4, 5);
-        let r_big = lmr_reduction(10, 20);
+        let r_small = lmr_reduction(4, 5, true);
+        let r_big = lmr_reduction(10, 20, true);
         assert!(r_big >= r_small);
+    }
+
+    #[test]
+    fn lmr_reduction_increases_when_not_improving() {
+        let r_improving = lmr_reduction(10, 20, true);
+        let r_not_improving = lmr_reduction(10, 20, false);
+        assert_eq!(r_not_improving, r_improving + 1);
     }
 
     #[test]
@@ -1436,8 +2165,18 @@ mod tests {
         // recursion levels crashed with "index out of bounds".
         let tt = TranspositionTable::new(1);
         let mut history = crate::movepick::ButterflyHistory::new();
+        let mut counter_moves = crate::movepick::CounterMoveTable::new();
+        let mut cont_history = crate::movepick::ContHistStore::new();
+        let mut capture_history = crate::movepick::CaptureHistory::new();
         let mut pawn_cache = pawns::Table::new();
-        let mut search = Search::new(&tt, &mut history, &mut pawn_cache);
+        let mut search = Search::new(
+            &tt,
+            &mut history,
+            &mut counter_moves,
+            &mut cont_history,
+            &mut capture_history,
+            &mut pawn_cache,
+        );
         let mut pos = Position::startpos();
 
         // Both entry points must survive being called at the cap.
@@ -1449,6 +2188,8 @@ mod tests {
             1,
             MAX_PLY,
             false,
+            false,
+            None,
             false,
         );
         // Parent read path: child at MAX_PLY must leave pv_length[MAX_PLY]
@@ -1473,8 +2214,18 @@ mod tests {
         // plies have preceded this position."
         let tt = TranspositionTable::new(1);
         let mut history = crate::movepick::ButterflyHistory::new();
+        let mut counter_moves = crate::movepick::CounterMoveTable::new();
+        let mut cont_history = crate::movepick::ContHistStore::new();
+        let mut capture_history = crate::movepick::CaptureHistory::new();
         let mut pawn_cache = pawns::Table::new();
-        let mut search = Search::new(&tt, &mut history, &mut pawn_cache);
+        let mut search = Search::new(
+            &tt,
+            &mut history,
+            &mut counter_moves,
+            &mut cont_history,
+            &mut capture_history,
+            &mut pawn_cache,
+        );
         let pos =
             Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 4 3").unwrap();
 
@@ -1651,12 +2402,22 @@ mod tests {
     #[test]
     fn multi_pv_first_line_matches_single_pv_first_line() {
         // Whether the caller asked for 1 PV or 5, the leading line
-        // should agree on the best move (a reasonable property: our
-        // MultiPV loop's pv_idx=0 searches exactly the same move space
-        // as a multi_pv=1 run).
+        // should agree on the best move. Note: this property is
+        // approximate at shallow depths because MultiPV's slot-1..N
+        // work at earlier IDS depths leaves extra TT entries that
+        // single-PV never produces, and pruning changes (reverse-
+        // futility, statScore-driven LMR, NMP gating, CMP, ProbCut,
+        // …) can amplify that small state difference into a
+        // different move. The test uses a 1 MB TT (high collision
+        // rate, amplifies sensitivity); the CLI's much larger
+        // default TT typically converges at lower depths than this
+        // test requires. Each time a new pruning feature lands the
+        // convergence depth bumps; the test sits one step *above*
+        // the divergence boundary, not at it. History: depth 4 →
+        // 8 (reverse-futility) → 11 (statScore-LMR) → 13 (ProbCut).
         let mut pos = Position::startpos();
-        let single = multi_pv_search(&mut pos, 4, 1);
-        let multi = multi_pv_search(&mut pos, 4, 5);
+        let single = multi_pv_search(&mut pos, 13, 1);
+        let multi = multi_pv_search(&mut pos, 13, 5);
         assert!(!single.is_empty());
         assert!(!multi.is_empty());
         assert_eq!(

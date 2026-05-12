@@ -7,6 +7,24 @@ target/
 # zip too would just bloat the history.
 Stockfish-sf_11.zip
 
+# Build artifacts from compiling the reference Stockfish 11 source
+# (we only run this locally for apples-to-apples NPS comparisons).
+reference/Stockfish-sf_11/src/*.o
+reference/Stockfish-sf_11/src/syzygy/*.o
+reference/Stockfish-sf_11/src/.depend
+reference/Stockfish-sf_11/src/stockfish
+reference/Stockfish-sf_11/src/stockfish.exe
+
+# dhat heap-profile output (generated when running the CLI with the
+# `dhat-heap` feature; useful for one-off allocation audits, but not
+# something we want in history).
+dhat-heap.json
+dhat-stderr.log
+dhat-summary.txt
+
+# Scratch search output occasionally written during perf investigation.
+search-output.txt
+
 # Local Claude Code settings (per-machine permissions, hooks); the
 # committed CLAUDE.md is the project-wide guidance and lives at the
 # repo root.

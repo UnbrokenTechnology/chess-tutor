@@ -443,7 +443,7 @@ impl Value {
     pub const INFINITE: Value = Value(32_001);
     pub const NONE: Value = Value(32_002);
 
-    pub const MAX_PLY: i32 = 246;
+    pub const MAX_PLY: i32 = 64;
     pub const MATE_IN_MAX_PLY: Value = Value(32_000 - 2 * Self::MAX_PLY);
     pub const MATED_IN_MAX_PLY: Value = Value(-32_000 + 2 * Self::MAX_PLY);
 

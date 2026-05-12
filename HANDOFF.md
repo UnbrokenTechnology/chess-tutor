@@ -12,7 +12,7 @@ A **chess tutor**, not a chess engine. The product surface is move-by-move teach
 
 UIs: CLI (`chess-tutor`), egui desktop (`chess-tutor-desktop`), planned Apple (Swift/SwiftUI) + Android (Kotlin/Compose). FFI crate (`core/ffi/`) is the prerequisite for the platform apps and doesn't exist yet.
 
-Tests: **582 engine + 105 narration + 46 cli = 733 passing**, clippy clean.
+Tests: **594 engine + 105 narration + 46 cli = 745 passing**, clippy clean.
 
 ## Build / dev commands
 
@@ -26,79 +26,86 @@ cargo build --profile profiling --bin chess-tutor
 # → target/profiling/chess-tutor.exe
 ```
 
-## Active plan: per-node + per-depth perf pass
-
-We're chasing wall-clock-to-depth, primarily so the engine is responsive on iPhone-class hardware. Reference: cold startpos depth-12 search runs at **~0.87 Mnps**, depth-14 at **~1.30 Mnps**, warm interactive play at **~1.55 Mnps**. Stockfish 11 single-thread is ~3–5 Mnps on similar hardware, so we're ~3–4× behind per node. Roughly half of that gap is per-node code cost, half is nodes-per-depth (move ordering).
-
-`Engine::last_nodes() / last_elapsed() / last_nps()` surface the stats; CLI `play` and `search` print them after each move. Auto-retrospective also prints its own timing line.
-
-Five tasks tracked as `TaskCreate` items #5–#9. Order matters because #9 depends on the per-ply stack added in #7.
-
-### #5 — `MAX_PLY` 246 → 64 (standalone, do first)
-
-`pub const MAX_PLY: usize = Value::MAX_PLY as usize;` at [`core/engine/src/search.rs:35`](core/engine/src/search.rs). Verify whether `Value::MAX_PLY` ([`core/engine/src/types.rs`](core/engine/src/types.rs)) is a separate constant — if so, change both.
-
-PV table is sized `MAX_PLY × MAX_PLY × 8 bytes`: 246² × 8 = ~485 KB allocated and zero-written per `Engine::search` call. With 64: 32 KB. **~450 KB saved per call**. Killers + pv_length save another ~5 KB combined.
-
-Trade-off: bails earlier on extension-stacking pathological positions. Realistic check sequences hit threefold or 50-move rule before 30 plies, so 64 leaves comfortable headroom for `max_depth=20` plus extensions.
-
-### #6 — Counter-move heuristic
-
-New table on `Engine`: `counter_moves: Box<[[Move; 64]; 7]>` (~7 KB), indexed `[prev_piece_kind][prev_to_sq]`. Cleared on `new_game`. Update on β-cutoff for a quiet move: `counter_moves[prev_piece][prev_to] = our_move`.
-
-**Separate `MovePicker` stage**, not score-boost — when the counter-move triggers a β-cutoff, the picker exits before generating, scoring, or sorting any quiets. Stage order becomes `MainTt → CaptureInit → GoodCapture → Killer0 → Killer1 → CounterMove → QuietInit → Quiet → BadCapture` (mirrors Stockfish's REFUTATION_PHASE). Validation mirrors `is_valid_killer`.
-
-Expected: **~7–8 % nps** from skipped quiet generation + ~10 Elo of move-ordering improvement.
-
-### #7 — Continuation history + `improving` flag (folded together)
-
-Per-ply search stack on `Search`, one heap alloc at `Search::new`, sized `MAX_PLY+4` (Stockfish convention for safe pre/post-indexing). Each entry: `(moved_piece, to_sq, static_eval)` for the move played at that ply.
-
-Four `[[i16; 64]; 7]` continuation-history tables (~1 KB each, ~4 KB total). Stockfish maintains 1-ply-ago, 2-ply-ago, 4-ply-ago + an aggregate. On β-cutoff: bump our move's score in the 1/2/4-ply tables, decrement losers tried before. `MovePicker` quiet scoring becomes `score = butterfly + cont1 + cont2 + cont4`.
-
-`improving = stack[ply].static_eval > stack[ply-2].static_eval` (with in-check guards — consult Stockfish 11 `search.cpp` for exact fallback rule). Used to: loosen futility margins; lower late-move-pruning threshold; reduce LMR by 1 ply when improving; tighten null-move pruning when *not* improving.
-
-Expected: ~10 % time-to-depth from continuation history (~20 Elo) + ~3–5 % from improving (~10 Elo). Per-ply stack also unlocks #9.
-
-### #8 — Capture history (independent; can land any time)
-
-`Box<[[[i16; 7]; 64]; 7]>` (~12 KB), indexed `[moving_piece][to_sq][captured_piece]`. Update on β-cutoff for a capture: bump winner, decrement losing captures tried before. Used as a tiebreaker on top of MVV-LVA inside `GoodCapture`.
-
-Expected: ~3 % time-to-depth, ~10 Elo.
-
-### #9 — Singular extensions (blocked by #7)
-
-Add `excluded_move: Option<Move>` to `negamax`. Precondition: depth ≥ 8, TT bound ∈ {Exact, Lower}, `tt_depth ≥ depth − 3`, no excluded_move already (recursion guard). Verification search at `(depth - 1) / 2` with window `[singular_beta - 1, singular_beta]` where `singular_beta = tt_value − 2*depth`. If verification fails low, set `extension = 1` for the TT move. If `singular_beta ≥ beta`, multi-cut shortcut: return `singular_beta`. Skip TT writes when `excluded_move.is_some()`. `MovePicker` skips the excluded move.
-
-Expected: ~15 % time-to-depth at depth 20+, ~70 Elo.
-
-### Design decisions confirmed
-
-- Per-ply stack: `Vec` on `Search` (one heap alloc per `Search::new`), not stack-allocated.
-- Counter-moves: separate stage, not score-boost (the perf benefit is skipping quiet generation entirely on cutoff).
-- `improving`: folded into #7 since both share the per-ply stack.
-- `cutNode` (Stockfish's PV-vs-cut-node distinction): not adding for now. `is_pv` is close enough.
-
-### Heap allocation policy
+## Heap allocation policy
 
 Per-search or per-engine allocations are fine. **Per-node allocations are not** — use stack arrays or pool from a thread-local. The `MovePicker` buffer pool (thread-local `Vec<Box<MoveBufs>>`) is the canonical pattern; copy it for any new feature that needs per-call scratch.
 
-## Open dockets (not in the active plan)
+## Open dockets (no active plan right now)
 
 ### Engine perf, deferred until after the active plan
 
-- **King-safety hash table** (~5–8 % nps). Key is `(pawn_key, king_sq, castling_rights)`. Same template as the pawn-structure cache.
-- **Material hash table** (~3–5 % nps). [`material.rs`](core/engine/src/material.rs) flagged this internally; one hash on the material key.
-- **Incremental `pos.occupied()`** as a `by_all: Bitboard` field. Toggle in `remove_piece` / `put_piece`. Tiny per-call but called many times in eval / movegen / SEE.
-- **PEXT bitboards** for slider attacks (~5–10 % on slider terms). Requires "Haswell or newer" build target. Defer until everything else is done.
-- **`ENGINE_TURN_NODE_CAP` review** — currently a flat 5M at [`core/cli/src/play.rs:35`](core/cli/src/play.rs). Engine play hits the cap consistently at depth 20 (5001216 nodes per move), so the cap is too tight to actually reach the requested depth in normal positions. Historically necessary because some closed positions ran 30+ minutes uncapped. Worth running a few "well-behaved" depth-20 positions uncapped to pick a number in the 15–50M range, or making the cap depth-aware (e.g. `4 * 6^depth.min(20)`).
+**Single-thread perf baseline (2026-05-12, post-CMP + statScore + cutNode + ProbCut + lazy eval):** depth-18 wall-clock on the three reference positions: Startpos ~2.4 s / 3.25M nodes, Italian Game ~2.5 s / 3.36M nodes, Kiwipete ~1.2 s / 1.58M nodes. NPS itself dropped from the pre-session ~1.43 Mnps to ~1.2-1.3 Mnps because per-node code grew (more pruning checks) and many "nodes" now exit early without recursion — but wall-clock-to-depth dropped 28-59 % depending on position. Reference SF11 with PGO + `x86-64-bmi2` on the same machine: ~3.0 Mnps; comparing apples-to-apples by node count is less meaningful since SF's per-node work and ours differ.
+
+**Important learning from a 2026-05-12 perf investigation:** VTune's bottom-up Hotspots view is **not reliable** on our LTO release binary. Five separate optimizations were attempted based on its function-level attribution (lazy eval, TT `atomic_load` inlining, pawn cache shrink, pawn cache grow, shelter cache); **four gave zero NPS gain and one traded perf for behavior changes**. The phantom-symbol pattern appears in three distinct cases (`__rdl_alloc`, `core::sync::atomic::atomic_load`, `pawns::evaluate_color`): VTune labels code with symbols whose textual names don't reflect where cycles actually go after LTO inlining. dhat confirmed the allocator was a phantom (926 total allocs in a depth-15 search, not millions). Conclusion: don't pick perf targets from VTune Hotspots alone — corroborate via dhat for allocations, A/B isolation for hypotheses, or VTune Microarchitecture Exploration (frontend/backend/memory-bound classification) which addresses bottleneck *kind* rather than function attribution.
+
+**What we tried and reverted:**
+- **ProbCut** (SF11 search.cpp:888-929, claimed ~10 Elo). Ported with two-phase verification (zero-window qsearch then `depth - 4` regular search), capture-history scoring, TT-move-first ordering. Tried four depth gates (`>= 5, 8, 10, 12`) and two budget values (2 and 3). **No gate gave a clean win at production depth 12.** Depth-grid measurements (% time change vs RF-only baseline):
+
+  | gate | d12 best/worst | d14 best/worst | d16 best/worst | d18 best/worst |
+  |---|---|---|---|---|
+  | `>= 5` | StartPos -9 % / **Italian +35 %** | Italian -12 % / Startpos +10 % | Kiwipete -24 % / **Startpos +30 %** | Kiwipete -52 % / **Startpos +145 %** |
+  | `>= 8` | Kiwipete -9 % / Italian +26 % | Kiwipete -34 % / Italian +5 % | Kiwipete -51 % / Italian -14 % | Kiwipete -64 % / **Startpos +62 %** |
+  | `>= 10` | Italian -3 % / Kiwipete +23 % | mixed ±3 % | Kiwipete +44 % regression | Kiwipete -17 % / Startpos +43 % |
+  | `>= 12` | basically OFF at d12 (within noise) | Kiwipete -27 % only | mostly neutral | mixed |
+
+  Kiwipete (tactical) wins are large and consistent; Italian Game (mid-game entry) and Startpos (positional/balanced) are all over the map — startpos d18 is consistently bad with any non-trivial ProbCut activity, and Italian d12 is bad below gate `>= 10`. **Diagnosis: SF's actual budget is `2 + 2 * cutNode` (4 at cut nodes, 2 elsewhere); our flat 2-or-3 was wrong in both directions** — over-aggressive at non-cut nodes (where ProbCut burns budget unrecouped on captures whose subtrees won't cut) and under-aggressive at cut nodes (where 4 captures' worth of attempts would actually pay off). With cutNode plumbed (2026-05-12 session), the SF-faithful version landed successfully later that same day — see "What we tried and kept".
+
+- **Counter-move-based pruning, simplified gate** (SF11 search.cpp:1011-1014). First attempted 2026-05-12 with the simplified gate `lmr_d < 4` (dropping the statScore arm) and conservative sentinel handling (don't fire when parent move is absent — opposite of SF's "init sentinel row to -1" trick). On depth-18 startpos this **regressed** 1.97M → 5.69M nodes (+188 %). Italian Game roughly flat, Kiwipete unchanged. Second attempt removed CMP-pruned moves from the cutoff `quiets_tried.push` (matching SF's `quietsSearched` convention) — startpos got worse, not better (6.17M nodes, +213 %), so the "history-decrement feedback loop" theory was wrong. Diagnosis: without `statScore` widening the lmr-depth ceiling only in well-behaved subtrees, the gate fired uniformly across position types and caught good moves with noisy cont-hist as collateral. The full SF gate (with statScore and `(ss-1)->moveCount` widening, NO_PIECE-sentinel handling, and `quietsSearched` semantics) was successfully landed in the same 2026-05-12 session and is now in tree — see "What we tried and kept".
+- **Lazy eval, first attempt** (Stockfish 11 `evaluate.cpp:790-792`). Implementation small and ports cleanly (gated on `trace.is_none()` so teaching layer keeps full breakdowns). Problem on first attempt: early-exit changed alpha/beta cutoff decisions enough to **change move choices** at depth 18 — 137 cp score swing and different best move on Italian Game, +42 % time-to-depth regression on startpos. SF absorbed the noise because their pruning stack was tuned with lazy in mind; ours wasn't. **Successfully re-landed 2026-05-12** after statScore + cutNode + CMP + ProbCut filled in the pruning-stack gaps that were absorbing the noise in SF — see "What we tried and kept".
+- **Pawn cache size bump** (16K → 64K slots). Hit rate went 87-89 % → 90-92 % but NPS unchanged — colder L3 cache offset the fewer misses.
+- **Shelter (king-safety) hash table** (`ShelterTable` keyed by `(pawn_key, both king sqs, castling)`). Hit rate 54-65 % in middlegame, 1.4 % in K+P endgame (kings move every turn). NPS unchanged. The function I assumed was hot (`king_safety`) wasn't; VTune was showing `evaluate_color`, a different function.
+
+**What we tried and kept:**
+- **Counter-move-based pruning, full SF gate** (SF11 search.cpp:1010-1014, claimed ~20 Elo). Successfully landed 2026-05-12 after statScore + cutNode + `(ss-1)->moveCount` plumbing made the full SF gate `lmr_d < 4 + ((ss-1)->statScore > 0 || (ss-1)->moveCount == 1) && contHist[0] < 0 && contHist[1] < 0` implementable. Sentinel handling: `cmp_cont_hist_read` returns -1 when the parent-key piece is 0, mimicking SF's "fill the NO_PIECE row with -1" trick (read-side only, so other cont-hist consumers like move ordering and statScore are unaffected). CMP-pruned moves are not pushed to `quiets_tried`, matching SF's `quietsSearched` semantics. **Depth-18 measurements (nodes vs pre-CMP baseline):** startpos 4.25M → 2.67M (**-37 %**, wall -31 %), Italian Game 5.22M → 5.06M (-3 %), Kiwipete 4.38M → 3.26M (**-26 %**, wall -22 %). Depth 14 even stronger on startpos (588k → 280k, **-52 %**). **Caveat at production depth 12:** Italian Game +18 % nodes (+9 % wall), Kiwipete +15 % nodes (+13 % wall), startpos neutral. The d12 regression is modest in absolute ms (single-digit ms range) and the d14+ gains dominate; ship as-is with awareness that some short-time-control move choices will differ.
+- **Lazy eval, SF-faithful** (SF11 evaluate.cpp:790-793). Re-landed 2026-05-12 after the prior attempt's "different best move at depth 18" symptom was resolved by the new pruning stack. Port: after `score = material + imbalance + pawn_structure`, take `lazy_v = (score.mg + score.eg) / 2`; if `|lazy_v| > 1400 + non_pawn_material_total / 64`, return the side-adjusted value early (no `+TEMPO` on the lazy bail, matching SF11 line 793). Gated on `trace.is_none()` so the teaching layer always gets the full breakdown — the intentional API divergence between `evaluate()` and `evaluate_with_trace()` for lopsided positions is asserted by [`lazy_eval_diverges_from_traced_on_lopsided_positions`]. **Depth-18 wall vs pre-lazy baseline:** startpos -9 %, Italian Game **+59 %**, Kiwipete **-43 %**. Net roughly neutral on average, with high position-dependent variance. **Best moves stable across all 9 measurements** (the prior rollback was due to a different best move on Italian); score shifts <20 cp. Hypothesis from prior session validated: statScore-LMR + cutNode + CMP + ProbCut absorb lazy eval's approximation noise enough that the search doesn't flip on it.
+- **ProbCut, SF-faithful** (SF11 search.cpp:888-929, claimed ~10 Elo). Successfully landed 2026-05-12 immediately after CMP, now that `cutNode` is threaded through and the `2 + 2 * cutNode` capture-attempt budget is implementable. Gate `depth >= 5`, raisedBeta = `beta + 189 - 45 * improving`, SEE threshold = `raisedBeta - static_eval`, two-phase verification (zero-window qsearch then `depth - 4` regular search). Uses the existing `new_qs(QS_NO_CHECKS)` picker for capture iteration; we filter to actual captures/promotions clearing the SEE threshold (the SF MovePicker has a dedicated ProbCut variant; ours uses the qs variant + a search-side filter, which over-iterates a bit on bad captures but stays bounded by the budget). The TT move is passed in only if it's itself a capture/promotion. The depth gate was empirically validated at SF's `>= 5` — `>= 6` made startpos worse and Italian *much* worse despite a 2.5× Kiwipete win, so the SF default sits at the right cross-position balance. **Depth-18 measurements (nodes vs pre-ProbCut baseline):** Italian Game 5.06M → 2.08M (**-59 %**, wall -57 %), Kiwipete 3.26M → 2.99M (-8 %, wall -6 %), Startpos 2.67M → 3.51M (**+31 %**, wall +28 %). Startpos is the position type with too few captures for ProbCut to find refutations, so the verification cost is paid without reward; Italian Game and tactical-rich positions are where ProbCut shines. **At production depth 12:** Italian -10 %, Kiwipete -10 %, Startpos +4 % (net slight win on average). Combined CMP + ProbCut at depth 18 (vs the pre-CMP pre-ProbCut baseline): Startpos -11 % wall, Italian Game -56 % wall, Kiwipete -28 % wall.
+- **PGO (Profile-Guided Optimization)** — gave a measured **~10 %** NPS, behavior-preserving. Stockfish's official binaries are PGO builds (`make profile-build`); we were on plain `--release` until this. Kept as the production build flow.
+- **Reverse-futility pruning** (SF11 "child-node futility", search.cpp:831-836). Measured **1.5×–2.9× wall-clock-to-depth-18** across startpos / Italian Game / Kiwipete; 36–68 % fewer nodes. Same best move at root in every tested position. NPS down 1–6 % (extra branching per node) but dwarfed by node-count reduction. Score drift 27–55 cp from the speculative-pruning approximation, all in directions consistent with the side-to-move's POV. Gates are SF's verbatim: `!is_pv && !in_check && depth < 6 && static_eval < KNOWN_WIN && static_eval - futility_margin(depth, improving) >= beta`. The depth-4 `multi_pv_first_line_matches_single_pv_first_line` test was bumped to depth 8 where the modes still converge on the same move — the property at depth 4 was always fragile because MultiPV's slot-1..N work at lower depths populates TT entries single-PV never produces, and more aggressive pruning amplifies that small state difference into different shallow-depth choices.
+- **Pawn cache entry shrink** (Phase A): removed `breakdowns` from cached entries, entry now exactly 64 B (one cache line). Compile-time-asserted. No NPS gain but cleaner architecture and smaller memory footprint. Kept.
+- **TT atomic `#[inline(always)]`** on `TTEntry::load` / `store`. Probably already auto-inlined by LLVM. Kept as documentation of intent.
+- **`.cargo/config.toml`** with `+popcnt,+bmi1,+bmi2` target features. Confirmed via `cargo rustc --print cfg` that flags applied; no NPS gain (LLVM was likely already lowering `count_ones` to POPCNT, and PEXT path doesn't exist yet). Kept as prerequisite for any future PEXT code path.
+
+**Where the remaining ~50 % gap to SF11 lives.** After PGO (the single biggest "free" win) landed, code-level micro-optimizations have repeatedly failed to produce measurable NPS gains — the VTune-driven investigation chased five distinct hotspot phantoms before we figured out the tool was lying. The most likely sources of the remaining gap, by category:
+
+1. **Missing SF11 search features → more nodes per depth.** See the next subsection. This is where we expect the biggest wall-clock-to-depth wins now; per-node speed isn't the main lever any more.
+2. **A handful of missing per-node speedups** that *would* be measurable: PEXT, material hash, incremental `occupied()`. See further below.
+3. **Rust safety overhead** (~5–10 %): bounds checks LLVM doesn't elide. Not worth pursuing — `unsafe` audit is hostile to the codebase's culture for marginal gain.
+4. **TT layout density**: SF uses 10 B entries × 6/cluster; we use 16 B × 3/cluster. Bigger refactor; per-probe behavior is fine for our use case.
+5. **Decade of community micro-tuning**: residual 15–25 % is hand-tuning that we'd slowly accumulate, not a single big win.
+
+**Search features still to port from SF11 (would reduce nodes-per-depth).** Ordered by my confidence that they'd actually move the needle. Numbers in parentheses are SF11's own Elo estimates from `search.cpp` comments — those are upper bounds when ported in isolation; real gains depend on synergy with the surrounding pruning stack.
+
+1. **NMP correctness/strength gaps** (SF11 lines 838–886). One correctness sub-feature still missing: the `nmpMinPly` / `nmpColor` zugzwang verification search at high depth — we silently mis-prune zugzwang today. The `(ss-1)->statScore < 23397` gate is in as of 2026-05-12; the `excludedMove` interaction is moot until singular extensions become viable (and as of 2026-05-12 they're not — see "Engine strength, deferred" below).
+2. **`ttPv` / "was-in-PV" tracking** (SF11 line ~1137, `r -= 2` in LMR when the TT entry has the `is_pv` flag). Cheap to add (one bit on the TT entry, one bit in the save call, one read in LMR). Useful as a node-count saver and — important — it's the most-cited remaining prerequisite for revisiting singular extensions (see HANDOFF entry under "Engine strength, deferred").
+3. **Internal Iterative Deepening** (SF11 step 11, lines 931–939, claimed ~1 Elo). When `depth >= 7` and no TT move, run a `depth - 7` search to populate the TT, then re-probe. Tiny gain on its own; gives move ordering a TT-move to lead with at high depths.
+4. **Razoring** (SF11 step 7, lines 822–826, claimed ~1 Elo). At `depth < 2`, if `eval <= alpha - RazorMargin`, drop into qsearch. Trivial code change.
+5. **Extension refinements** (SF11 lines 1072–1090). We currently extend +1 ply on *every* check. SF11 has four extension types with subtle gates: check extension gated on `is_discovery_check_on_king || see_ge(move)` (we extend on more checks than SF and so search deeper than necessary in noisy positions); passed-pawn extension for killer moves that are advanced passed-pawn pushes; "last captures" extension for heavy-piece captures into thin material; castling extension. Net effect of the SF version: less work in random tactical noise (tighter check extension) and more work in concretely-winning lines (the targeted extensions). Mostly node-count negative on our shape, but each one is small.
+
+**Landed 2026-05-12: `statScore`-based LMR + `cutNode` plumbing + counter-move-based pruning + ProbCut + lazy eval.** SF11's per-ply `statScore` (search.cpp:1165–1186) lives on the per-ply stack and is computed for every quiet move at the LMR step. The `r` reduction is adjusted by the parent-statScore comparison (±1 ply) and by `statScore / 16384`. `cutNode` is a bool threaded through `negamax`: `+= 2` to `r` on quiet LMR at cut nodes; flipped on null-move, full-depth re-search, and ProbCut recursion; preserved on PV re-search (= false). Counter-move-based pruning (search.cpp:1010-1014) ports the full SF gate `lmr_d < 4 + ((ss-1)->statScore > 0 || (ss-1)->moveCount == 1)`. ProbCut (search.cpp:888-929) uses the `2 + 2 * cutNode` budget and two-phase verification. Lazy eval (evaluate.cpp:790-793) short-circuits the untraced eval path when material + imbalance + pawn-structure already gives a lopsided score. See "What we tried and kept" for per-position depth-grid measurements. **Combined cumulative effect on depth-18 wall-clock vs the pre-session baseline (statScore + cutNode + CMP + ProbCut + lazy eval all in):** Startpos 3003 → 2420 ms (**-19 %**), Italian Game 3571 → 2525 ms (**-29 %**), Kiwipete 2935 → 1204 ms (**-59 %**). The per-feature decomposition lives in the individual "What we tried and kept" entries above. Italian Game in particular went from being the slowest of the three positions to roughly tied.
+
+**Per-node speedups still to try (would improve NPS at fixed search shape):**
+
+- **PEXT bitboards** for slider attacks (~5–10 % on slider terms). [`.cargo/config.toml`](.cargo/config.toml) already enables `+bmi2`, so the `_pext_u64` intrinsic is available; what's missing is a PEXT slider-attack code path alongside the existing magics in [`magics.rs`](core/engine/src/magics.rs), gated on `#[cfg(target_feature = "bmi2")]` so non-x86 builds keep using magics. Behavior-preserving.
+- **Material hash table** (~3–5 % nps). [`material.rs`](core/engine/src/material.rs) flagged this internally. Be aware: the shelter-cache experiment showed that reducing per-function call count doesn't always translate to NPS gain. Verify on actual measurement, not theoretical call count.
+- **Incremental `pos.occupied()`** as a `by_all: Bitboard` field. Toggle in `remove_piece` / `put_piece`. Tiny per-call but called many times in eval / movegen / SEE. Likely actually-real gain because it removes work entirely (no cache-locality trade-off).
+
+**Important meta-point.** The four failed 2026-05-12 NPS experiments (atomic inlining, two pawn-cache resizes, shelter cache) all targeted *per-node code cost*. PGO landed ~10 % and reverse-futility landed a further 1.5–2.9× wall-clock speedup. After those, the per-node-cost lever appears mostly tapped without bigger refactors (PEXT, material hash, incremental occupied), but the **nodes-per-depth** lever is paying off enormously: reverse-futility was a single `if` block and it doubled time-to-depth on most positions. Lazy eval was originally listed as "failed" alongside the others; it re-landed successfully later in the same session once statScore-LMR + cutNode + CMP + ProbCut filled in the pruning gaps. The search-feature gaps above pull on that same lever and are the most likely source of further wall-clock gains.
+
+**Other tooling / housekeeping:**
+
+- **Multi-position bench harness.** Doesn't exist yet. Today the only way to measure NPS is `chess-tutor search --depth N <fen>` on one position at a time. SF11's `bench` runs 37 positions, single-thread, depth 13, returns aggregate `Nodes/second`. Prerequisite for any perf work whose effect is position-dependent (lazy eval being the canonical example, but the search-feature ports above are *all* position-dependent).
+- **Microarchitecture-level perf understanding.** Run VTune Microarchitecture Exploration (not Hotspots) to classify bottleneck *kind*: frontend-bound, backend-bound, memory-latency-bound, branch-mispredict-bound. Tells us what *category* of optimization would help. Worth one session before more code-level perf work.
+- **`ENGINE_TURN_NODE_CAP` review** — currently a flat 5M at [`core/cli/src/play.rs:35`](core/cli/src/play.rs). Engine play hits the cap consistently at depth 20 (5001216 nodes per move). Historically necessary because some closed positions ran 30+ minutes uncapped. Worth running a few "well-behaved" depth-20 positions uncapped to pick a number in the 15–50M range, or making the cap depth-aware.
+
+**Temporary perf-investigation infrastructure currently in tree** (clean up when no longer needed): pawn-cache `hits`/`misses` counters + `Engine::pawn_cache_stats()` accessor + CLI `pawn$:` line in `search` output; dhat-heap feature in CLI Cargo.toml + global allocator hook in main.rs.
 
 ### Engine strength, deferred
 
 - **Time management** (`core/engine/src/timeman.rs` — file doesn't exist). Today `max_time` is a simple deadline. Proper allocation needs game time + increment + moves-to-TC.
 - **Baked-in magic attack tables**. Magic numbers are searched at process start (LazyLock + xorshift); harvest from one local run, paste as `const`. Saves ~tens of ms per process start. Do when integrating the first platform app.
-- **Remaining endgame specialists** — KRKP / KRKB / KRKN / KQKR / KQKP + pawn-heavy scaling functions (`KBPsK`, `KRPKR`, etc.).
+- **Remaining endgame specialists (urgent for user-visible perf, not just strength).** Missing: KRKP / KRKB / KRKN / KQKR / KQKP + pawn-heavy scaling functions (`KBPsK`, `KRPKR`, etc.). **Observed symptom (2026-05-12):** in open endgame positions the engine drops from ~1.5 Mnps → 0.3 Mnps and node counts explode, producing 40+ second move waits — by far the worst UX issue in the engine today. Cause is twofold: (a) no specialist fires, so the full classical eval runs on every node, and (b) the search tree is wider in endgames (mobile pieces and few captures = more candidates, fewer cutoffs). Specialists return immediately on recognized material (skipping classical eval) and the better ones include positional gradients that guide search toward known winning techniques. See [memory: endgame evaluators need gradients](file:///C:/Users/steve/.claude/projects/C--Users-steve-Repos-work-chess-tutor-2/memory/feedback_endgame_evaluator_gradients.md) for the gradient-design constraint when adding new specialists.
 - **Rubinstein trap** — user wants to work out its invariants first.
+- **Singular extensions** — first attempted 2026-04-30 (~2× time-to-depth regression: 91s → 44s without it on depth-20 retrospective after 1.e4), then re-attempted 2026-05-12 after statScore, cutNode, CMP, and ProbCut all landed (these were cited as the missing synergy pieces). The 2026-05-12 attempt included the proper SF gate, half-depth verification with same `cut_node`, multi-cut early return, `excluded_move` plumbing (StackEntry field + TT-key XOR + NMP gate + skip in main loop and ProbCut), and the `singularLMR` sibling-LMR `r -= 2` bump (correctly scoped at function-level so it applies to sibling iterations after the TT-move iteration). **Result: catastrophic regression at depth 18 — Italian Game +346 % wall, Kiwipete +190 % wall, Startpos +44 % wall.** Disabling just the `singularLMR` bump (keeping only the extension) didn't help — the +1 ply on TT-move recursion and the half-depth verification search dominate the cost; siblingLMR was actually masking some of it. **Diagnosis: SF's prerequisites we still don't have include `ttPv` (TT entry's was-PV flag, used as `r -= 2` in SF's LMR), `ttHitAverage` (running average of TT hit rate, gates LMR adjustments), opp-moveCount > 14 reduction, and the escape-capture detection. Without these, sibling LMR can't be tightened enough to offset the extension cost.** Plumbing was reverted on 2026-05-12 to keep search.rs clean (the plumbing measured as zero-cost, but added clutter for a deferred feature). Both the original 2026-04-30 implementation and this 2026-05-12 retry are reproducible from the chat-log designs; revisit only after `ttPv` lands or with a more conservative singular gate (higher depth threshold, narrower singularBeta margin, lower verification depth).
 
 ### Teaching layer, deferred
 
@@ -106,6 +113,14 @@ See [`core/engine/src/analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!` d
 - **Phase 2 — cheap-pass + surprise detection** (depth-1 qsearch + SEE for every legal move).
 - **Phase 4 — signal-mask** (zero each `EvalTrace` term in turn, re-rank, surface "you'd prefer M' if you undervalued X").
 - **Phase 5 — tactic library** (general patterns: pin / fork / skewer / double attack / discovered attack / etc., as a parallel module to `traps/`).
+
+Additional teaching-layer items:
+
+- **Drill-down API for compound eval terms.** The 47-variant [`TermId`](core/engine/src/analysis/term_id.rs) enum collapses ~100+ raw SF11 signals into chess-concept buckets — the right granularity for the UI default (every term is a concept a student would recognize). But the narrator sometimes needs to explain *why* a compound term moved. Example: when `KingDanger` drops by 80 cp the user currently gets "your king is in more danger" with no causal narrative; with sub-signal access we could say "an enemy bishop now hits the long diagonal toward your king, and your knight-defender just moved away" — which is what a coach would say. Equivalent richness for `MobilityKnight` ("your knight has 3 fewer squares because the d-file got blocked"), `PassedRankBonus` ("the passed pawn advanced to the 6th rank, doubling its bonus"), etc.
+
+  Design sketch: add an opt-in finer-grained capture analogous to today's `Some(&mut trace)` pattern — say `Option<&mut DetailedTrace>` — that records the contributing sub-signals during eval. The narrator queries it only when explaining a swing whose magnitude exceeds some threshold, so the perf cost is paid only on the rare detailed-explanation path, never per node. First target should be `KingDanger`'s 16-signal blend ([`evaluate.cpp:440-460`](reference/Stockfish-sf_11/src/evaluate.cpp), see the quadratic kingDanger += chain), since that term contributes the largest single-term swings in tactical positions.
+
+  This is a teaching-layer enrichment, not a perf item. The engine already computes all these sub-signals — we just discard them at the Score aggregation step today.
 
 ### UX / platform, deferred
 

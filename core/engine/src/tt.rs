@@ -84,6 +84,18 @@ impl TTEntry {
     /// are loaded with Relaxed ordering; they may be from different
     /// saves, which is fine — the caller should validate the key match
     /// before acting on any other field.
+    ///
+    /// `#[inline(always)]` because every TT probe calls this in a tight
+    /// loop over cluster entries (millions per search). Without it,
+    /// profiling showed `core::sync::atomic::atomic_load` as a top
+    /// hot function — the wrapper wasn't getting inlined across the
+    /// function-call boundary, leaving the per-probe cost dominated
+    /// by call/return rather than the underlying `mov` instruction
+    /// the Relaxed load lowers to. With inlining, the returned
+    /// `TTData` struct is also rarely materialized on the stack —
+    /// most probes only read 1-2 of its fields, and the rest get
+    /// dead-code-eliminated at the call site.
+    #[inline(always)]
     fn load(&self) -> TTData {
         let p = self.payload.load(Ordering::Relaxed);
         let gd = self.gen_depth.load(Ordering::Relaxed);
@@ -108,6 +120,10 @@ impl TTEntry {
         }
     }
 
+    /// `#[inline(always)]` for the same reason as [`load`](Self::load):
+    /// every `save` after a search node pays this, and the call
+    /// boundary cost dominates the underlying Relaxed atomic stores.
+    #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn store(
         &self,
@@ -462,6 +478,9 @@ impl Clone for TranspositionTable {
 
 /// "How valuable is this entry, for purposes of keeping it around?"
 /// Higher means more valuable → less likely to be chosen for eviction.
+/// `#[inline(always)]` because the miss path of `probe` calls this
+/// in a per-cluster-entry loop.
+#[inline(always)]
 fn replace_score(data: &TTData, current_gen: u8) -> i32 {
     // Age = (current_gen − entry_gen) mod 256, with the low 3 bits
     // ignored because those hold the bound/PV flags. The +263 matches

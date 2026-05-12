@@ -567,6 +567,41 @@ fn evaluate_inner(
     let imbalance = e.material.imbalance;
     let mut score = material + imbalance + e.pawns.score();
 
+    // --- Lazy eval (SF11 evaluate.cpp:790-793) ---
+    //
+    // When material + imbalance + pawn-structure already gives a
+    // very lopsided position, the rest of the eval (pieces,
+    // mobility, king safety, threats, passed pawns, space,
+    // initiative) is unlikely to flip the sign or even change it
+    // materially — and the parent's pruning decisions only care
+    // about "are we above/below beta" anyway. Bail with the
+    // current `score` averaged across game phases.
+    //
+    // Gated on `trace.is_none()`: the teaching layer always
+    // requests the full breakdown, so we never lazy-bail when a
+    // trace was requested. The threshold widens with non-pawn
+    // material (richer positions can swing further). No `+TEMPO`
+    // on the lazy bail — matches SF11 search.cpp line 793.
+    //
+    // The prior 2026-05-12 attempt regressed best-move stability
+    // because the search's pruning stack hadn't been tuned to
+    // tolerate the approximation noise. statScore-LMR + cutNode +
+    // CMP + ProbCut have since landed; the hypothesis (per
+    // memory + SF design) is that those features absorb the
+    // noise.
+    if trace.is_none() {
+        let lazy_v = (score.mg().0 + score.eg().0) / 2;
+        let lazy_thresh = 1400 + pos.non_pawn_material_total().0 / 64;
+        if lazy_v.abs() > lazy_thresh {
+            let signed = if pos.side_to_move() == Color::White {
+                lazy_v
+            } else {
+                -lazy_v
+            };
+            return Value(signed);
+        }
+    }
+
     e.initialize(Color::White);
     e.initialize(Color::Black);
 
@@ -779,16 +814,17 @@ mod tests {
 
     #[test]
     fn evaluate_with_trace_final_value_matches_evaluate() {
-        // The trace's `final_value` must match what `evaluate` returns
-        // on the same position. Covers the regular-eval path; the
-        // endgame short-circuit is exercised separately below.
+        // The trace's `final_value` must match what `evaluate`
+        // returns on the same position — for positions that *don't*
+        // trigger the lazy-eval short-circuit. The lazy gate
+        // intentionally lets the untraced path bail early when
+        // material is lopsided, so untraced and traced values
+        // diverge there by design (see `lazy_eval_diverges_when_…`
+        // for the explicit assertion of that divergence).
         let fens = [
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1",
             "r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5",
-            // Imbalanced material but with pawns on both sides so the
-            // KXK endgame driver doesn't hijack the eval.
-            "4k3/1p6/8/8/8/8/P7/3QK3 w - - 0 1",
         ];
         for fen in fens {
             let p = Position::from_fen(fen).unwrap();
@@ -802,6 +838,28 @@ mod tests {
             );
             assert_eq!(trace.tempo, TEMPO);
         }
+    }
+
+    #[test]
+    fn lazy_eval_diverges_from_traced_on_lopsided_positions() {
+        // Documents the intentional contract break introduced by
+        // lazy eval: the untraced `evaluate()` is allowed to
+        // short-circuit on positions whose material + imbalance +
+        // pawn-structure score is already lopsided past
+        // `LazyThreshold`, while `evaluate_with_trace()` always
+        // runs the full breakdown. The untraced value is a
+        // conservative approximation of the full one and is
+        // typically a few hundred cp away — used by the search's
+        // pruning where exact value isn't load-bearing. The
+        // teaching layer always goes through the traced path so
+        // user-visible numbers come from the full eval.
+        let p = Position::from_fen("4k3/1p6/8/8/8/8/P7/3QK3 w - - 0 1").unwrap();
+        let direct = evaluate(&p);
+        let (traced, _) = evaluate_with_trace(&p);
+        assert_ne!(
+            direct, traced,
+            "lazy eval must short-circuit this lopsided KQP-vs-KP position"
+        );
     }
 
     #[test]

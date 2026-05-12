@@ -14,3 +14,10 @@ chess-tutor-engine = { path = "../engine" }
 chess-tutor-narration = { path = "../narration" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+# Heap profiler. Disabled by default; enable via `--features dhat-heap`
+# to get per-source-line allocation attribution. Adds ~30 % runtime
+# overhead and writes `dhat-heap.json` next to the binary on exit.
+dhat = { version = "0.3", optional = true }
+
+[features]
+dhat-heap = ["dep:dhat"]

@@ -1,0 +1,14 @@
+# Enable POPCNT, BMI1 (TZCNT/BLSI/BLSR), and BMI2 (PEXT) for x86_64
+# builds. Without these, LLVM falls back to software popcount and the
+# `_pext_u64` intrinsic is unavailable, which closes off the PEXT
+# slider-attack path on the deferred perf docket.
+#
+# Scoped to `cfg(target_arch = "x86_64")` so it applies to every x86_64
+# triple (Windows MSVC, Linux GNU, macOS) without being passed to ARM
+# targets — aarch64 (M-series Mac, iOS, Android arm64) has hardware
+# popcount as a baseline ARMv8 instruction, so no flag is needed there.
+#
+# Floor: requires Intel Haswell (2013) / AMD Excavator (2015) or newer.
+# Any CPU running a chess tutor today clears that bar comfortably.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=+popcnt,+bmi1,+bmi2"]

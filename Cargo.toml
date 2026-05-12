@@ -15,10 +15,20 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-# Release-equivalent optimisations but with PDBs so VTune / Superluminal /
-# WPA can show Rust function names and line numbers. Don't use for
-# shipping or benchmarking — LTO is weaker here and binaries are bigger.
+# Release-fast but VTune/Superluminal/WPA-friendly: keeps `opt-level = 3`
+# but disables LTO and unifies-codegen-units so each function survives as
+# a distinct symbol with intact line numbers in the PDB. This is what
+# lets a sampling profiler attribute hot samples to specific source
+# lines instead of "somewhere in this giant LTO-merged blob."
+#
+# The trade-off: ~15-25 % slower than `release` because cross-crate
+# inlining is gone. Use this profile for *finding* hotspots; use
+# `release` for *measuring* the impact of fixes. Don't ship binaries
+# from this profile.
 [profile.profiling]
 inherits = "release"
 debug = true
 strip = false
+lto = false
+codegen-units = 256
+incremental = false
