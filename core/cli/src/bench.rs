@@ -21,13 +21,22 @@ use chess_tutor_engine::movegen::legal_moves_vec;
 
 use crate::bench_fens::{parse_bench_entry, DEFAULT_BENCH_FENS};
 
-/// User-facing args, mirroring SF11's positional argument order.
+/// User-facing args, mirroring SF11's positional argument order
+/// (`tt_mb threads limit fen_file limit_type`), plus a
+/// non-SF-compatible flag for per-position state isolation.
 pub struct BenchArgs {
     pub tt_mb: usize,
     pub threads: usize,
     pub limit: u64,
     pub fen_file: String,
     pub limit_type: String,
+    /// When `true`, call `engine.new_game()` between every position
+    /// so each position is searched from a clean TT / history /
+    /// pawn-cache state. Off by default to match SF's bench
+    /// (single `ucinewgame` at the start). See [`crate::main`]'s
+    /// `Bench::new_game_between_positions` doc-comment for why this
+    /// matters at large TT sizes.
+    pub new_game_between_positions: bool,
 }
 
 pub fn run(args: BenchArgs) -> Result<()> {
@@ -48,11 +57,16 @@ pub fn run(args: BenchArgs) -> Result<()> {
     let params_template = build_params(&args.limit_type, args.limit)?;
 
     println!(
-        "bench: {} positions, TT = {} MB, limit = {} {}",
+        "bench: {} positions, TT = {} MB, limit = {} {}{}",
         positions.len(),
         args.tt_mb,
         args.limit,
         args.limit_type,
+        if args.new_game_between_positions {
+            ", new-game-between-positions"
+        } else {
+            ""
+        },
     );
 
     let mut engine = Engine::new(args.tt_mb);
@@ -60,12 +74,18 @@ pub fn run(args: BenchArgs) -> Result<()> {
     // between positions — so TT / history learning carries over across
     // the position list. Mirror that here (`new_game` is a no-op on a
     // freshly-built engine but we call it for clarity of intent).
+    // When `new_game_between_positions` is set the per-position loop
+    // re-issues the clear; the start-of-bench call is still useful as
+    // a no-op intent marker.
     engine.new_game();
 
     let started = Instant::now();
     let mut total_nodes: u64 = 0;
 
     for (i, entry) in positions.iter().enumerate() {
+        if args.new_game_between_positions && i > 0 {
+            engine.new_game();
+        }
         let mut pos = parse_bench_entry(entry)
             .with_context(|| format!("parsing bench entry {}", i + 1))?;
         let params = params_template.clone();

@@ -153,6 +153,17 @@ enum Command {
         /// supported yet.
         #[arg(default_value = "depth")]
         limit_type: String,
+        /// Call `engine.new_game()` between every position, clearing
+        /// the TT, history, and pawn cache. Off by default to match
+        /// SF's behaviour (one `ucinewgame` at the start of bench,
+        /// TT carries across positions). Useful for isolating
+        /// per-position performance from cross-position TT pollution
+        /// — at large TT sizes (e.g. 128 MB), entries from earlier
+        /// bench positions can displace deeper entries the later
+        /// positions want, causing dramatic per-position regressions
+        /// vs. the small-TT case.
+        #[arg(long)]
+        new_game_between_positions: bool,
     },
     /// Interactive REPL. Human enters SAN or UCI; engine replies on
     /// its turn.
@@ -382,6 +393,7 @@ fn main() -> Result<()> {
             limit,
             fen_file,
             limit_type,
+            new_game_between_positions,
         } => {
             bench::run(bench::BenchArgs {
                 tt_mb,
@@ -389,6 +401,7 @@ fn main() -> Result<()> {
                 limit,
                 fen_file,
                 limit_type,
+                new_game_between_positions,
             })?;
         }
         Command::Play {
