@@ -6,8 +6,11 @@
 //!     chess-tutor search  [FEN]   — run a search; print PV + score + leaf trace
 //!     chess-tutor opening [FEN]   — identify the opening by ECO + name
 //!     chess-tutor play    [flags] — interactive game (human vs engine by default)
+//!     chess-tutor bench   [args]  — multi-position perf benchmark (SF11-compatible args)
 
 mod analysis_report;
+mod bench;
+mod bench_fens;
 mod board;
 mod eval_report;
 mod play;
@@ -121,6 +124,35 @@ enum Command {
         /// total. Higher values show more detail.
         #[arg(long, default_value_t = 75.0)]
         top_percent: f32,
+    },
+    /// Multi-position search benchmark. Argument order and defaults
+    /// mirror Stockfish 11's `bench` command: `tt_mb threads limit
+    /// fen_file limit_type`, defaults `16 1 13 default depth`. Output
+    /// finishes with an SF-style `Total time / Nodes searched /
+    /// Nodes/second` aggregate so the numbers can be compared
+    /// apples-to-apples against `stockfish bench`.
+    Bench {
+        /// Transposition-table size in MB. SF default is 16.
+        #[arg(default_value_t = 16)]
+        tt_mb: usize,
+        /// Number of search threads. Only 1 is supported today (the
+        /// engine is single-thread); the arg exists for SF parity.
+        #[arg(default_value_t = 1)]
+        threads: usize,
+        /// Limit value — interpreted by `limit_type`. With the default
+        /// `depth`, this is the maximum iterative-deepening depth in
+        /// plies (SF default is 13).
+        #[arg(default_value_t = 13)]
+        limit: u64,
+        /// `default` for the built-in 45-position list (mirrored from
+        /// SF11), or a path to a file with one bench entry per line
+        /// (same `<fen> [moves uci ...]` shape SF accepts).
+        #[arg(default_value = "default")]
+        fen_file: String,
+        /// `depth` (default) or `nodes`. `movetime` / `perft` are not
+        /// supported yet.
+        #[arg(default_value = "depth")]
+        limit_type: String,
     },
     /// Interactive REPL. Human enters SAN or UCI; engine replies on
     /// its turn.
@@ -343,6 +375,21 @@ fn main() -> Result<()> {
                 println!();
                 print!("{}", render_debug_trajectory(&pos, &lines));
             }
+        }
+        Command::Bench {
+            tt_mb,
+            threads,
+            limit,
+            fen_file,
+            limit_type,
+        } => {
+            bench::run(bench::BenchArgs {
+                tt_mb,
+                threads,
+                limit,
+                fen_file,
+                limit_type,
+            })?;
         }
         Command::Play {
             fen,
