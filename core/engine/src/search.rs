@@ -154,6 +154,13 @@ pub(crate) struct StackEntry {
     /// widen the LMR-depth threshold when the parent is on its top
     /// quiet (typically the TT move, which carries strong signal).
     pub move_count: u32,
+    /// Kind of the piece this ply's move captured, if any. Read by
+    /// the child node's "last captures" extension (SF11 search.cpp:1084):
+    /// SF accesses `pos.captured_piece()` from the child's `StateInfo`,
+    /// which after the parent's `do_move` reflects the move that
+    /// brought the child here. We propagate it explicitly through the
+    /// stack so the child doesn't have to re-derive it.
+    pub captured_piece_kind: Option<crate::types::PieceType>,
 }
 
 impl StackEntry {
@@ -165,6 +172,7 @@ impl StackEntry {
         static_eval: Value::NONE,
         stat_score: 0,
         move_count: 0,
+        captured_piece_kind: None,
     };
 }
 
@@ -818,6 +826,7 @@ impl<'a> Search<'a> {
             self.stack[STACK_SENTINEL + ply].to_idx = 0;
             self.stack[STACK_SENTINEL + ply].was_capture = false;
             self.stack[STACK_SENTINEL + ply].in_check = false;
+            self.stack[STACK_SENTINEL + ply].captured_piece_kind = None;
 
             let saved = pos.do_null_move();
             self.tt.prefetch(pos.key());
@@ -960,6 +969,8 @@ impl<'a> Search<'a> {
                 self.stack[STACK_SENTINEL + ply].to_idx = mv.to().index() as u8;
                 self.stack[STACK_SENTINEL + ply].in_check = in_check;
                 self.stack[STACK_SENTINEL + ply].was_capture = true;
+                self.stack[STACK_SENTINEL + ply].captured_piece_kind =
+                    state.captured.map(|p| p.kind());
 
                 self.path_keys.push(pos.key());
                 let child_prev = Some((moved_piece.kind(), mv.to()));
@@ -1046,6 +1057,38 @@ impl<'a> Search<'a> {
         let mut captures_tried = crate::movegen::MoveList::new();
         let mut raised_alpha = false;
 
+        // --- Per-node precomputes for the SF11 extension chain
+        // (search.cpp:1072-1090) ---
+        //
+        // 1. Enemy king's blockers, used by the check extension to
+        //    distinguish discovery checks from direct ones. A move
+        //    from any square in this bitboard that lands on a check
+        //    is a discovery check (the discoverer is already aimed
+        //    at the king and the moving piece unblocks the line);
+        //    those we extend unconditionally. Direct non-discovery
+        //    checks fall back to a SEE filter to drop SEE-negative
+        //    sac-checks that the search refutes trivially.
+        //
+        // 2. Last-captures node-eligibility. The extension fires
+        //    when the parent's move was a heavy capture (≥ minor in
+        //    endgame value) AND the position is now in thin material
+        //    (≤ 2 rooks of non-pawn material). It widens *every*
+        //    move at the current node by 1 ply, so it's a node-level
+        //    precompute, not per-move. SF reads the captured piece
+        //    via `pos.captured_piece()` (the child sees the parent's
+        //    move via StateInfo); we read the parent's
+        //    `captured_piece_kind` directly off the stack.
+        //
+        // Both are invariant across the move loop's iterations (we
+        // undo each move), so a single compute up front is fine.
+        let us_at_node = pos.side_to_move();
+        let enemy_blockers = pos.blockers_for_king(!us_at_node);
+        let parent_captured = self.stack[STACK_SENTINEL + ply - 1].captured_piece_kind;
+        let parent_was_heavy_capture =
+            matches!(parent_captured, Some(pt) if Value::eg_of_piece(pt).0 > Value::PAWN_EG.0);
+        let last_captures_node_eligible =
+            parent_was_heavy_capture && pos.non_pawn_material_total().0 <= 2 * Value::ROOK_MG.0;
+
         loop {
             let mv = picker.next_move(
                 pos,
@@ -1073,6 +1116,20 @@ impl<'a> Search<'a> {
             // find this move's sub-table.
             let moved_piece = pos.moved_piece(mv);
             let moved_pt = moved_piece.kind();
+
+            // Pre-move snapshots for the extension chain. SEE reads
+            // `piece_on(from)`, so it must run before `do_move`. The
+            // discovery test is a single bitboard intersection
+            // against the cached `enemy_blockers` snapshot.
+            // `is_advanced_pawn_push` and `is_first_killer` are
+            // static facts about the move; cheaper to capture once
+            // here than re-derive in the extension chain.
+            let from_was_enemy_blocker = (enemy_blockers & mv.from()).any();
+            let see_nonneg = pos.see_ge(mv, Value::ZERO);
+            let is_advanced_pawn_push = moved_pt == crate::types::PieceType::Pawn
+                && (mv.to().from_perspective(us_at_node).rank() as u8)
+                    >= (crate::types::Rank::R6 as u8);
+            let is_first_killer = mv == self.killers[ply][0];
 
             // Legality check via do/undo. `pos.do_move` assumes pseudo-
             // legal input; the picker guarantees that.
@@ -1195,7 +1252,64 @@ impl<'a> Search<'a> {
                 self.tt.prefetch(pos.key());
             }
 
-            let extension = if gives_check { 1 } else { 0 };
+            // --- Extension chain (SF11 search.cpp:1072-1090) ---
+            //
+            // Four predicates, mutually-exclusive `else if` for the
+            // first three; castling is a separate `if` at the bottom
+            // that overrides any prior result. Each fires `+1 ply`.
+            // Singular extensions belong here too in SF's full
+            // structure but aren't ported yet (see HANDOFF).
+            //
+            // CHECK EXTENSION: previously blanket — every check got
+            // +1 ply. SF's gate is tighter: only extend when the
+            // check is either a discovery (moving piece was a
+            // blocker for the enemy king, so its departure unblocks
+            // a slider check) OR has SEE >= 0 (the checking piece
+            // won't simply lose material to a recapture). The
+            // filtered-out moves are SEE-negative sac-checks that
+            // were noise.
+            //
+            // ISOLATED-ADDITION CAVEAT: A/B isolation (same session)
+            // showed each of the other three extensions (passed-pawn,
+            // last-captures, castling) is net-negative in isolation
+            // on top of check-gating, sometimes catastrophically so
+            // (last-captures alone on pawn-race endgames runs >20 min
+            // because every capture drops NPM below 2*ROOK_MG and
+            // extends the whole subtree). But all four *together*
+            // are net-positive at depth 13 (9× vs blanket-check
+            // baseline) and depth 14 (6×). The interaction matters:
+            // when only one extension fires per node, its over-
+            // extension on pathological positions isn't crowded out
+            // by competing extensions firing elsewhere. Don't try to
+            // simplify by removing one — the per-extension results
+            // are misleading.
+            let mut extension: i32 = 0;
+            if gives_check && (from_was_enemy_blocker || see_nonneg) {
+                extension = 1;
+            } else if is_first_killer
+                && is_advanced_pawn_push
+                && pos.pawn_passed(us_at_node, mv.to())
+            {
+                // Passed-pawn extension: ply's killer is an advanced
+                // passed-pawn push. Killers are the ply-stable
+                // refutation moves; if the move that already worked
+                // is itself a race-changing pawn push, +1 ply is
+                // worth confirming the race.
+                extension = 1;
+            } else if last_captures_node_eligible {
+                // Last-captures: parent's move was a heavy capture
+                // and we're in thin material (≤ 2 rooks). Every move
+                // at this node gets +1 to find concrete endgame
+                // technique. Node-level (computed once outside the
+                // loop), not move-level.
+                extension = 1;
+            }
+            // Castling override: SF's bottom-of-chain `if` (line 1089)
+            // — castling is a one-shot structural move that re-shapes
+            // king safety; an extra ply of verification is worth it.
+            if mv.kind() == crate::types::MoveKind::Castling {
+                extension = 1;
+            }
             let new_depth = depth - 1 + extension;
 
             self.path_keys.push(pos.key());
@@ -1209,6 +1323,8 @@ impl<'a> Search<'a> {
             self.stack[STACK_SENTINEL + ply].to_idx = mv.to().index() as u8;
             self.stack[STACK_SENTINEL + ply].in_check = in_check;
             self.stack[STACK_SENTINEL + ply].was_capture = is_capture;
+            self.stack[STACK_SENTINEL + ply].captured_piece_kind =
+                state.captured.map(|p| p.kind());
 
             let child_prev = Some((moved_pt, mv.to()));
 
@@ -2441,10 +2557,11 @@ mod tests {
         // test requires. Each time a new pruning feature lands the
         // convergence depth bumps; the test sits one step *above*
         // the divergence boundary, not at it. History: depth 4 →
-        // 8 (reverse-futility) → 11 (statScore-LMR) → 13 (ProbCut).
+        // 8 (reverse-futility) → 11 (statScore-LMR) → 13 (ProbCut)
+        // → 14 (extension refinements).
         let mut pos = Position::startpos();
-        let single = multi_pv_search(&mut pos, 13, 1);
-        let multi = multi_pv_search(&mut pos, 13, 5);
+        let single = multi_pv_search(&mut pos, 14, 1);
+        let multi = multi_pv_search(&mut pos, 14, 5);
         assert!(!single.is_empty());
         assert!(!multi.is_empty());
         assert_eq!(
