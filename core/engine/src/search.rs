@@ -49,6 +49,12 @@ const STOP_CHECK_INTERVAL: u64 = 4096;
 const VERBOSE_TICK_INTERVAL: u64 = 500_000;
 
 /// Aspiration-window start width. Search widens on fail-high/fail-low.
+/// Kept at our pre-SF11-port value of 17 because SF11's score-scaled
+/// `21 + |prev|/256` initial regressed FEN 26 d=13 by ~3× (138 k →
+/// 447 k); the wider initial costs more in alpha-beta inefficiency
+/// than it saves in avoided re-searches. SF11's depth-reduction
+/// on consecutive fail-highs (see `aspiration_search`) is the
+/// load-bearing piece of the port, not the delta tuning.
 const ASPIRATION_DELTA: i32 = 17;
 
 /// Side-to-move-asymmetric bias added to every static evaluation during
@@ -599,19 +605,38 @@ impl<'a> Search<'a> {
             beta = Value((prev_score.0 + delta).min(Value::INFINITE.0));
         }
 
-        let mut attempt: u32 = 0;
+        // SF11 search.cpp:450, 453, 485, 492 — consecutive fail-highs
+        // accumulate `failed_high_cnt`, and each re-search runs at
+        // `max(1, rootDepth - failed_high_cnt)` instead of full depth.
+        // Reset to 0 on every fail-low (and at the start of every new
+        // iterative-deepening depth, since we re-enter with cnt=0).
+        // The fail-high re-search is what gets cheaper; the search
+        // returns a slightly shallower PV when the chain ends on a
+        // reduced-depth iteration. The reduction only applies to
+        // fail-highs because fail-low chains converge naturally as
+        // alpha tracks the actually-returned score.
+        //
+        // We deliberately keep our existing `ASPIRATION_DELTA = 17`
+        // initial and `delta *= 2` growth rather than SF11's
+        // `21 + |prev|/256` initial and `delta + delta/4 + 5` growth.
+        // SF11's tuning regressed FEN 26 d=13 ~3× (138k → 447k) on
+        // our codebase — the wider initial window costs us more in
+        // alpha-beta inefficiency than it saves in avoided re-searches.
+        // Aggressive 2× growth + depth-reduction is the right local
+        // optimum.
+        let mut failed_high_cnt: i32 = 0;
         loop {
-            attempt += 1;
+            let adjusted_depth = (depth - failed_high_cnt).max(1);
             if self.verbose_progress {
                 eprintln!(
-                    "[search] aspiration depth={depth} attempt={attempt} window=[{}, {}] delta={delta}",
+                    "[search] aspiration depth={depth} adj_depth={adjusted_depth} window=[{}, {}] delta={delta}",
                     alpha.0, beta.0,
                 );
             }
 
             // Root is a PV node, and SF's invariant is `!(PvNode &&
             // cutNode)` — so we always enter with `cut_node = false`.
-            let score = self.negamax(pos, alpha, beta, depth, 0, true, true, None, false);
+            let score = self.negamax(pos, alpha, beta, adjusted_depth, 0, true, true, None, false);
 
             if self.aborted {
                 return score;
@@ -626,7 +651,7 @@ impl<'a> Search<'a> {
                     "OK"
                 };
                 eprintln!(
-                    "[search] aspiration depth={depth} attempt={attempt} result={outcome} score={}",
+                    "[search] aspiration depth={depth} result={outcome} score={}",
                     score.0,
                 );
             }
@@ -634,18 +659,17 @@ impl<'a> Search<'a> {
             if score <= alpha {
                 beta = Value((alpha.0 + beta.0) / 2);
                 alpha = Value((score.0 - delta).max(-Value::INFINITE.0));
-                delta = (delta * 2).max(delta + 1);
+                failed_high_cnt = 0;
             } else if score >= beta {
                 beta = Value((score.0 + delta).min(Value::INFINITE.0));
-                delta = (delta * 2).max(delta + 1);
+                failed_high_cnt += 1;
             } else {
                 return score;
             }
 
-            if delta > 500 {
-                alpha = -Value::INFINITE;
-                beta = Value::INFINITE;
-            }
+            delta = (delta * 2).max(delta + 1);
+
+            debug_assert!(alpha >= -Value::INFINITE && beta <= Value::INFINITE);
         }
     }
 

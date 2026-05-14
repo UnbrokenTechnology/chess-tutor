@@ -37,11 +37,12 @@ Per-search or per-engine allocations are fine. **Per-node allocations are not** 
 
 ## Next up: close the remaining bench gap to SF11
 
-Four changes landed 2026-05-14:
+Five changes landed 2026-05-14:
 1. **Lever 1: universal `moveCountPruning`** tamed the FEN 26 cold d13 cliff (484 M → 226 k).
 2. **Lever 2b: SF11 lmrDepth-gated quiet futility** collapsed the residual deep-tail problem at d14 (104 M → 20.5 M aggregate, 5× fewer nodes; FEN 40 alone 22 M → 466 k, 47× faster).
 3. **Unified SF11 LMR formula** replaced our `log₂·log₂/2` base with SF11's `int(23.4·ln(i))` table form — direct response to FEN 19 regressing 290× under raw Lever 2b because our smaller `lmrDepth` made the SF11 `< 6` gate fire in nodes SF11 wouldn't fire on. With matched LMR base, the gate behaves as SF11 intended.
-4. **SF11 qsearch depth tracking + recapture-only mode** — qsearch now takes `Depth`, decrements by 1 each recursive call (SF11 search.cpp:1522), and at `Depth::QS_RECAPTURES (-5)` the picker filters to moves landing on the parent's to-sq (search.cpp:1459). Previously qsearch ignored depth and ran captures to `MAX_PLY`. This was the missing mechanism behind FEN 19 d=20 (391 M → 7.8 M, 50× faster) and FEN 41 d=14 16 MB (44 M → 1.45 M, 30× faster). Aggregate d=14 went 20.5 M → 14.2 M.
+4. **SF11 qsearch depth tracking + recapture-only mode** — qsearch now takes `Depth`, decrements by 1 each recursive call (SF11 search.cpp:1522), and at `Depth::QS_RECAPTURES (-5)` the picker filters to moves landing on the parent's to-sq (search.cpp:1459). FEN 19 d=20 391 M → 7.8 M (50×); FEN 41 d=14 16 MB 44 M → 1.45 M (30×).
+5. **SF11 aspiration depth-reduction on fail-high** (search.cpp:453) — consecutive fail-highs reduce the re-search depth via `adjusted_depth = max(1, depth - failed_high_cnt)`. FEN 20 d=20 36.8 M → 10 M (3.7×); full d=20 bench 145 s → 116 s. SF11's `21 + |prev|/256` initial delta and `delta + delta/4 + 5` growth both regressed FEN 26 d=13 by 3× on our codebase — kept our existing `delta=17` + `2×` growth; depth-reduction is the only load-bearing piece of the aspiration port.
 
 ### Where we stand vs SF11
 
@@ -50,20 +51,27 @@ Four changes landed 2026-05-14:
 | **SF11 (46 FENs, 128 MB shared TT)** | — | — | 6.93 M | 2.2 s |
 | **Us pre-Lever-2b (16 MB cold per pos)** | 17.5 M | 5.4 s | 104.2 M | 21.1 s |
 | **Us Lever 2b raw (16 MB cold per pos)** | 10.5 M | 4.1 s | 20.5 M | 7.2 s |
-| **Us unified-SF11-LMR (16 MB cold per pos)** | 8.7 M | 3.9 s | 14.2 M (this came from qs-depth, not LMR) | — |
-| **Us qs-depth + unified-LMR (16 MB cold per pos)** | **8.4 M** | **3.8 s** | **14.2 M** | **6.4 s** |
-| **Us qs-depth + unified-LMR (128 MB cold per pos)** | — | — | **14.4 M** | **7.3 s** |
+| **Us qs-depth + unified-LMR (16 MB cold per pos)** | 8.4 M | 3.8 s | 14.2 M | 6.4 s |
+| **Us aspiration-depth-reduce (16 MB cold per pos)** | **8.4 M** | **3.8 s** | **12.0 M** | **5.2 s** |
+| **Us aspiration-depth-reduce (128 MB cold per pos)** | — | — | **13.1 M** | **6.5 s** |
 
-NPS dropped slightly with qs-depth (2.2 Mnps at d=14 vs 2.8 Mnps before) — the per-qsearch-frame work is slightly higher but vastly fewer frames are visited. The residual gap to SF11 is now ~2× nodes / ~3× time, down from 3× / 3× pre-qs-depth.
+Full 45-pos d=20 / 128 MB cold: **115.9 s** (was 145.7 s reported by user pre-aspiration-fix, was multi-hour pre-Lever-1). The d=20 worst-position list has flattened: largest position is now FEN 1 (28.9 M / 17.5 s) at d=20, which is a real-search startpos cost rather than a pathology.
+
+NPS still ~2.0 Mnps (vs SF11's 3.1 Mnps). That gap is the remaining 30%-or-so headroom — diffuse across all positions, not concentrated in any one outlier.
 
 ### Known residual outliers
 
-| FEN | Pre-Lever-2b d=20 (128 MB) | Unified SF11 LMR d=20 (128 MB) | qs-depth d=20 (128 MB) |
-|---|---|---|---|
-| 19 (K+R-vs-K+R race w/ rep history) | 3.62 M | 392 M (108× regression) | **7.8 M (2.2× vs SF11 baseline)** |
-| 41 (K+2R vs K+Q+p) d=14 | not measured | 44 M at 16 MB, 8.3 M at 128 MB | **1.45 M / 1.46 M (TT-independent)** |
+The "pathological outlier" class is essentially gone. Per-position d=20 / 128 MB cold (post-aspiration-depth-reduce):
 
-Both major outliers are essentially solved by the qs-depth port. Remaining gap is uniform across positions — no single FEN dominates anymore. The next ~30% on aggregate would come from features still deferred: see "Search features still to port".
+| FEN | Description | d=20 nodes | d=20 time |
+|---|---|---|---|
+| 1 | startpos | 28.9 M | 17.5 s |
+| 41 | K+2R vs K+Q+p | 23.8 M | 9.7 s |
+| 19 | K+R race w/ rep | 10.9 M | 3.3 s |
+| 12 | middlegame | 10.5 M | 6.5 s |
+| 20 | K+Q+4p endgame | 10.0 M | 3.7 s |
+
+These all cluster in the 10–30 M range — healthy deep-search costs, not chain blowups. FEN 1 being the new worst is surprising but it's startpos at d=20, which is inherently expensive (broad PV).
 
 ### Outlier-position breakdown (d14, post-Lever-1)
 
@@ -75,6 +83,18 @@ Most of the d14 overshoot lives in three positions. From the user's last 45-pos 
 These are all **horizon-stretching endgames** with long forced sequences that include checks. The Lever-1 win on FEN 26 at d13 was that universal LMP slices off responding quiets in the check chain; at d20 the chain is just long enough that even with universal LMP, the residual node count is hundreds of millions. They're qualitatively the same shape as the prior FEN-26 cliff but stretched out over more depth.
 
 ### Levers tested
+
+**SF11 aspiration depth-reduction-on-fail-high (LANDED 2026-05-14).** Ported the `failed_high_cnt` mechanism from SF11 search.cpp:450, 453, 485, 492. Consecutive fail-highs accumulate the counter; each re-search runs at `max(1, rootDepth - failed_high_cnt)`. The reduction resets to 0 on every fail-low. The result is that fail-high chains are progressively cheaper — a 6-attempt fail-high cycle at d=20 (previously all at d=20) now runs at d=20, 19, 18, 17, 16, 16 — converging on a shallower-but-still-useful PV instead of paying 6× full depth.
+
+| | nodes / time before | nodes / time after | Δ |
+|---|---|---|---|
+| FEN 20 d=20 / 128 MB cold | 36.8 M / 13.3 s | **10.0 M / 3.7 s** | **−73%, 3.7× faster** |
+| Full d=20 bench (45-pos / 128 MB) | ~146 s (pre-aspiration) | **115.9 s** | **−21%** |
+| 45-pos d=14 / 16 MB | 14.2 M / 6.4 s | **12.0 M / 5.2 s** | −15% nodes, −19% time |
+| 45-pos d=14 / 128 MB | 14.4 M / 7.3 s | **13.1 M / 6.5 s** | −9% nodes, −11% time |
+| FEN 26 d=13 / 16 MB | 138 k | 135 k | unchanged |
+
+SF11's full aspiration tuning (initial delta `21 + |prev|/256`, growth `delta + delta/4 + 5`) was also tested but regressed FEN 26 d=13 by ~3× (138 k → 447 k) — the wider initial costs us more in alpha-beta inefficiency than it saves in re-searches. Kept our existing `delta=17` + `2×` growth; depth-reduction is the only piece that paid off in our codebase. The trade-off: when an aspiration chain converges via depth-reduction, the returned PV is from a shallower search than `depth`. We're reporting `depth=20` even when the converged search ran at `depth=16`. SF11 has this exact same behaviour; it's a deliberate accuracy-vs-time trade.
 
 **SF11 qsearch depth tracking + recapture-only (LANDED 2026-05-14).** Ported SF11 search.cpp:1350 (qsearch signature takes `Depth`) + 1522 (recurse with `depth - 1`) + 1459 (recapture_square = parent move's to-sq). Picker at `depth <= QS_RECAPTURES (-5)` filters to captures landing on recapture_square. Previously our qsearch ignored depth, so capture chains in K+R-vs-K+R-with-passers and K+2R-vs-K+Q+p endgames ran all the way to `MAX_PLY = 64`. The deep-ply explosion we'd attributed to negamax extensions was actually qsearch's fault.
 
