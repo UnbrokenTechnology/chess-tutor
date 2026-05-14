@@ -37,10 +37,11 @@ Per-search or per-engine allocations are fine. **Per-node allocations are not** 
 
 ## Next up: close the remaining bench gap to SF11
 
-Three changes landed 2026-05-14:
+Four changes landed 2026-05-14:
 1. **Lever 1: universal `moveCountPruning`** tamed the FEN 26 cold d13 cliff (484 M → 226 k).
 2. **Lever 2b: SF11 lmrDepth-gated quiet futility** collapsed the residual deep-tail problem at d14 (104 M → 20.5 M aggregate, 5× fewer nodes; FEN 40 alone 22 M → 466 k, 47× faster).
 3. **Unified SF11 LMR formula** replaced our `log₂·log₂/2` base with SF11's `int(23.4·ln(i))` table form — direct response to FEN 19 regressing 290× under raw Lever 2b because our smaller `lmrDepth` made the SF11 `< 6` gate fire in nodes SF11 wouldn't fire on. With matched LMR base, the gate behaves as SF11 intended.
+4. **SF11 qsearch depth tracking + recapture-only mode** — qsearch now takes `Depth`, decrements by 1 each recursive call (SF11 search.cpp:1522), and at `Depth::QS_RECAPTURES (-5)` the picker filters to moves landing on the parent's to-sq (search.cpp:1459). Previously qsearch ignored depth and ran captures to `MAX_PLY`. This was the missing mechanism behind FEN 19 d=20 (391 M → 7.8 M, 50× faster) and FEN 41 d=14 16 MB (44 M → 1.45 M, 30× faster). Aggregate d=14 went 20.5 M → 14.2 M.
 
 ### Where we stand vs SF11
 
@@ -49,21 +50,20 @@ Three changes landed 2026-05-14:
 | **SF11 (46 FENs, 128 MB shared TT)** | — | — | 6.93 M | 2.2 s |
 | **Us pre-Lever-2b (16 MB cold per pos)** | 17.5 M | 5.4 s | 104.2 M | 21.1 s |
 | **Us Lever 2b raw (16 MB cold per pos)** | 10.5 M | 4.1 s | 20.5 M | 7.2 s |
-| **Us unified-SF11-LMR (16 MB cold per pos)** | **8.7 M** | **3.9 s** | 57.8 M | 14.1 s |
-| **Us unified-SF11-LMR (128 MB cold per pos)** | — | — | **22.1 M** | **9.5 s** |
+| **Us unified-SF11-LMR (16 MB cold per pos)** | 8.7 M | 3.9 s | 14.2 M (this came from qs-depth, not LMR) | — |
+| **Us qs-depth + unified-LMR (16 MB cold per pos)** | **8.4 M** | **3.8 s** | **14.2 M** | **6.4 s** |
+| **Us qs-depth + unified-LMR (128 MB cold per pos)** | — | — | **14.4 M** | **7.3 s** |
 
-NPS is comparable to SF11 (~2.8 vs ~3.1 Mnps); the residual gap is **TT amortisation** (SF runs shared-TT, we run cold-per-position for honest per-position measurement) plus residual pruning gaps (Lever 2 quadratic SEE not yet ported).
+NPS dropped slightly with qs-depth (2.2 Mnps at d=14 vs 2.8 Mnps before) — the per-qsearch-frame work is slightly higher but vastly fewer frames are visited. The residual gap to SF11 is now ~2× nodes / ~3× time, down from 3× / 3× pre-qs-depth.
 
 ### Known residual outliers
 
-| FEN | Pre-Lever-2b d=20 (128 MB) | Lever 2b raw d=20 (128 MB) | Unified SF11 LMR d=20 (128 MB) |
+| FEN | Pre-Lever-2b d=20 (128 MB) | Unified SF11 LMR d=20 (128 MB) | qs-depth d=20 (128 MB) |
 |---|---|---|---|
-| 19 (K+R-vs-K+R race w/ rep history) | 3.62 M | 1.05 B (290× regression) | **392 M (108× regression)** |
-| 41 (K+2R vs K+Q+p) d=14 | not measured | not measured | 44 M at 16 MB, **8.3 M at 128 MB** |
+| 19 (K+R-vs-K+R race w/ rep history) | 3.62 M | 392 M (108× regression) | **7.8 M (2.2× vs SF11 baseline)** |
+| 41 (K+2R vs K+Q+p) d=14 | not measured | 44 M at 16 MB, 8.3 M at 128 MB | **1.45 M / 1.46 M (TT-independent)** |
 
-FEN 19's residual 108× regression at d=20 is the next concrete target. Hypothesis: Lever 2 (quadratic SEE quiet pruning, SF11 search.cpp:1027) catches the SEE-negative quiets that survive Lever 2b's futility-with-history gate.
-
-FEN 41's d=14 16-MB outlier (44 M vs 8.3 M at 128 MB) suggests a TT-pressure interaction with the unified LMR — investigate after Lever 2.
+Both major outliers are essentially solved by the qs-depth port. Remaining gap is uniform across positions — no single FEN dominates anymore. The next ~30% on aggregate would come from features still deferred: see "Search features still to port".
 
 ### Outlier-position breakdown (d14, post-Lever-1)
 
@@ -75,6 +75,20 @@ Most of the d14 overshoot lives in three positions. From the user's last 45-pos 
 These are all **horizon-stretching endgames** with long forced sequences that include checks. The Lever-1 win on FEN 26 at d13 was that universal LMP slices off responding quiets in the check chain; at d20 the chain is just long enough that even with universal LMP, the residual node count is hundreds of millions. They're qualitatively the same shape as the prior FEN-26 cliff but stretched out over more depth.
 
 ### Levers tested
+
+**SF11 qsearch depth tracking + recapture-only (LANDED 2026-05-14).** Ported SF11 search.cpp:1350 (qsearch signature takes `Depth`) + 1522 (recurse with `depth - 1`) + 1459 (recapture_square = parent move's to-sq). Picker at `depth <= QS_RECAPTURES (-5)` filters to captures landing on recapture_square. Previously our qsearch ignored depth, so capture chains in K+R-vs-K+R-with-passers and K+2R-vs-K+Q+p endgames ran all the way to `MAX_PLY = 64`. The deep-ply explosion we'd attributed to negamax extensions was actually qsearch's fault.
+
+| | nodes / time before | nodes / time after | Δ |
+|---|---|---|---|
+| FEN 19 d=20 / 128 MB cold | 391 M / 60 s | **7.8 M / 2.4 s** | **−98%, 25× faster** |
+| FEN 41 d=14 / 16 MB cold | 44.1 M / 7.9 s | **1.45 M / 0.5 s** | **−97%, 16× faster** |
+| FEN 41 d=14 / 128 MB cold | 8.3 M / 2.2 s | **1.46 M / 0.6 s** | −82%, 3.8× faster |
+| 45-pos bench d=13 / 16 MB | 10.5 M / 4.1 s | **8.4 M / 3.8 s** | −20% nodes, −8% time |
+| 45-pos bench d=14 / 16 MB | 20.5 M / 7.2 s | **14.2 M / 6.4 s** | −31% nodes, −11% time |
+| 45-pos bench d=14 / 128 MB | 22.1 M / 9.5 s | **14.4 M / 7.3 s** | −35% nodes, −23% time |
+| Italian Game d=18 (quadrant) | 8.1 M / 4.7 s | 7.9 M / 4.5 s | within noise |
+
+Cost: ~30 LOC. The MovePicker already had the `QS_RECAPTURES → filter to recapture_square` logic — it just hadn't been fed real depths. Two attempts at the SF11 qsearch delta/futility prune (search.cpp:1471-1492) on top of this regressed middlegame +60–70% due to per-move do/undo overhead from missing pre-do `gives_check`; reverted, kept depth tracking alone. All 787 tests pass. NPS dropped 2.6→2.2 Mnps (slightly more work per qsearch frame), but wall-clock is faster everywhere because vastly fewer frames are visited.
 
 **Lever 1: universal `moveCountPruning` (LANDED).** ~10 LOC change. FEN 26 cold d13 went 484 M → 226 k (2,140×). 45-pos cold d13 bench went 101 M → 17.5 M (5.8×). Cost: FEN 43 mate puzzle moved from "mate at d5 / 3.3 k" to "mate at d8 / 9.9 k" — same family as SF's ~2 Elo check-extension estimate. Acceptable.
 
@@ -161,12 +175,14 @@ This is the actual SF11 mechanism: **chained extensions don't run away because t
 
 Also relevant: **SF11's `MAX_PLY = 246`; ours is 64.** Even with the right pruning, the deeper natural search horizon would help.
 
-### Candidate next steps, ordered (post-unified-SF11-LMR)
+### Candidate next steps, ordered (post-qsearch-depth)
 
-1. **Investigate why K+R-vs-K+R-with-passers endgames stretch on our search.** Same shape as FEN 19, FEN 38, FEN 41 — all positions where unified-SF11-LMR + Lever 2b leaves significant deep tail (108× FEN 19 at d=20, 8.3M FEN 41 at d=14 128MB). **Lever 2 made this class WORSE not better** (see "Levers tested" below). The fix is somewhere we haven't looked.
-2. **Lever 2c — port SF11's countermove-history quiet pruning** (search.cpp:1011-1014). Two-table cont-history gate with `lmrDepth < 4 + adj`. We have a depth-based CMP gate (`lmr_d >= 4 + widen` at search.rs:1279); rewriting on top of Lever 2b's pattern would be a small refinement, mostly for completeness — our gate is already lmrDepth-based.
-3. **Singular extensions + multi-cut, fourth attempt** — Lever 2b + unified LMR tamed many chains. Worth re-attempting now since the base LMR matches what SE was tuned against.
-4. **NMP zugzwang verification** (lines 838-886). Separate gap. Worth porting for correctness; orthogonal to the chain pathology.
+The K+R-vs-K+R-with-passers stretch was diagnosed and solved 2026-05-14: it was **qsearch chains running to MAX_PLY because qsearch ignored depth**. Porting SF11's `depth - 1` recursion + `QS_RECAPTURES` filter collapsed FEN 19 d=20 from 391 M → 7.8 M (50×). The "Why SF11 doesn't run away — the depth-metric gap" section below was about negamax pruning; turns out the actual gap was one level deeper, in qsearch itself.
+
+1. **Singular extensions + multi-cut, fourth attempt** — three previous attempts (2026-04-30, 2026-05-12, 2026-05-14) regressed on horizon-stretching forced sequences. Hypothesised root cause was the extension chain stacking deeper; with qsearch chains now bounded, the SE failure shape may be different. Worth re-attempting on top of qs-depth.
+2. **NMP zugzwang verification** (search.cpp:838-886). Tried 2026-05-14: net-neutral at aggregate d=14 but regresses FEN 19 d=19 ~8.7× (8.7M → 54.9M nodes). It's a correctness feature (avoids zugzwang false-positives) not a speed feature. Re-attempt after the search is otherwise tight, weighing the correctness vs perf trade-off.
+3. **Lever 2c — port SF11's countermove-history quiet pruning** (search.cpp:1011-1014). Two-table cont-history gate with `lmrDepth < 4 + adj`. Small refinement on top of Lever 2b.
+4. **SF11 qsearch delta/futility prune** (search.cpp:1471-1492). Tried 2026-05-14: regressed Kiwipete +72%, FEN 3 +62% on top of qs-depth. The pre-do `gives_check(m)` helper SF11 has would let us avoid the per-move do/undo overhead our port pays — implementing it (via a `check_squares` cache) may make this re-attemptable.
 
 ### What remains gated off in tree
 
@@ -174,23 +190,27 @@ Also relevant: **SF11's `MAX_PLY = 246`; ours is 64.** Even with the right pruni
 
 ## Open dockets
 
-### Engine perf reference numbers (2026-05-14, post-Lever-2b)
+### Engine perf reference numbers (2026-05-14, post-qsearch-depth)
 
 **Bench (SF11 default 45 positions, 16 MB cold-TT-per-position):**
-- d13: 10.5 M nodes / 4.1 s / 2.6 Mnps (was 17.5 M / 5.4 s pre-Lever-2b).
-- d14: 20.5 M nodes / 7.2 s / 2.8 Mnps (was 104.2 M / 21.1 s pre-Lever-2b).
+- d13: 8.4 M nodes / 3.8 s / 2.2 Mnps (was 10.5 M / 4.1 s pre-qs-depth).
+- d14: 14.2 M nodes / 6.4 s / 2.2 Mnps (was 20.5 M / 7.2 s pre-qs-depth).
 
-NPS dropped vs pre-Lever-2b (3.1 → 2.6 Mnps) because the per-quiet futility now reads continuation-history, but the node savings (5× at d=14) dominate. Gap to SF11 d=14 (6.93 M / 2.2 s @ 128 MB shared TT) is now ~3× on nodes and ~3× on time — a much smaller delta than the pre-Lever-2b 15× / 10×.
+**Bench (128 MB cold-TT-per-position):**
+- d14: 14.4 M nodes / 7.3 s / 2.0 Mnps (was 22.1 M / 9.5 s pre-qs-depth).
 
-**Quadrant check** (the four positions used to A/B Lever 1; 16 MB cold, `--new-game-between-positions`):
+NPS dropped to ~2.0–2.2 Mnps with qs-depth (was 2.6–2.8 Mnps). The qsearch frame now does slightly more per-call work (computing recapture_square), but **vastly** fewer frames run because long capture chains terminate at -5 depth. Net wall-clock is faster at every depth measured. Gap to SF11 d=14 (6.93 M / 2.2 s @ 128 MB shared TT) is now ~2× on nodes / ~3× on time.
+
+**Quadrant check** (the four positions used to A/B Lever 1; 16 MB cold, `--new-game-between-positions`, post-qs-depth):
 
 | Position | Depth | Nodes | Time |
 |---|---|---|---|
-| FEN 26 | 13 | 226 k | 100 ms |
-| Italian Game | 13 | 608 k | 358 ms |
-| Kiwipete | 13 | 305 k | 167 ms |
-| FEN 43 mate | 8 (terminated) | 9.9 k | 4 ms |
-| Italian Game | 18 | 7.6 M | 4.5 s |
+| FEN 1 (startpos) | 13 | 356 k | 191 ms |
+| FEN 26 | 13 | 138 k | 52 ms |
+| Italian Game | 13 | 228 k (FEN 2 Kiwipete) | 120 ms |
+| FEN 19 (K+R race) | 20 | 7.8 M | 2.4 s |
+| FEN 41 (K+2R vs K+Q+p) | 14 (16 MB) | 1.45 M | 518 ms |
+| Italian Game | 18 | 7.9 M | 4.5 s |
 
 **SF11 reference (128 MB TT, our machine, 46 FENs incl. 1 Chess960 we skip):**
 - d7: 182 k nodes / 0.1 s / 1.7 Mnps
@@ -204,9 +224,9 @@ NPS parity is real (we hit 3.3 Mnps on the d14 bench). The remaining gap to SF i
 The current production search has, in tree: PGO, reverse-futility pruning, statScore-LMR, cutNode plumbing, full SF11-gated CMP, ProbCut with `2 + 2 * cutNode` budget, lazy eval (gated on `trace.is_none()`), sticky `tt_pv` save, PEXT slider attacks under BMI2. Each was measured and documented in commit messages and inline `//!` docs at landing time.
 
 **Search features still to port (would reduce nodes-per-depth):**
-- **NMP zugzwang-verification at high depth** (SF11 lines 838-886) — `nmpMinPly` / `nmpColor` mechanism missing; we silently mis-prune zugzwang today. May or may not help the d20 outliers.
-- **Quadratic SEE quiet pruning** (SF11 line 1027) — replace our `Value::ZERO` quiet-SEE threshold with `-(32 - min(lmrDepth, 18)) * lmrDepth²`. Predicted small standalone effect; worth a quick A/B against the quadrant.
-- **SF11 quiet-futility lmrDepth + history form** (SF11 lines 1016-1024) — replace our `217*(depth-improving)` margin with the lmrDepth-keyed form and the history-sum gate. Similar predicted magnitude.
+- **NMP zugzwang-verification at high depth** (SF11 lines 838-886) — `nmpMinPly` / `nmpColor` mechanism. Tried 2026-05-14, net-neutral aggregate but regresses FEN 19 d=19 8.7×. It's a correctness feature, not a speed feature; re-attempt later weighing correctness vs perf.
+- **SF11 qsearch delta/futility prune** (SF11 lines 1471-1492). Tried 2026-05-14 on top of qs-depth: regressed Kiwipete +72%, FEN 3 +62% due to per-move do/undo overhead from missing pre-do `gives_check`. Worth re-attempting once `pos.gives_check(m)` is implemented (needs check-squares cache).
+- **Quadratic SEE quiet pruning** (SF11 line 1027) — replace our `Value::ZERO` quiet-SEE threshold with `-(32 - min(lmrDepth, 18)) * lmrDepth²`. Reverted 2026-05-14 (Lever 2 catastrophic). Failure mode may differ now that qsearch chains are bounded; re-attempt with caution.
 - **`ttPv → r -= 2` LMR consumer** — sticky save is in tree; consumer measured at +30-80% wall-clock regression in isolation. Re-attempt if a future investigation reveals it's needed for balance with a relaxer.
 - **Internal Iterative Deepening** (SF11 step 11, ~1 Elo). When `depth >= 7` and no TT move, run `depth - 7` to seed TT. Tiny gain alone.
 - **Razoring** (SF11 step 7, ~1 Elo). Trivial code change.

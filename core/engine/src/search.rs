@@ -688,7 +688,7 @@ impl<'a> Search<'a> {
         }
 
         if depth <= 0 {
-            return self.qsearch(pos, alpha, beta, ply);
+            return self.qsearch(pos, alpha, beta, ply, depth);
         }
 
         self.nodes += 1;
@@ -1019,8 +1019,17 @@ impl<'a> Search<'a> {
                 let child_prev = Some((moved_piece.kind(), mv.to()));
 
                 // Phase 1: zero-window qsearch — cheap rejection.
-                let mut value =
-                    -self.qsearch(pos, Value(-raised_beta), Value(-raised_beta + 1), ply + 1);
+                // SF11 search.cpp:918 calls qsearch with the default
+                // depth (DEPTH_ZERO = QS_CHECKS), so the probcut
+                // qsearch starts at the same "include checks" depth
+                // as a fresh entry from negamax.
+                let mut value = -self.qsearch(
+                    pos,
+                    Value(-raised_beta),
+                    Value(-raised_beta + 1),
+                    ply + 1,
+                    Depth::QS_CHECKS.0,
+                );
 
                 // Phase 2: regular search at depth-4 if qsearch held.
                 if value >= raised_beta_v {
@@ -1776,7 +1785,14 @@ impl<'a> Search<'a> {
     // Quiescence
     // ------------------------------------------------------------------
 
-    fn qsearch(&mut self, pos: &mut Position, mut alpha: Value, beta: Value, ply: usize) -> Value {
+    fn qsearch(
+        &mut self,
+        pos: &mut Position,
+        mut alpha: Value,
+        beta: Value,
+        ply: usize,
+        depth: i32,
+    ) -> Value {
         if ply >= MAX_PLY {
             self.pv_length[ply] = 0;
             return if pos.in_check() {
@@ -1846,11 +1862,31 @@ impl<'a> Search<'a> {
             best_score = -Value::INFINITE;
         }
 
-        let depth = if in_check {
+        // SF11 qsearch picker depth (search.cpp:1391): always
+        // [`Depth::QS_CHECKS`] when in check (we still want to look at
+        // evasions); otherwise the *current* recursion depth, which
+        // decreases by 1 each recursive qsearch call. At
+        // [`Depth::QS_RECAPTURES`] (= -5) the picker switches to
+        // recapture-only mode — only moves landing on the
+        // [`recapture_square`] are tried. This is the SF11 mechanism
+        // that bounds qsearch chains in capture-rich endgames; without
+        // it, long alternating-capture sequences explode the deep ply
+        // tail (FEN 19 d=20, FEN 41 d=14).
+        let qs_picker_depth = if in_check {
             Depth::QS_CHECKS
         } else {
-            Depth::QS_NO_CHECKS
+            Depth(depth)
         };
+
+        // Recapture square = the to-square of the move that brought
+        // us to this position (SF11 search.cpp:1459, `to_sq((ss-1)->
+        // currentMove)`). The picker only consults it once depth
+        // descends to [`Depth::QS_RECAPTURES`]. For null-move parents
+        // this reads the sentinel square (A1 in our encoding); the
+        // recapture filter at -5 almost never matches captures
+        // landing there, so the corner case is benign.
+        let parent_to = self.stack[STACK_SENTINEL + ply - 1].to_idx;
+        let recapture_square = Some(Square::from_index(parent_to));
 
         // Cont-hist keys for qsearch: only the 1-ply-ago slot affects
         // evasion ordering (Stockfish's `score<EVASIONS>` reads
@@ -1862,7 +1898,7 @@ impl<'a> Search<'a> {
             cont_key_at(&self.stack, ply, 4),
             cont_key_at(&self.stack, ply, 6),
         ];
-        let mut picker = MovePicker::new_qs(pos, tt_move, depth, None, cont_keys);
+        let mut picker = MovePicker::new_qs(pos, tt_move, qs_picker_depth, recapture_square, cont_keys);
         let mut move_count = 0usize;
 
         loop {
@@ -1907,7 +1943,11 @@ impl<'a> Search<'a> {
             self.stack[STACK_SENTINEL + ply].was_capture = is_capture;
 
             self.path_keys.push(pos.key());
-            let score = -self.qsearch(pos, -beta, -alpha, ply + 1);
+            // SF11 search.cpp:1522 — recursive qsearch decrements
+            // `depth` by 1. Once `depth <= DEPTH_QS_RECAPTURES (-5)`
+            // the picker switches to recapture-only mode, bounding
+            // long alternating-capture chains.
+            let score = -self.qsearch(pos, -beta, -alpha, ply + 1, depth - 1);
             self.path_keys.pop();
             pos.undo_move(mv, state);
 
@@ -2454,7 +2494,7 @@ mod tests {
         let mut pos = Position::startpos();
 
         // Both entry points must survive being called at the cap.
-        let _ = search.qsearch(&mut pos, -Value::INFINITE, Value::INFINITE, MAX_PLY);
+        let _ = search.qsearch(&mut pos, -Value::INFINITE, Value::INFINITE, MAX_PLY, 0);
         let _ = search.negamax(
             &mut pos,
             -Value::INFINITE,
