@@ -57,10 +57,17 @@ pub struct PlayConfig {
     /// `SearchParams::verbose_progress` on every search we run.
     pub search_progress: bool,
     /// Number of Lazy-SMP search threads for the engine's *move* (the
-    /// search that picks what the engine plays). REPL analysis
-    /// commands and the retrospective stay single-threaded for
-    /// deterministic teaching output.
+    /// search that picks what the engine plays). REPL `analyze` /
+    /// `search` commands stay single-threaded regardless; the
+    /// retrospective also uses this thread count unless
+    /// [`deterministic`] is set.
     pub threads: usize,
+    /// When `true`, force every analysis path (auto-retrospective in
+    /// particular) to single-threaded search. The engine's *move*
+    /// still uses [`threads`] — `--deterministic` is for analytical
+    /// reproducibility, not for game-play behaviour. Set this when
+    /// you need the same game to play out identically across runs.
+    pub deterministic: bool,
 }
 
 /// One played ply — enough to undo the move and show what was played.
@@ -316,6 +323,20 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                             max_depth: cfg.depth,
                             max_time_ms: cfg.time_ms,
                             explain_best,
+                            // Retrospective runs all cores by default
+                            // — position analysis, tactic detection,
+                            // and verdict thresholds are robust to
+                            // the small per-move-score variance that
+                            // Lazy SMP introduces. `--deterministic`
+                            // collapses to 1 for bit-identical
+                            // narration when needed.
+                            threads: if cfg.deterministic {
+                                1
+                            } else {
+                                std::thread::available_parallelism()
+                                    .map(|n| n.get())
+                                    .unwrap_or(1)
+                            },
                         };
                         // Retrospective is analytical, not a real
                         // move — clone so its TT writes don't bleed

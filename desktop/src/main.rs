@@ -111,9 +111,15 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                     game_history,
                     force_include: vec![user_move],
                     verbose_progress: false,
-                    // Retrospective narration is teaching output —
-                    // keep it bit-deterministic across runs.
-                    threads: 1,
+                    // Retrospective uses every available core. The
+                    // GUI is a single-user surface — no competing
+                    // analytical search — and the teaching output
+                    // (eval term deltas, tactic detection, verdict
+                    // classification) is robust to the small
+                    // per-move-score variance Lazy SMP introduces.
+                    threads: std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1),
                 };
                 let analyses = analyze_position(&mut analysis_engine, &mut pre_move_pos, params);
                 let opts = NarrationOptions {
@@ -145,9 +151,14 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                     game_history,
                     force_include: Vec::new(),
                     verbose_progress: false,
-                    // Hint-panel analysis is deterministic teaching
-                    // output — single-threaded.
-                    threads: 1,
+                    // Hint panel: same logic as retrospective — use
+                    // all cores. Teaching-output stability comes from
+                    // wide verdict thresholds and deterministic eval
+                    // term computation, not from single-threaded
+                    // search.
+                    threads: std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1),
                 };
                 let analyses = analyze_position(&mut analysis_engine, &mut pos, params);
                 let _ = tx.send(WorkerResult::Analyze { for_key, analyses });

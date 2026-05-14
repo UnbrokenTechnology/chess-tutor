@@ -124,6 +124,11 @@ enum Command {
         /// total. Higher values show more detail.
         #[arg(long, default_value_t = 75.0)]
         top_percent: f32,
+        /// Number of Lazy-SMP search threads. Default 1 for
+        /// reproducible output; raise to use more cores when you
+        /// don't need bit-identical results.
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
     },
     /// Multi-position search benchmark. Argument order and defaults
     /// mirror Stockfish 11's `bench` command: `tt_mb threads limit
@@ -225,13 +230,23 @@ enum Command {
         /// search loops or depth-N iterations that never return.
         #[arg(long)]
         search_progress: bool,
-        /// Number of search threads for engine moves (Lazy SMP). Default
-        /// 1 keeps engine moves bit-deterministic across runs; raise it
-        /// to use more cores. REPL `search` / `analyze` commands and
-        /// the auto-retrospective always run single-threaded
-        /// regardless of this setting.
+        /// Number of search threads for engine moves (Lazy SMP).
+        /// Default 1 keeps engine moves bit-deterministic across
+        /// runs; raise it to use more cores. REPL `search` /
+        /// `analyze` commands are always single-threaded.
         #[arg(long, default_value_t = 1)]
         threads: usize,
+        /// Force every analytical search (auto-retrospective) to
+        /// single-threaded so the same game produces bit-identical
+        /// narration across runs. Without this flag the
+        /// retrospective uses all available cores by default — the
+        /// teaching output (eval term deltas, tactic detection,
+        /// verdict thresholds) is robust to the small per-move-score
+        /// variance Lazy SMP introduces; near-equal alternate-move
+        /// scores may swap rank between runs but the narrative
+        /// stays the same.
+        #[arg(long)]
+        deterministic: bool,
     },
 }
 
@@ -310,6 +325,7 @@ fn main() -> Result<()> {
             debug,
             analyze,
             top_percent,
+            threads,
         } => {
             let mut pos =
                 Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
@@ -322,9 +338,7 @@ fn main() -> Result<()> {
                 game_history: Vec::new(),
                 force_include: Vec::new(),
                 verbose_progress: false,
-                // `search` / `analyze` are analytical paths — keep
-                // them single-threaded for bit-identical outputs.
-                threads: 1,
+                threads: threads.max(1),
             };
 
             if analyze {
@@ -446,6 +460,7 @@ fn main() -> Result<()> {
             reset_engine_per_move,
             search_progress,
             threads,
+            deterministic,
         } => {
             play::play_loop(play::PlayConfig {
                 start_fen: fen,
@@ -460,6 +475,7 @@ fn main() -> Result<()> {
                 reset_engine_per_move,
                 search_progress,
                 threads: threads.max(1),
+                deterministic,
             })?;
         }
     }

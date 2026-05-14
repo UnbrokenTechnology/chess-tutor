@@ -32,6 +32,15 @@ pub struct RetrospectiveConfig {
     /// headline. Useful when the student wants to understand *why*
     /// their move was the best, not just *that* it was.
     pub explain_best: bool,
+    /// Number of search threads. Defaults to multi-thread because
+    /// the teaching value (positional analysis, tactic detection,
+    /// verdict classification) is robust to the small per-move-score
+    /// variance Lazy SMP introduces — moves within a few cp of each
+    /// other may swap rank between runs, but the underlying eval term
+    /// deltas, tactic discoveries, and verdict thresholds don't move.
+    /// Pass `1` (via `--deterministic` on the CLI) when bit-for-bit
+    /// reproducibility is required, e.g. regression testing.
+    pub threads: usize,
 }
 
 /// Analyze `pre_move_pos` with the user's move forced into the
@@ -58,10 +67,7 @@ pub fn run_and_render(
         game_history,
         force_include: vec![user_mv],
         verbose_progress: false,
-        // Retrospectives are teaching output — keep them
-        // deterministic so the same position always produces the
-        // same narration.
-        threads: 1,
+        threads: cfg.threads.max(1),
     };
     let analyses = analyze_position(engine, pre_move_pos, params);
     let opts = NarrationOptions {
