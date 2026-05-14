@@ -88,6 +88,18 @@ const LMR_FULL_DEPTH_MOVES: usize = 4;
 /// Maximum depth at which futility / LMP / SEE pruning consider quiets.
 const SHALLOW_PRUNE_MAX_DEPTH: i32 = 7;
 
+/// When `true`, the LMP threshold (`late_move_prune`) is evaluated at
+/// every depth — not just `depth <= SHALLOW_PRUNE_MAX_DEPTH`. Once
+/// tripped, the flag is threaded into [`MovePicker::next_move`] so the
+/// picker stops generating quiet moves entirely for the rest of the
+/// node. Mirrors SF11's `moveCountPruning` (search.cpp:1002, threaded
+/// into `mp.next_move(moveCountPruning)` at line 964). Probing whether
+/// this is the right fix for the FEN-26 check-extension chain runaway:
+/// at intermediate depths in the chain, every responding quiet is
+/// currently searched at full effective depth because our shallow box
+/// is depth-gated.
+const MOVE_COUNT_PRUNING_UNIVERSAL: bool = true;
+
 /// Adjacent-ply |Δwhite-POV-score| below which the PV is considered
 /// "settled". In Stockfish-internal centipawns (roughly: PawnEG = 213),
 /// so 25 cp is about one-tenth of a pawn — tight enough to treat small
@@ -1045,6 +1057,12 @@ impl<'a> Search<'a> {
         let mut best_score = -Value::INFINITE;
         let mut best_move = Move::NONE;
         let mut move_count = 0usize;
+        // SF11 `moveCountPruning` (search.cpp:629/956/1002). Lifted out
+        // of the depth-gated shallow-prune box so it can fire at any
+        // depth — once `move_count` hits the LMP threshold, the picker
+        // skips remaining quiets for the rest of this node. Gated by
+        // [`MOVE_COUNT_PRUNING_UNIVERSAL`] so we can A/B the change.
+        let mut move_count_pruning: bool = false;
         // Stack-allocated rather than Vec — at ~30–50 quiets per node and
         // millions of nodes per search, the prior `Vec::new() + push` form
         // reallocated through capacities 4→8→16→32→64 every frame. Per-frame
@@ -1095,7 +1113,7 @@ impl<'a> Search<'a> {
                 Some(self.history),
                 Some(self.cont_history),
                 Some(self.capture_history),
-                false,
+                move_count_pruning,
             );
             if mv == Move::NONE {
                 break;
@@ -1149,6 +1167,21 @@ impl<'a> Search<'a> {
             // child we're about to recurse into can read it via
             // `(ss-1)->move_count` for its CMP gate. SF11 search.cpp:979.
             self.stack[STACK_SENTINEL + ply].move_count = move_count as u32;
+
+            // SF11 `moveCountPruning` update (search.cpp:1002). Matches
+            // SF's outer guards: `!rootNode && pos.non_pawn_material(us)
+            // && bestValue > VALUE_MATED_IN_MAX_PLY`. Once tripped, the
+            // *next* picker call skips quiet generation. Held flat
+            // false when MOVE_COUNT_PRUNING_UNIVERSAL is off so the
+            // shallow-prune box at depth ≤ SHALLOW_PRUNE_MAX_DEPTH
+            // remains the only LMP site (legacy behaviour).
+            if MOVE_COUNT_PRUNING_UNIVERSAL
+                && !is_root
+                && best_score > Value::MATED_IN_MAX_PLY
+                && pos.non_pawn_material(us_at_node).0 > 0
+            {
+                move_count_pruning = late_move_prune(depth, move_count, improving);
+            }
             if is_root && self.verbose_progress {
                 eprintln!(
                     "[search]   depth {depth} slot {} move #{move_count}: {}-{} ({} nodes, {} ms)",
