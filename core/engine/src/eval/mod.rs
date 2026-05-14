@@ -545,8 +545,10 @@ fn evaluate_inner(
 ) -> Value {
     let mut e = Evaluator::new_with_pawns(pos, pawns_eval);
 
-    // If material reports a specialized endgame evaluator, trust it.
-    // (Currently never fires — endgame.rs isn't ported yet.)
+    // If material reports a specialised endgame evaluator (`ProbeResult::
+    // Override`), trust it and skip the classical terms entirely.
+    // Scaling-function results (`Scale` / `ScaleBoth`) flow through
+    // `material.scale_factor` and are consumed at the tapering step.
     if let Some(v) = e.material.endgame_value {
         let signed = if pos.side_to_move() == Color::White {
             v

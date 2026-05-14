@@ -85,19 +85,14 @@ const LMR_MIN_DEPTH: i32 = 3;
 /// Number of moves always searched at full depth before LMR kicks in.
 const LMR_FULL_DEPTH_MOVES: usize = 4;
 
-/// Maximum depth at which futility / LMP / SEE pruning consider quiets.
-const SHALLOW_PRUNE_MAX_DEPTH: i32 = 7;
-
 /// When `true`, the LMP threshold (`late_move_prune`) is evaluated at
-/// every depth — not just `depth <= SHALLOW_PRUNE_MAX_DEPTH`. Once
-/// tripped, the flag is threaded into [`MovePicker::next_move`] so the
-/// picker stops generating quiet moves entirely for the rest of the
-/// node. Mirrors SF11's `moveCountPruning` (search.cpp:1002, threaded
-/// into `mp.next_move(moveCountPruning)` at line 964). Probing whether
-/// this is the right fix for the FEN-26 check-extension chain runaway:
-/// at intermediate depths in the chain, every responding quiet is
-/// currently searched at full effective depth because our shallow box
-/// is depth-gated.
+/// every depth (not just shallow). Once tripped, the flag is threaded
+/// into [`MovePicker::next_move`] so the picker stops generating quiet
+/// moves entirely for the rest of the node. Mirrors SF11's
+/// `moveCountPruning` (search.cpp:1002, threaded into
+/// `mp.next_move(moveCountPruning)` at line 964). Landed 2026-05-14
+/// (commit `8eafb71`) and confirmed load-bearing on FEN 26 d=13 cold
+/// (484 M → 226 k, 2,140×).
 const MOVE_COUNT_PRUNING_UNIVERSAL: bool = true;
 
 /// Adjacent-ply |Δwhite-POV-score| below which the PV is considered
@@ -259,6 +254,19 @@ pub(crate) struct Search<'a> {
     multi_pv: usize,
 
     nodes: u64,
+    /// Per-ply node histogram (TEMPORARY: perf investigation). Indexed
+    /// by recursion depth from root (`ply`). Index 0 = root; deeper
+    /// indices = nodes visited at that distance from root, including
+    /// qsearch and extension-stretched leaves. Sized `MAX_PLY` so the
+    /// extension-stretched tail can be observed; ply >= MAX_PLY is
+    /// clamped into the last bucket. Reset to zero at every `run()`
+    /// start. Exposed via [`Search::nodes_per_ply`].
+    nodes_per_ply: Vec<u64>,
+    /// Maximum `ply` reached during the most recent `run()` (TEMPORARY:
+    /// perf investigation). Mirrors SF's `selDepth` — distinguishes
+    /// horizon-stretching (`seldepth >> nominal_depth`) from wide
+    /// branching. Reset at every `run()` start.
+    seldepth: u32,
     max_nodes: Option<u64>,
     start_time: Instant,
     stop_time: Option<Instant>,
@@ -310,6 +318,8 @@ impl<'a> Search<'a> {
             pv_idx: 0,
             multi_pv: 1,
             nodes: 0,
+            nodes_per_ply: vec![0; MAX_PLY],
+            seldepth: 0,
             max_nodes: None,
             start_time: Instant::now(),
             stop_time: None,
@@ -328,6 +338,18 @@ impl<'a> Search<'a> {
         self.nodes
     }
 
+    /// Maximum `ply` reached during the most recent `run()` (selective
+    /// depth). TEMPORARY perf-investigation accessor.
+    pub(crate) fn seldepth(&self) -> u32 {
+        self.seldepth
+    }
+
+    /// Per-ply node histogram from the most recent `run()`. Index = ply
+    /// from root. TEMPORARY perf-investigation accessor.
+    pub(crate) fn nodes_per_ply(&self) -> &[u64] {
+        &self.nodes_per_ply
+    }
+
     /// Run a search under `params` and return up to `params.multi_pv`
     /// ranked principal variations with per-line traces. Returns an
     /// empty vector when the root position has no legal moves
@@ -336,6 +358,10 @@ impl<'a> Search<'a> {
     pub(crate) fn run(&mut self, pos: &mut Position, params: &SearchParams) -> Vec<SearchLine> {
         self.tt.new_search();
         self.nodes = 0;
+        for slot in self.nodes_per_ply.iter_mut() {
+            *slot = 0;
+        }
+        self.seldepth = 0;
         self.aborted = false;
         self.start_time = Instant::now();
         self.stop_time = params.max_time.map(|d| self.start_time + d);
@@ -666,6 +692,11 @@ impl<'a> Search<'a> {
         }
 
         self.nodes += 1;
+        let ply_bucket = ply.min(MAX_PLY - 1);
+        self.nodes_per_ply[ply_bucket] += 1;
+        if ply as u32 > self.seldepth {
+            self.seldepth = ply as u32;
+        }
 
         if !is_root {
             if pos.halfmove_clock() >= 100 || self.is_repetition(pos) {
@@ -1259,16 +1290,67 @@ impl<'a> Search<'a> {
                 continue;
             }
 
-            // Shallow pruning for quiet moves.
-            let pruned_quiet = !is_root
+            // Quiet futility pruning (SF11 search.cpp:1016-1024, "Lever 2b").
+            //
+            // Gate is `lmrDepth < 6`, not raw `depth <= 7` — when chained
+            // extensions keep raw `depth` high at deep ply, LMR still
+            // pushes lmrDepth toward 0, and SF11's gate fires where the
+            // old raw-depth gate didn't. This is the load-bearing
+            // mechanism that prevents the deep-ply quiet tail in
+            // chained-extension endgames (FENs 20 / 26 / 40 in the
+            // bench), per the 2026-05-14 instrumented investigation
+            // (see HANDOFF "Why SF11 doesn't run away").
+            //
+            // History-sum gate matches SF11 verbatim: only futility-
+            // prune when this quiet has a negative composite history
+            // signal (main + cont[0,1,3] < 25000). Without the gate,
+            // SF11's experience is that futility cuts good moves that
+            // happen to land below `eval + margin` for noisy positional
+            // reasons. Universal LMP (Lever 1, wired into the
+            // [`MovePicker`]) handles move-count pruning independently;
+            // no LMP check here.
+            let do_futility_prune = !is_root
                 && !in_check
                 && !is_capture
                 && !gives_check
                 && best_score > Value::MATED_IN_MAX_PLY
-                && depth <= SHALLOW_PRUNE_MAX_DEPTH
-                && (late_move_prune(depth, move_count, improving)
-                    || futility_prune(static_eval, alpha, depth, improving));
-            if pruned_quiet {
+                // SF11 Step 13 gate (search.cpp:998): side-to-move at
+                // this frame must have non-pawn material. After
+                // `do_move` the side-to-move is the *opponent*, so the
+                // side that just moved (== `us` in SF's sense) is the
+                // negated side. Pure-pawn endgames skip Step 13.
+                && pos.non_pawn_material(!pos.side_to_move()).0 > 0
+                && {
+                    let lmr_r = lmr_reduction(depth, move_count, improving);
+                    // newDepth = depth - 1 here; extensions are computed
+                    // *after* Step 13 in SF11, so the gate is keyed on
+                    // pre-extension depth (search.cpp:994, 1008).
+                    let lmr_d = ((depth - 1) - lmr_r).max(0);
+                    if lmr_d >= 6 {
+                        false
+                    } else if static_eval.0 + 235 + 172 * lmr_d > alpha.0 {
+                        false
+                    } else {
+                        let stm = pos.side_to_move();
+                        let mvp_idx = moved_piece.index() as usize;
+                        let mvt_idx = mv.to().index() as usize;
+                        let main_h = self.history.get(stm, mv.from(), mv.to()) as i32;
+                        let ch0 = self
+                            .cont_history
+                            .sub_for_key(cont_keys[0])[mvp_idx][mvt_idx]
+                            as i32;
+                        let ch1 = self
+                            .cont_history
+                            .sub_for_key(cont_keys[1])[mvp_idx][mvt_idx]
+                            as i32;
+                        let ch3 = self
+                            .cont_history
+                            .sub_for_key(cont_keys[2])[mvp_idx][mvt_idx]
+                            as i32;
+                        (main_h + ch0 + ch1 + ch3) < 25000
+                    }
+                };
+            if do_futility_prune {
                 pos.undo_move(mv, state);
                 quiets_tried.push(mv);
                 continue;
@@ -1713,6 +1795,11 @@ impl<'a> Search<'a> {
         }
 
         self.nodes += 1;
+        let ply_bucket = ply.min(MAX_PLY - 1);
+        self.nodes_per_ply[ply_bucket] += 1;
+        if ply as u32 > self.seldepth {
+            self.seldepth = ply as u32;
+        }
 
         let in_check = pos.in_check();
 
@@ -2122,20 +2209,13 @@ fn late_move_prune(depth: i32, move_count: usize, improving: bool) -> bool {
     move_count > threshold
 }
 
-fn futility_prune(static_eval: Value, alpha: Value, depth: i32, improving: bool) -> bool {
-    if static_eval == Value::NONE {
-        return false;
-    }
-    static_eval.0 + futility_margin(depth, improving) <= alpha.0
-}
-
 /// Stockfish 11's `futility_margin` (search.cpp:69-71). Margin shrinks
 /// by one depth-step's worth (217 cp) when the static eval is
-/// improving, letting both directions of futility pruning take a
-/// slightly tighter bet. Used both by the per-move forward-futility
-/// `futility_prune` ("this move can't reach alpha, skip it") and by
-/// the parent-level reverse-futility check inside `negamax` ("we're
-/// already past beta, skip the subtree").
+/// improving, letting reverse-futility pruning take a slightly tighter
+/// bet. Per-move forward futility is now lmrDepth-based (SF11
+/// search.cpp:1016-1024) and uses its own margin (`235 + 172 *
+/// lmrDepth`) inline; this function is only the reverse-futility
+/// (parent-level) check ("we're already past beta, skip the subtree").
 fn futility_margin(depth: i32, improving: bool) -> i32 {
     217 * (depth - improving as i32)
 }

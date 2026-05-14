@@ -164,6 +164,21 @@ enum Command {
         /// vs. the small-TT case.
         #[arg(long)]
         new_game_between_positions: bool,
+        /// TEMPORARY perf-investigation: after each position completes,
+        /// print selDepth and a compact per-ply node histogram. Also
+        /// enables per-ID-iteration heartbeat output from the search.
+        /// Doesn't affect search behaviour, just adds stderr/stdout
+        /// output.
+        #[arg(long)]
+        verbose: bool,
+        /// TEMPORARY perf-investigation: comma-separated list of
+        /// 1-based position indices to run (e.g. `20,26,40,41`). When
+        /// set, only those positions from the FEN list are searched;
+        /// others are skipped. Useful for focusing on known-slow FENs
+        /// without sitting through the rest. Indexing matches the
+        /// bench-output `N/45` numbering.
+        #[arg(long)]
+        positions: Option<String>,
     },
     /// Interactive REPL. Human enters SAN or UCI; engine replies on
     /// its turn.
@@ -394,6 +409,8 @@ fn main() -> Result<()> {
             fen_file,
             limit_type,
             new_game_between_positions,
+            verbose,
+            positions,
         } => {
             bench::run(bench::BenchArgs {
                 tt_mb,
@@ -402,6 +419,8 @@ fn main() -> Result<()> {
                 fen_file,
                 limit_type,
                 new_game_between_positions,
+                verbose,
+                positions,
             })?;
         }
         Command::Play {

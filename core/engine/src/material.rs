@@ -26,7 +26,7 @@
 //! other patterns (KBNK, KPK bitbase, drawish rook endings) are still
 //! deferred.
 
-use crate::endgame;
+use crate::endgame::{self, ProbeResult};
 use crate::position::Position;
 use crate::types::{Color, Phase, PieceType, ScaleFactor, Score, Value};
 
@@ -110,8 +110,32 @@ pub fn evaluate(pos: &Position) -> MaterialEval {
     //
     // If a side has no pawns and only a bishop's worth of material lead
     // (or less), pretend its endgame is worse than its raw score would
-    // suggest. Thresholds below are the reference's.
+    // suggest. Thresholds below are the reference's. Scaling-function
+    // results below override this on a per-side basis when they apply.
     apply_drawish_factor(pos, &mut scale_factor);
+
+    // --- Endgame probe ------------------------------------------------
+    //
+    // Either gives us a specialised value (Override → caller skips
+    // classical eval) or a per-side ScaleFactor override that caps the
+    // endgame half of the classical score for known fortress / drawish
+    // patterns. Scaling overrides are *not* applied for free draw cases
+    // (NONE); the existing drawish factor stays.
+    let mut endgame_value = None;
+    match endgame::probe(pos) {
+        ProbeResult::Override(v) => endgame_value = Some(v),
+        ProbeResult::Scale {
+            strong_side,
+            factor,
+        } => {
+            scale_factor[strong_side.index()] = factor;
+        }
+        ProbeResult::ScaleBoth(factor) => {
+            scale_factor[Color::White.index()] = factor;
+            scale_factor[Color::Black.index()] = factor;
+        }
+        ProbeResult::None => {}
+    }
 
     // --- Imbalance ----------------------------------------------------
     let piece_count = build_piece_count_table(pos);
@@ -123,7 +147,7 @@ pub fn evaluate(pos: &Position) -> MaterialEval {
         imbalance,
         game_phase,
         scale_factor,
-        endgame_value: endgame::probe(pos),
+        endgame_value,
     }
 }
 

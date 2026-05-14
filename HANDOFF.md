@@ -37,16 +37,17 @@ Per-search or per-engine allocations are fine. **Per-node allocations are not** 
 
 ## Next up: close the remaining bench gap to SF11
 
-The FEN 26 check-extension chain runaway has been suppressed (universal `moveCountPruning` landed 2026-05-14, commit `8eafb71`). 45-position bench is now 5–6× faster than the day before, and no single position blocks the bench for minutes. There's still a real gap to SF11's bench, concentrated in a handful of positions.
+Two levers landed 2026-05-14: universal `moveCountPruning` (Lever 1) tamed the FEN 26 cold d13 cliff (484 M → 226 k); SF11-style lmrDepth-gated quiet futility (Lever 2b) collapsed the residual deep-tail problem at d14 (104 M → 20.5 M aggregate, 5× fewer nodes; FEN 40 alone 22 M → 466 k, 47× faster).
 
-### Where we stand vs SF11 (128 MB TT, both engines)
+### Where we stand vs SF11
 
-| | d7 nodes | d14 nodes | d20 nodes |
-|---|---|---|---|
-| **SF11 (46 FENs incl. 1 Chess960 we skip)** | 182 k | 6.93 M | 68.17 M |
-| **Us (45 FENs)** | 223 k | 24.1 M | did not finish — FEN 41 still running at 5 min |
+| | d14 nodes | d14 time |
+|---|---|---|
+| **SF11 (46 FENs, 128 MB shared TT)** | 6.93 M | 2.2 s |
+| **Us (45 FENs, 16 MB cold per pos), pre-Lever-2b** | 104.2 M | 21.1 s |
+| **Us (45 FENs, 16 MB cold per pos), post-Lever-2b** | 20.5 M | 7.2 s |
 
-NPS is ~3 Mnps both engines (we hit 3.3 Mnps on the bench above), so the gap is **pruning, not per-node speed**. At d14 we're 3–4× over the SF11 node budget; at d20 we're not in the same ballpark.
+Remaining gap to SF11 at d=14: ~3× on nodes / ~3× on time. NPS is comparable (2.8 Mnps vs 3.1 Mnps); the gap is now mostly **TT amortisation** (SF runs shared-TT, we run cold-per-position for honest per-position measurement) plus residual pruning gaps (Lever 2 quadratic SEE, Lever 2c lmrDepth-CMP).
 
 ### Outlier-position breakdown (d14, post-Lever-1)
 
@@ -61,23 +62,86 @@ These are all **horizon-stretching endgames** with long forced sequences that in
 
 **Lever 1: universal `moveCountPruning` (LANDED).** ~10 LOC change. FEN 26 cold d13 went 484 M → 226 k (2,140×). 45-pos cold d13 bench went 101 M → 17.5 M (5.8×). Cost: FEN 43 mate puzzle moved from "mate at d5 / 3.3 k" to "mate at d8 / 9.9 k" — same family as SF's ~2 Elo check-extension estimate. Acceptable.
 
-**Lever 2 (NOT TESTED): quadratic SEE quiet pruning** — `-(32 - min(lmrDepth, 18)) * lmrDepth²` instead of our `Value::ZERO` threshold (SF11 search.cpp:1027). Predicted to be 0–5% on the outlier endgames because in K+P+(minor) endgames almost no quiet is SEE-negative — its natural habitat is middlegame sac-checks.
+**Lever 2 (NOT TESTED): quadratic SEE quiet pruning** — `-(32 - min(lmrDepth, 18)) * lmrDepth²` instead of our `Value::ZERO` threshold (SF11 search.cpp:1027). After Lever 2b, predicted to be small on the remaining outliers (FEN 26 d=14, FEN 41) — both retain some deep tail but the dominant pathology is now gone.
 
-**Lever 2b (NOT TESTED): SF11 quiet-futility lmrDepth + history form** — replace our `217*(depth-improving)` margin with `lmrDepth < 6 && static_eval + 235 + 172*lmrDepth <= alpha && (mainH + ch0 + ch1 + ch3) < 25000`. Predicted similarly small on the residual outliers.
+**Lever 2b: SF11 quiet-futility lmrDepth + history form (LANDED 2026-05-14).** Replaced our raw-`depth <= 7` gate with SF11 search.cpp:1016-1024 verbatim: `lmrDepth < 6 && static_eval + 235 + 172*lmrDepth <= alpha && (mainH + ch0 + ch1 + ch3) < 25000`, gated by `pos.non_pawn_material(us) > 0` (SF11 Step 13 outer gate). The previous "predicted small" was wrong — instrumented diagnosis showed that with chained extensions keeping raw depth high at deep ply, our raw-depth gate disabled futility precisely where it was needed. Aggregate impact (cold TT, `--new-game-between-positions`):
+
+| | nodes / time before | nodes / time after | Δ |
+|---|---|---|---|
+| 45-pos bench d=13 | 17.5 M / 5.4 s | **10.5 M / 4.1 s** | −40% nodes, −24% time |
+| 45-pos bench d=14 | 104.2 M / 21.1 s | **20.5 M / 7.2 s** | **−80% nodes, −66% time** |
+| FEN 40 d=14 (worst outlier) | 22.0 M | **466 k** | **−98%, 47× faster** |
+| FEN 20 d=14 | (untimed earlier; 170 M at d=20) | 1.02 M | tail collapsed to ~80 nodes/ply past ply 30 |
+| FEN 41 d=14 | (didn't finish at d=20) | 7.45 M | residual deep tail; smaller |
+| Italian d=18 (quadrant member) | 7.6 M / 4.5 s | 8.1 M / 4.7 s | +6%, small middlegame regression |
+| FEN 43 mate puzzle | mate at d=8 / 9.9 k | mate at d=8 / 7.8 k | unchanged correctness |
+
+NPS dropped (3.1 → 2.6 Mnps at d=13) — the futility check now does cont-history reads per quiet, paid back many times over by the node savings. The middlegame regressions are single-digit %; the endgame wins are 10-50×.
+
+Code: search.rs:1298 `do_futility_prune` block. Removed `futility_prune` helper and `SHALLOW_PRUNE_MAX_DEPTH` const (now dead code). All 787 tests pass.
 
 **Singular extensions + multi-cut (THIRD ATTEMPT, 2026-05-14, REGRESSED).** Now that universal `moveCountPruning` was in tree, we re-attempted the SF11 step-14 logic: `excluded_move` on the stack, half-depth verification at `tt_value - 2*depth`, TT key XOR'd by `excludedMove << 16`, NMP/TT-save gated on `!excluded_move`, `singular_lmr → r -= 2` in LMR. Full plumbing landed cleanly (build green, 787 tests pass), but on the quadrant:
 - FEN 26 d13 cold: 226 k → 157 M (~700× regression vs Lever-1 baseline)
 - Italian d18 cold: 7.6 M → 14.3 M / 4.5 s → 8.5 s (~90% slower)
 - FEN 20 of the 45-pos bench stalled for multiple minutes; aborted
 
-Both regressions are in *the same kind of position* the previous attempts regressed on, despite Lever 1 being in place. Hypothesised root cause: in horizon-stretching forced sequences (which FEN 26 and FEN 20 both have), every TT move's only legal response is singular — so the gate fires on most nodes in the chain, each adds a half-depth verification *plus* `+1 ply` to the TT move, and the chain stretches further than it did pre-SE. Multi-cut doesn't fire enough to amortise the verification cost. **Reverted.** Branch left at the Lever-1-only state; the SE patch is recoverable from git reflog if needed. Plumbing notes preserved here for the next attempt.
+Both regressions are in *the same kind of position* the previous attempts regressed on, despite Lever 1 being in place. Hypothesised root cause: in horizon-stretching forced sequences (which FEN 26 and FEN 20 both have), every TT move's only legal response is singular — so the gate fires on most nodes in the chain, each adds a half-depth verification *plus* `+1 ply` to the TT move, and the chain stretches further than it did pre-SE. Multi-cut doesn't fire enough to amortise the verification cost. **Reverted.** Worth re-attempting on top of Lever 2b now that extension chains are tamer. Plumbing recoverable from git reflog.
 
-### Candidate next steps, ordered
+### Outlier profiling — 2026-05-14 (post-Lever-1)
 
-1. **Profile the residual outliers.** Lever 1 fixed the runaway at d13; the residual cost at d18–d20 is a different shape (long-forced-sequence horizon), and we don't yet know which mechanism would slice it. Pick one of FEN 20, FEN 26 at d20, or FEN 40 at d14 and trace the search to see where the nodes are being spent (LMR not biting? extensions stacking again? NMP misfiring as zugzwang?).
-2. **NMP zugzwang verification at high depth** (SF11 lines 838-886). Adds `nmpMinPly`/`nmpColor`. Doesn't target FEN 40 directly (Black has a knight so NPM > 0) but is a known pruning gap.
-3. **Lever 2 / 2b** — small focused tests against the quadrant. Cheap to try, modest predicted upside.
-4. **Singular extensions + multi-cut, fourth attempt** — only after either (a) we understand precisely why it explodes on horizon-stretching positions, or (b) the residual outliers are pruned by other means and SE is being tested on a cleaner shape.
+Per-ply node-histogram + selDepth instrumentation landed in tree (see "Temporary perf-investigation infrastructure" below). Profiling FENs 1, 20, 26, 40, 41 at d10/12/14 with cold TT (`--new-game-between-positions`) found:
+
+- **All four outliers (20, 26, 40, 41) hit `MAX_PLY = 64` at d=10.** Extension chains are running past the recursion cap. FEN 1 (start position) reaches only seldepth 18 at d=10 — normal.
+- **FENs 20 and 26 have a *small repeating* deep tail** (≤100 nodes per ply past ply 25), consistent with a short perpetual-check loop in qsearch. Combined tail-vs-bell is <5% of total nodes at d=14. These are nuisance, not catastrophe.
+- **FENs 40 and 41 have an *exponentially-growing* deep tail.** FEN 40 at d=14 is 22 M nodes total, of which ~17 M (77%) live in plies 50–63, peaking at 4.3 M nodes in the ply-63 (MAX_PLY-clamped) bucket. FEN 41 d=12 is the same shape, peaking at 1.1 M at ply 63.
+
+A/B-disabling extensions one at a time on FEN 40 d=14 (`--new-game-between-positions`):
+
+| Configuration | FEN 40 nodes | Speedup |
+|---|---|---|
+| All four extensions on (baseline) | 21.96 M | 1× |
+| Last-captures off | 9.62 M | 2.3× |
+| Passed-pawn off | 779 k | 28× |
+| Both off | 206 k | 107× |
+
+**The passed-pawn extension is the dominant chain-stacking culprit** in FENs 40 / 20 / 26. The trigger (`is_first_killer && is_advanced_pawn_push && pawn_passed`) matches SF11 verbatim, but in both-sides-passers endgames (K+P+N vs K+P, K+Q vs K+Q pawn race, K+R vs K+R pawn race) the killer at deep plies is the passer push, so the +1 ply fires on most plies and the chain stretches without bound.
+
+But — and this is the snag — **disabling passed-pawn extension regresses FEN 41**:
+
+| FEN | d=13 baseline | d=13 passed-pawn off | Ratio |
+|---|---|---|---|
+| 1 (startpos) | 179 k | 179 k | 1.0× |
+| 2 (Kiwipete) | 305 k | 305 k | 1.0× |
+| 8 (middlegame) | 461 k | 461 k | 1.0× |
+| 14 (middlegame) | 178 k | 178 k | 1.0× |
+| 20 (K+Q endgame) | 928 k | 313 k | **3.0× faster** |
+| 26 (K+R endgame) | 226 k | 80 k | **2.8× faster** |
+| 40 (K+P+N vs K+P) | 4.96 M | 551 k | **9.0× faster** |
+| 41 (K+2R vs K+Q+p) | 5.40 M | 10.56 M | **0.5× — regression** |
+
+FEN 41 *needs* the extension to find tactics (q-vs-2R with both-sides-passers has real resolutions); FEN 40 doesn't (the pawn race is maneuvering, not tactical). Middlegame positions are unaffected — the extension only fires when killer happens to be an advanced passer push, which is rare in middlegame.
+
+### Why SF11 doesn't run away — the depth-metric gap
+
+Initially I proposed tightening our passed-pawn extension (NPM gate, ply gate, stack-once rule). **All of those were my own inventions, not SF11 features.** Re-reading SF11's search.cpp lines 996-1031 (Step 13. "Pruning at shallow depth") more carefully:
+
+- SF11 has **no raw-depth gate** on its quiet pruning. Instead, every rule is gated on `lmrDepth = max(newDepth - reduction(improving, depth, moveCount), 0)`.
+- **Futility (line 1017):** `lmrDepth < 6 && static_eval + 235 + 172*lmrDepth ≤ alpha && hist_sum < 25000`
+- **Countermove (line 1011):** `lmrDepth < 4 + adj && cont[0] + cont[1] < threshold`
+- **SEE quiet pruning (line 1027):** threshold `-(32 - min(lmrDepth, 18)) * lmrDepth²` — gates implicitly via the lmrDepth² term
+
+**Our shallow pruning is gated on raw `depth <= SHALLOW_PRUNE_MAX_DEPTH (= 7)`** (search.rs:1304). When extensions stack and keep raw `depth` high at deep ply, our pruning *never fires* on the responding quiets. SF11's `lmrDepth` gate stays small because LMR has reduced the move — so SF11 prunes the same quiet we don't, and the chain breaks implicitly.
+
+This is the actual SF11 mechanism: **chained extensions don't run away because the quiets they generate are aggressively pruned via `lmrDepth`, not raw depth.** The extension triggers and `advanced_pawn_push` thresholds match SF11 verbatim, but our pruning gate is the wrong shape and lets the chain stretch unbounded.
+
+Also relevant: **SF11's `MAX_PLY = 246`; ours is 64.** Even with the right pruning, the deeper natural search horizon would help.
+
+### Candidate next steps, ordered (post-Lever-2b)
+
+1. **Lever 2 — port SF11's quadratic SEE quiet pruning** (search.cpp:1027). `-(32 - min(lmrDepth, 18)) * lmrDepth²` threshold. Layers on top of Lever 2b; SEE-negative deep quiets that survive futility get caught here. May further tighten the residual FEN 26 / FEN 41 deep tails.
+2. **Lever 2c — port SF11's countermove-history quiet pruning** (search.cpp:1011-1014). Two-table cont-history gate with `lmrDepth < 4 + adj`. We have a depth-based CMP gate (`lmr_d >= 4 + widen` at search.rs:1279); rewriting on top of Lever 2b's pattern would be a small refinement, mostly for completeness — our gate is already lmrDepth-based.
+3. **Singular extensions + multi-cut, fourth attempt** — Lever 2b tamed the chains that previously masked SE's gain. Worth re-attempting now.
+4. **NMP zugzwang verification** (lines 838-886). Separate gap. Worth porting for correctness; orthogonal to the chain pathology.
 
 ### What remains gated off in tree
 
@@ -85,12 +149,13 @@ Both regressions are in *the same kind of position* the previous attempts regres
 
 ## Open dockets
 
-### Engine perf reference numbers (2026-05-14, post-Lever-1)
+### Engine perf reference numbers (2026-05-14, post-Lever-2b)
 
-**Bench (SF11 default 45 positions):**
-- 16 MB shared TT, d13: 6.9 M nodes / 3.1 s / 2.25 Mnps.
-- 16 MB shared TT, d14: 24.1 M / 7.1 s / 3.4 Mnps (user-reported, 128 MB TT).
-- 16 MB cold-TT-per-position, d13: 17.5 M nodes / 5.6 s / 3.1 Mnps.
+**Bench (SF11 default 45 positions, 16 MB cold-TT-per-position):**
+- d13: 10.5 M nodes / 4.1 s / 2.6 Mnps (was 17.5 M / 5.4 s pre-Lever-2b).
+- d14: 20.5 M nodes / 7.2 s / 2.8 Mnps (was 104.2 M / 21.1 s pre-Lever-2b).
+
+NPS dropped vs pre-Lever-2b (3.1 → 2.6 Mnps) because the per-quiet futility now reads continuation-history, but the node savings (5× at d=14) dominate. Gap to SF11 d=14 (6.93 M / 2.2 s @ 128 MB shared TT) is now ~3× on nodes and ~3× on time — a much smaller delta than the pre-Lever-2b 15× / 10×.
 
 **Quadrant check** (the four positions used to A/B Lever 1; 16 MB cold, `--new-game-between-positions`):
 
@@ -136,7 +201,7 @@ The current production search has, in tree: PGO, reverse-futility pruning, statS
 
 **`ENGINE_TURN_NODE_CAP` review** — currently a flat 5 M at [`core/cli/src/play.rs:35`](core/cli/src/play.rs). Engine play hits the cap consistently at depth 20 (5,001,216 nodes per move). Historically necessary because some closed positions ran 30+ minutes uncapped. With Lever 1 in tree the worst-cases are now seconds rather than minutes, so worth re-running a few d20 positions uncapped to pick a number in the 15–50 M range, or making the cap depth-aware.
 
-**Temporary perf-investigation infrastructure currently in tree** (clean up when no longer needed): pawn-cache `hits` / `misses` counters + `Engine::pawn_cache_stats()` accessor + CLI `pawn$:` line in `search` output; dhat-heap feature in CLI Cargo.toml + global allocator hook in `main.rs`.
+**Temporary perf-investigation infrastructure currently in tree** (clean up when no longer needed): pawn-cache `hits` / `misses` counters + `Engine::pawn_cache_stats()` accessor + CLI `pawn$:` line in `search` output; dhat-heap feature in CLI Cargo.toml + global allocator hook in `main.rs`; `Search::nodes_per_ply` histogram + `seldepth` counter + `Engine::last_nodes_per_ply()` / `last_seldepth()` accessors; `chess-tutor bench --verbose` (prints per-position selDepth + compact ply histogram) and `--positions 20,26,40-41` (1-based whitelist).
 
 ### Engine strength, deferred
 

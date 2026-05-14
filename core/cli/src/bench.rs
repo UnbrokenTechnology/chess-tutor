@@ -37,6 +37,13 @@ pub struct BenchArgs {
     /// `Bench::new_game_between_positions` doc-comment for why this
     /// matters at large TT sizes.
     pub new_game_between_positions: bool,
+    /// TEMPORARY perf-investigation: enable per-ID heartbeat from the
+    /// search and print per-position selDepth + per-ply node histogram.
+    pub verbose: bool,
+    /// TEMPORARY perf-investigation: if `Some`, only run the listed
+    /// (1-based) position indices and skip the rest. Format is the raw
+    /// CLI string (e.g. `"20,26,40,41"`); parsed here.
+    pub positions: Option<String>,
 }
 
 pub fn run(args: BenchArgs) -> Result<()> {
@@ -52,9 +59,21 @@ pub fn run(args: BenchArgs) -> Result<()> {
         return Err(anyhow!("bench: no positions to search"));
     }
 
+    // Optional 1-based whitelist of positions to run. Set to `None`
+    // means "run all"; otherwise contains the set of indices that
+    // should actually be searched. Indices outside [1..=N] are
+    // silently dropped.
+    let allowed_indices: Option<std::collections::HashSet<usize>> = match &args.positions {
+        Some(s) => Some(parse_position_indices(s)?),
+        None => None,
+    };
+
     // Build the search-params template once so each position search
     // uses the same limit shape.
-    let params_template = build_params(&args.limit_type, args.limit)?;
+    let mut params_template = build_params(&args.limit_type, args.limit)?;
+    if args.verbose {
+        params_template.verbose_progress = true;
+    }
 
     println!(
         "bench: {} positions, TT = {} MB, limit = {} {}{}",
@@ -83,6 +102,11 @@ pub fn run(args: BenchArgs) -> Result<()> {
     let mut total_nodes: u64 = 0;
 
     for (i, entry) in positions.iter().enumerate() {
+        if let Some(set) = allowed_indices.as_ref() {
+            if !set.contains(&(i + 1)) {
+                continue;
+            }
+        }
         if args.new_game_between_positions && i > 0 {
             engine.new_game();
         }
@@ -128,6 +152,9 @@ pub fn run(args: BenchArgs) -> Result<()> {
             elapsed.as_millis(),
             nps / 1.0e6,
         );
+        if args.verbose {
+            print_ply_histogram(engine.last_seldepth(), engine.last_nodes_per_ply());
+        }
     }
 
     let elapsed = started.elapsed().max(Duration::from_millis(1));
@@ -163,6 +190,69 @@ fn load_positions(fen_file: &str) -> Result<Vec<String>> {
         .filter(|s| !s.is_empty() && !s.starts_with('#'))
         .map(str::to_string)
         .collect())
+}
+
+/// Parse the `--positions` CLI string ("1,8,20-22") into the set of
+/// 1-based indices to run. Empty entries are tolerated; ranges use the
+/// inclusive `start-end` form.
+fn parse_position_indices(s: &str) -> Result<std::collections::HashSet<usize>> {
+    let mut out = std::collections::HashSet::new();
+    for tok in s.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        if let Some((lo, hi)) = tok.split_once('-') {
+            let lo: usize = lo.trim().parse()
+                .map_err(|_| anyhow!("bench: bad position range {:?}", tok))?;
+            let hi: usize = hi.trim().parse()
+                .map_err(|_| anyhow!("bench: bad position range {:?}", tok))?;
+            if lo == 0 || hi < lo {
+                return Err(anyhow!("bench: bad position range {:?}", tok));
+            }
+            for i in lo..=hi {
+                out.insert(i);
+            }
+        } else {
+            let i: usize = tok.parse()
+                .map_err(|_| anyhow!("bench: bad position index {:?}", tok))?;
+            if i == 0 {
+                return Err(anyhow!("bench: position indices are 1-based; got 0"));
+            }
+            out.insert(i);
+        }
+    }
+    if out.is_empty() {
+        return Err(anyhow!("bench: --positions argument matched no indices"));
+    }
+    Ok(out)
+}
+
+/// Print a compact one-line per-ply node histogram for the most recent
+/// search. Trims trailing zeros so a d=14 search that selDepth-stretched
+/// to ply 35 prints only the populated buckets, not 246 trailing zeros.
+fn print_ply_histogram(seldepth: u32, per_ply: &[u64]) {
+    let last_nonzero = per_ply.iter().rposition(|&n| n > 0).unwrap_or(0);
+    print!("        seldepth {:>3}  ply nodes:", seldepth);
+    for (i, &n) in per_ply.iter().take(last_nonzero + 1).enumerate() {
+        print!(" {}={}", i, fmt_compact(n));
+    }
+    println!();
+}
+
+/// Format a node count compactly: 1_234_567 → "1.2M", 12_345 → "12k",
+/// 999 → "999". Used by the verbose histogram so a 12-bucket histogram
+/// fits on one line.
+fn fmt_compact(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.1}G", n as f64 / 1.0e9)
+    } else if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1.0e6)
+    } else if n >= 1_000 {
+        format!("{:.0}k", n as f64 / 1.0e3)
+    } else {
+        n.to_string()
+    }
 }
 
 fn build_params(limit_type: &str, limit: u64) -> Result<SearchParams> {

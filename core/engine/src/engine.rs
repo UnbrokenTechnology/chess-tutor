@@ -140,6 +140,12 @@ pub struct Engine {
     /// Both fields are zero before any search has run.
     last_nodes: u64,
     last_elapsed: Duration,
+    /// Maximum ply reached during the most recent search (selDepth).
+    /// TEMPORARY perf-investigation surface.
+    last_seldepth: u32,
+    /// Per-ply node histogram from the most recent search. Index = ply
+    /// from root. TEMPORARY perf-investigation surface.
+    last_nodes_per_ply: Vec<u64>,
 }
 
 impl Engine {
@@ -156,6 +162,8 @@ impl Engine {
             pawn_cache: pawns::Table::new(),
             last_nodes: 0,
             last_elapsed: Duration::ZERO,
+            last_seldepth: 0,
+            last_nodes_per_ply: Vec::new(),
         }
     }
 
@@ -190,6 +198,9 @@ impl Engine {
         let lines = search.run(pos, &params);
         self.last_nodes = search.node_count();
         self.last_elapsed = started.elapsed();
+        self.last_seldepth = search.seldepth();
+        self.last_nodes_per_ply.clear();
+        self.last_nodes_per_ply.extend_from_slice(search.nodes_per_ply());
         lines
     }
 
@@ -204,6 +215,19 @@ impl Engine {
     /// call. `Duration::ZERO` before any search has run.
     pub fn last_elapsed(&self) -> Duration {
         self.last_elapsed
+    }
+
+    /// Maximum ply (selDepth) reached during the most recent search.
+    /// TEMPORARY perf-investigation accessor.
+    pub fn last_seldepth(&self) -> u32 {
+        self.last_seldepth
+    }
+
+    /// Per-ply node histogram from the most recent search; index =
+    /// recursion depth from root. TEMPORARY perf-investigation
+    /// accessor.
+    pub fn last_nodes_per_ply(&self) -> &[u64] {
+        &self.last_nodes_per_ply
     }
 
     /// Convenience: nodes per second from the most recent search.
