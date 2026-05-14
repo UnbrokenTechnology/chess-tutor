@@ -47,11 +47,8 @@ pub struct BenchArgs {
 }
 
 pub fn run(args: BenchArgs) -> Result<()> {
-    if args.threads != 1 {
-        return Err(anyhow!(
-            "bench: only single-thread search is supported (got threads={})",
-            args.threads
-        ));
+    if args.threads == 0 {
+        return Err(anyhow!("bench: threads must be >= 1"));
     }
 
     let positions = load_positions(&args.fen_file)?;
@@ -70,7 +67,7 @@ pub fn run(args: BenchArgs) -> Result<()> {
 
     // Build the search-params template once so each position search
     // uses the same limit shape.
-    let mut params_template = build_params(&args.limit_type, args.limit)?;
+    let mut params_template = build_params(&args.limit_type, args.limit, args.threads)?;
     if args.verbose {
         params_template.verbose_progress = true;
     }
@@ -255,7 +252,7 @@ fn fmt_compact(n: u64) -> String {
     }
 }
 
-fn build_params(limit_type: &str, limit: u64) -> Result<SearchParams> {
+fn build_params(limit_type: &str, limit: u64, threads: usize) -> Result<SearchParams> {
     let mut p = SearchParams {
         max_depth: 1,
         max_nodes: None,
@@ -264,6 +261,7 @@ fn build_params(limit_type: &str, limit: u64) -> Result<SearchParams> {
         game_history: Vec::new(),
         force_include: Vec::new(),
         verbose_progress: false,
+        threads,
     };
     match limit_type {
         "depth" => {

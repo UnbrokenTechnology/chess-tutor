@@ -37,12 +37,13 @@ Per-search or per-engine allocations are fine. **Per-node allocations are not** 
 
 ## Next up: close the remaining bench gap to SF11
 
-Five changes landed 2026-05-14:
+Six changes landed 2026-05-14:
 1. **Lever 1: universal `moveCountPruning`** tamed the FEN 26 cold d13 cliff (484 M → 226 k).
 2. **Lever 2b: SF11 lmrDepth-gated quiet futility** collapsed the residual deep-tail problem at d14 (104 M → 20.5 M aggregate, 5× fewer nodes; FEN 40 alone 22 M → 466 k, 47× faster).
 3. **Unified SF11 LMR formula** replaced our `log₂·log₂/2` base with SF11's `int(23.4·ln(i))` table form — direct response to FEN 19 regressing 290× under raw Lever 2b because our smaller `lmrDepth` made the SF11 `< 6` gate fire in nodes SF11 wouldn't fire on. With matched LMR base, the gate behaves as SF11 intended.
 4. **SF11 qsearch depth tracking + recapture-only mode** — qsearch now takes `Depth`, decrements by 1 each recursive call (SF11 search.cpp:1522), and at `Depth::QS_RECAPTURES (-5)` the picker filters to moves landing on the parent's to-sq (search.cpp:1459). FEN 19 d=20 391 M → 7.8 M (50×); FEN 41 d=14 16 MB 44 M → 1.45 M (30×).
 5. **SF11 aspiration depth-reduction on fail-high** (search.cpp:453) — consecutive fail-highs reduce the re-search depth via `adjusted_depth = max(1, depth - failed_high_cnt)`. FEN 20 d=20 36.8 M → 10 M (3.7×); full d=20 bench 145 s → 116 s. SF11's `21 + |prev|/256` initial delta and `delta + delta/4 + 5` growth both regressed FEN 26 d=13 by 3× on our codebase — kept our existing `delta=17` + `2×` growth; depth-reduction is the only load-bearing piece of the aspiration port.
+6. **Lazy SMP multi-threading** — `SearchParams.threads: usize` (default 1) controls how many parallel search threads run. Stockfish-style: main thread does iterative deepening and returns the result; `threads - 1` helper threads run the same loop on per-thread `WorkerState` (history / counter-moves / cont-history / capture-history / pawn-cache) and contribute only via the shared TT. Stop signal is a `Arc<AtomicBool>` set when main thread finishes. `Engine` now holds `Vec<WorkerState>` that grows on demand. The desktop GUI uses all available cores by default; CLI `bench <tt> <threads> <depth>` passes the second argument through (was previously rejected); CLI `play --threads N` exposes it; all analysis paths (REPL `analyze`, retrospectives, hint panel) stay single-threaded so teaching output is bit-deterministic.
 
 ### Where we stand vs SF11
 
@@ -57,7 +58,18 @@ Five changes landed 2026-05-14:
 
 Full 45-pos d=20 / 128 MB cold: **115.9 s** (was 145.7 s reported by user pre-aspiration-fix, was multi-hour pre-Lever-1). The d=20 worst-position list has flattened: largest position is now FEN 1 (28.9 M / 17.5 s) at d=20, which is a real-search startpos cost rather than a pathology.
 
-NPS still ~2.0 Mnps (vs SF11's 3.1 Mnps). That gap is the remaining 30%-or-so headroom — diffuse across all positions, not concentrated in any one outlier.
+NPS still ~2.0 Mnps single-threaded (vs SF11's 3.1 Mnps). That gap is the remaining 30%-or-so headroom — diffuse across all positions, not concentrated in any one outlier.
+
+**Multi-threaded numbers** (this machine, 24 logical cores, 128 MB shared TT):
+
+| | d=14 bench (45 pos) | d=20 bench (45 pos) |
+|---|---|---|
+| 1 thread | 6.5 s | 116.8 s |
+| 2 threads | 5.1 s (1.27×) | — |
+| 4 threads | 3.7 s (1.77×) | 71.1 s (1.64×) |
+| 8 threads | 3.1 s (2.11×) | **43.0 s (2.72×)** |
+
+8-thread d=20 is 2.72× faster than 1-thread, and **3.4× faster than the 145.7 s baseline** the user reported before the aspiration fix. Per-position variance is high under Lazy SMP (FEN 20 d=20 at 8 threads ranges 1.7 s – 26 s across 5 runs); aggregate numbers are stable because high and low variance positions average out across the 45-pos set.
 
 ### Known residual outliers
 

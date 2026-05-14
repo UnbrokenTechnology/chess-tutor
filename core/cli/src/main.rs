@@ -225,6 +225,13 @@ enum Command {
         /// search loops or depth-N iterations that never return.
         #[arg(long)]
         search_progress: bool,
+        /// Number of search threads for engine moves (Lazy SMP). Default
+        /// 1 keeps engine moves bit-deterministic across runs; raise it
+        /// to use more cores. REPL `search` / `analyze` commands and
+        /// the auto-retrospective always run single-threaded
+        /// regardless of this setting.
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
     },
 }
 
@@ -315,6 +322,9 @@ fn main() -> Result<()> {
                 game_history: Vec::new(),
                 force_include: Vec::new(),
                 verbose_progress: false,
+                // `search` / `analyze` are analytical paths — keep
+                // them single-threaded for bit-identical outputs.
+                threads: 1,
             };
 
             if analyze {
@@ -435,6 +445,7 @@ fn main() -> Result<()> {
             show_fens,
             reset_engine_per_move,
             search_progress,
+            threads,
         } => {
             play::play_loop(play::PlayConfig {
                 start_fen: fen,
@@ -448,6 +459,7 @@ fn main() -> Result<()> {
                 show_fens,
                 reset_engine_per_move,
                 search_progress,
+                threads: threads.max(1),
             })?;
         }
     }

@@ -15,11 +15,55 @@ use crate::eval::EvalTrace;
 use crate::movepick::{ButterflyHistory, CaptureHistory, ContHistStore, CounterMoveTable};
 use crate::pawns;
 use crate::position::Position;
-use crate::search::Search;
+use crate::search::{Search, StopFlag};
 use crate::tt::{TranspositionTable, DEFAULT_TT_MB};
 use crate::types::{Move, Value};
 
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+// =========================================================================
+// Per-thread worker state
+// =========================================================================
+
+/// Bundle of per-thread search tables. Each search thread (main +
+/// helpers) gets its own [`WorkerState`]; the transposition table is
+/// the only thing shared across threads. Persisted across `Engine::
+/// search` calls so move-ordering history compounds across moves of
+/// the same game (cleared via [`Engine::new_game`]).
+#[derive(Clone)]
+pub struct WorkerState {
+    pub(crate) history: ButterflyHistory,
+    pub(crate) counter_moves: CounterMoveTable,
+    /// ~8 MB on the heap, partitioned by `[in_check][was_capture]` of
+    /// the parent move. Persisted across moves of the same game so
+    /// move ordering learning compounds.
+    pub(crate) cont_history: ContHistStore,
+    /// ~16 KB tiebreaker on top of MVV-LVA when ordering good captures.
+    pub(crate) capture_history: CaptureHistory,
+    pub(crate) pawn_cache: pawns::Table,
+}
+
+impl WorkerState {
+    pub(crate) fn new() -> WorkerState {
+        WorkerState {
+            history: ButterflyHistory::new(),
+            counter_moves: CounterMoveTable::new(),
+            cont_history: ContHistStore::new(),
+            capture_history: CaptureHistory::new(),
+            pawn_cache: pawns::Table::new(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.history.clear();
+        self.counter_moves.clear();
+        self.cont_history.clear();
+        self.capture_history.clear();
+        self.pawn_cache.clear();
+    }
+}
 
 /// Per-search knobs controlling when to stop and how many PVs to return.
 /// `Default` yields a sensible interactive setting (depth 10, single PV,
@@ -70,6 +114,15 @@ pub struct SearchParams {
     /// or stuck searches; not for normal use (the stderr noise is
     /// substantial). Off by default.
     pub verbose_progress: bool,
+    /// How many parallel search threads to run (Stockfish-style Lazy
+    /// SMP). The main thread does iterative deepening normally and
+    /// returns the result; `threads - 1` helper threads run the same
+    /// loop on their own per-thread history tables, contributing to
+    /// the shared TT and getting cut off when the main thread
+    /// finishes. `1` is the deterministic single-thread path —
+    /// required by callers that need bit-identical results across
+    /// runs (analytical engine clones, teaching retrospectives).
+    pub threads: usize,
 }
 
 impl Default for SearchParams {
@@ -82,6 +135,7 @@ impl Default for SearchParams {
             game_history: Vec::new(),
             force_include: Vec::new(),
             verbose_progress: false,
+            threads: 1,
         }
     }
 }
@@ -124,18 +178,13 @@ pub struct SearchLine {
 #[derive(Clone)]
 pub struct Engine {
     tt: TranspositionTable,
-    history: ButterflyHistory,
-    counter_moves: CounterMoveTable,
-    /// Stockfish-style continuation history: ~8 MB on the heap,
-    /// partitioned by `[in_check][was_capture]` of the parent move.
-    /// Persisted across moves of the same game so move ordering
-    /// learning compounds; cleared in [`Engine::new_game`].
-    cont_history: ContHistStore,
-    /// Capture-history table (~16 KB) used as a tiebreaker on top of
-    /// MVV-LVA when ordering good captures. Persists across moves of
-    /// the same game.
-    capture_history: CaptureHistory,
-    pawn_cache: pawns::Table,
+    /// Per-thread worker state, indexed by thread id (`[0]` is always
+    /// the main thread). Grown on demand by [`Engine::ensure_workers`]
+    /// when a search asks for more threads than we have. Helper-thread
+    /// state persists across calls just like the main thread's, so a
+    /// helper that learned a useful history entry in move N can use it
+    /// to improve move N+1's move ordering.
+    workers: Vec<WorkerState>,
     /// Diagnostic stats from the most recent [`Engine::search`] call.
     /// Both fields are zero before any search has run.
     last_nodes: u64,
@@ -151,15 +200,13 @@ pub struct Engine {
 impl Engine {
     /// Build an engine backed by a transposition table of (at most)
     /// `tt_size_mb` megabytes. Size is rounded down to a whole number of
-    /// TT clusters.
+    /// TT clusters. The worker pool starts with one [`WorkerState`]
+    /// (for single-threaded search) and grows lazily when a search
+    /// asks for more threads.
     pub fn new(tt_size_mb: usize) -> Engine {
         Engine {
             tt: TranspositionTable::new(tt_size_mb),
-            history: ButterflyHistory::new(),
-            counter_moves: CounterMoveTable::new(),
-            cont_history: ContHistStore::new(),
-            capture_history: CaptureHistory::new(),
-            pawn_cache: pawns::Table::new(),
+            workers: vec![WorkerState::new()],
             last_nodes: 0,
             last_elapsed: Duration::ZERO,
             last_seldepth: 0,
@@ -167,17 +214,25 @@ impl Engine {
         }
     }
 
-    /// Clear everything that accumulated across prior searches: TT,
-    /// butterfly history, counter-move table, continuation history,
-    /// capture history, pawn cache. Call between games so learning
+    /// Clear everything that accumulated across prior searches: TT and
+    /// every worker's history / counter-move / continuation-history /
+    /// capture-history / pawn-cache. Call between games so learning
     /// from game N doesn't pollute move ordering in game N+1.
     pub fn new_game(&mut self) {
         self.tt.clear();
-        self.history.clear();
-        self.counter_moves.clear();
-        self.cont_history.clear();
-        self.capture_history.clear();
-        self.pawn_cache.clear();
+        for worker in self.workers.iter_mut() {
+            worker.clear();
+        }
+    }
+
+    /// Ensure the worker pool has at least `n` workers, growing it
+    /// with fresh [`WorkerState`]s as needed. New helper-thread state
+    /// starts empty (no inherited history); subsequent calls preserve
+    /// what each helper has learned.
+    fn ensure_workers(&mut self, n: usize) {
+        while self.workers.len() < n {
+            self.workers.push(WorkerState::new());
+        }
     }
 
     /// Run a search and return at most `params.multi_pv` ranked lines,
@@ -185,23 +240,102 @@ impl Engine {
     /// during the search (do/undo) but is always restored to its
     /// original state before returning. An empty vector indicates a
     /// terminal root position (checkmate or stalemate).
+    ///
+    /// When `params.threads > 1`, `params.threads - 1` helper threads
+    /// run alongside the calling thread (Stockfish-style Lazy SMP):
+    /// they share the TT, have their own history tables, and exit
+    /// when the main thread finishes. The returned lines come from
+    /// the main thread only; helpers contribute via TT writes.
     pub fn search(&mut self, pos: &mut Position, params: SearchParams) -> Vec<SearchLine> {
         let started = Instant::now();
-        let mut search = Search::new(
-            &self.tt,
-            &mut self.history,
-            &mut self.counter_moves,
-            &mut self.cont_history,
-            &mut self.capture_history,
-            &mut self.pawn_cache,
-        );
-        let lines = search.run(pos, &params);
-        self.last_nodes = search.node_count();
+        let n_threads = params.threads.max(1);
+        self.ensure_workers(n_threads);
+
+        let stop_flag: StopFlag = Arc::new(AtomicBool::new(false));
+        let (main_lines, total_nodes, main_seldepth, main_nodes_per_ply) =
+            self.run_threaded(pos, &params, n_threads, stop_flag);
+
+        self.last_nodes = total_nodes;
         self.last_elapsed = started.elapsed();
-        self.last_seldepth = search.seldepth();
-        self.last_nodes_per_ply.clear();
-        self.last_nodes_per_ply.extend_from_slice(search.nodes_per_ply());
-        lines
+        self.last_seldepth = main_seldepth;
+        self.last_nodes_per_ply = main_nodes_per_ply;
+        main_lines
+    }
+
+    /// Spawn `n_threads - 1` helper threads and run the main thread's
+    /// search on the calling thread. Returns `(main_lines, sum_of_nodes,
+    /// main_seldepth, main_nodes_per_ply)`. Helpers run the same
+    /// iterative-deepening loop on their own [`WorkerState`] and
+    /// contribute to the shared TT; only the main thread's PV / score
+    /// are returned, because the main thread is the one tracking
+    /// `force_include` and MultiPV ordering.
+    fn run_threaded(
+        &mut self,
+        pos: &mut Position,
+        params: &SearchParams,
+        n_threads: usize,
+        stop_flag: StopFlag,
+    ) -> (Vec<SearchLine>, u64, u32, Vec<u64>) {
+        // Split the worker pool into one main + many helpers via
+        // disjoint mutable references so each thread can mutate its
+        // own state without coordination.
+        let (main_workers, helper_workers) = self.workers[..n_threads].split_at_mut(1);
+        let main_worker = &mut main_workers[0];
+
+        // Single-thread fast path: skip the scope/spawn machinery
+        // entirely so deterministic callers pay zero threading
+        // overhead.
+        if n_threads == 1 {
+            let mut search = Search::new(&self.tt, main_worker, stop_flag);
+            let lines = search.run(pos, params);
+            let nodes = search.node_count();
+            let seldepth = search.seldepth();
+            let per_ply = search.nodes_per_ply().to_vec();
+            return (lines, nodes, seldepth, per_ply);
+        }
+
+        let tt = &self.tt;
+        std::thread::scope(|scope| {
+            // Helpers each get their own position clone, their own
+            // worker, and a clone of the params (forced moves and
+            // game history are read-only in the search).
+            let helper_handles: Vec<_> = helper_workers
+                .iter_mut()
+                .map(|worker| {
+                    let mut local_pos = pos.clone();
+                    let local_params = SearchParams {
+                        verbose_progress: false,
+                        ..params.clone()
+                    };
+                    let stop_flag = stop_flag.clone();
+                    scope.spawn(move || {
+                        let mut search = Search::new(tt, worker, stop_flag);
+                        // Helpers run for their side effects on the
+                        // shared TT; their root_lines are discarded.
+                        let _ = search.run(&mut local_pos, &local_params);
+                        search.node_count()
+                    })
+                })
+                .collect();
+
+            // Main thread runs on the caller's thread.
+            let mut main_search = Search::new(tt, main_worker, stop_flag.clone());
+            let main_lines = main_search.run(pos, params);
+            let main_nodes = main_search.node_count();
+            let main_seldepth = main_search.seldepth();
+            let main_per_ply = main_search.nodes_per_ply().to_vec();
+
+            // Signal helpers to stop now that the main thread is
+            // done. They check the flag inside their stop-cadence
+            // window, so the wait is bounded.
+            stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let mut total_nodes = main_nodes;
+            for handle in helper_handles {
+                total_nodes += handle.join().unwrap_or(0);
+            }
+            (main_lines, total_nodes, main_seldepth, main_per_ply)
+        })
     }
 
     /// Total node count visited by the most recent [`search`](Self::search)
@@ -249,15 +383,21 @@ impl Engine {
 
     /// TEMPORARY (perf investigation): pawn-cache hit/miss counts since
     /// engine construction or the last [`reset_pawn_cache_stats`].
-    /// Remove once we've used the data to decide on cache sizing.
+    /// Reads the main thread's worker; helper workers' caches aren't
+    /// aggregated. Remove once we've used the data to decide on cache
+    /// sizing.
     pub fn pawn_cache_stats(&self) -> (u64, u64) {
-        self.pawn_cache.stats()
+        self.workers[0].pawn_cache.stats()
     }
 
     /// TEMPORARY (perf investigation): zero the pawn-cache hit/miss
-    /// counters so the next search reports fresh numbers.
+    /// counters so the next search reports fresh numbers. Resets every
+    /// worker's counters so an aggregated read after the reset isn't
+    /// pre-populated by helper-thread activity.
     pub fn reset_pawn_cache_stats(&mut self) {
-        self.pawn_cache.reset_stats();
+        for worker in self.workers.iter_mut() {
+            worker.pawn_cache.reset_stats();
+        }
     }
 
 }
@@ -286,14 +426,14 @@ mod tests {
     #[test]
     fn new_game_clears_state() {
         let mut e = Engine::new(1);
-        e.history.update(
+        e.workers[0].history.update(
             crate::types::Color::White,
             crate::types::Square::E2,
             crate::types::Square::E4,
             1000,
         );
         assert_ne!(
-            e.history.get(
+            e.workers[0].history.get(
                 crate::types::Color::White,
                 crate::types::Square::E2,
                 crate::types::Square::E4
@@ -302,7 +442,7 @@ mod tests {
         );
         e.new_game();
         assert_eq!(
-            e.history.get(
+            e.workers[0].history.get(
                 crate::types::Color::White,
                 crate::types::Square::E2,
                 crate::types::Square::E4

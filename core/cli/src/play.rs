@@ -56,6 +56,11 @@ pub struct PlayConfig {
     /// from the engine to stderr during each search. Sets
     /// `SearchParams::verbose_progress` on every search we run.
     pub search_progress: bool,
+    /// Number of Lazy-SMP search threads for the engine's *move* (the
+    /// search that picks what the engine plays). REPL analysis
+    /// commands and the retrospective stay single-threaded for
+    /// deterministic teaching output.
+    pub threads: usize,
 }
 
 /// One played ply — enough to undo the move and show what was played.
@@ -420,6 +425,7 @@ fn play_engine_turn(
         game_history: game_history_for_search(position_keys),
         force_include: Vec::new(),
         verbose_progress: cfg.search_progress,
+        threads: cfg.threads,
     };
     write!(out, "engine thinking (depth {})... ", cfg.depth)?;
     out.flush()?;
@@ -482,6 +488,9 @@ fn run_search_report(
         game_history: game_history_for_search(position_keys),
         force_include: Vec::new(),
         verbose_progress: false,
+        // REPL `search` is analytical — stay single-threaded so
+        // repeated invocations on the same position match bit-for-bit.
+        threads: 1,
     };
     let started = Instant::now();
     let lines = engine.search(pos, params);
@@ -559,6 +568,8 @@ fn run_analyze_report(
         game_history: game_history_for_search(position_keys),
         force_include: Vec::new(),
         verbose_progress: false,
+        // REPL `analyze` is analytical — single-threaded.
+        threads: 1,
     };
     let started = Instant::now();
     let analyses = analyze_position(engine, pos, params);

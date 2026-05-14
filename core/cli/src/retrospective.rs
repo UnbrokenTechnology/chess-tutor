@@ -58,6 +58,10 @@ pub fn run_and_render(
         game_history,
         force_include: vec![user_mv],
         verbose_progress: false,
+        // Retrospectives are teaching output — keep them
+        // deterministic so the same position always produces the
+        // same narration.
+        threads: 1,
     };
     let analyses = analyze_position(engine, pre_move_pos, params);
     let opts = NarrationOptions {

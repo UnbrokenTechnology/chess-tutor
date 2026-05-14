@@ -111,6 +111,9 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                     game_history,
                     force_include: vec![user_move],
                     verbose_progress: false,
+                    // Retrospective narration is teaching output —
+                    // keep it bit-deterministic across runs.
+                    threads: 1,
                 };
                 let analyses = analyze_position(&mut analysis_engine, &mut pre_move_pos, params);
                 let opts = NarrationOptions {
@@ -142,6 +145,9 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                     game_history,
                     force_include: Vec::new(),
                     verbose_progress: false,
+                    // Hint-panel analysis is deterministic teaching
+                    // output — single-threaded.
+                    threads: 1,
                 };
                 let analyses = analyze_position(&mut analysis_engine, &mut pos, params);
                 let _ = tx.send(WorkerResult::Analyze { for_key, analyses });
@@ -520,6 +526,12 @@ impl App {
             game_history: game_history_for_search(&self.position_keys),
             force_include: Vec::new(),
             verbose_progress: false,
+            // Engine moves: use every available core. The GUI is
+            // single-user, so we never compete with a concurrent
+            // analytical search.
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
         };
         self.engine_thinking = true;
         let _ = self.worker_tx.send(WorkerJob::Search {

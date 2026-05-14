@@ -27,9 +27,18 @@ use crate::position::{Position, StateInfo};
 use crate::tt::TranspositionTable;
 use crate::types::{Bound, Color, Depth, Move, PieceType, Square, Value};
 
-use crate::engine::{SearchLine, SearchParams};
+use crate::engine::{SearchLine, SearchParams, WorkerState};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
+
+/// Shared stop flag set by the main thread (or by any thread that hits
+/// the configured limits) to ask all running searches to bail. Helper
+/// threads in a Lazy-SMP search check this between batches of nodes;
+/// the single-thread fast path also uses it but only writes to it
+/// (never observed by another thread).
+pub(crate) type StopFlag = Arc<AtomicBool>;
 
 // =========================================================================
 // Constants
@@ -277,7 +286,12 @@ pub(crate) struct Search<'a> {
     start_time: Instant,
     stop_time: Option<Instant>,
     next_stop_check: u64,
-    aborted: bool,
+    /// Shared stop flag. In single-thread mode only this thread writes
+    /// to it (when its own limits fire); in multi-thread mode the
+    /// main thread sets it once iterative deepening finishes so the
+    /// helper threads see it and bail. Read via [`should_stop`]
+    /// which folds in the local node/time limits too.
+    stop_flag: StopFlag,
 
     /// When `true`, write iterative-deepening and root-move progress
     /// to stderr. Mirrors [`SearchParams::verbose_progress`]; set from
@@ -297,12 +311,18 @@ pub(crate) struct Search<'a> {
 impl<'a> Search<'a> {
     pub(crate) fn new(
         tt: &'a TranspositionTable,
-        history: &'a mut ButterflyHistory,
-        counter_moves: &'a mut CounterMoveTable,
-        cont_history: &'a mut ContHistStore,
-        capture_history: &'a mut CaptureHistory,
-        pawn_cache: &'a mut pawns::Table,
+        worker: &'a mut WorkerState,
+        stop_flag: StopFlag,
     ) -> Search<'a> {
+        // Destructure into disjoint &mut field borrows so the rest of
+        // the search code can keep its existing per-table call sites.
+        let WorkerState {
+            history,
+            counter_moves,
+            cont_history,
+            capture_history,
+            pawn_cache,
+        } = worker;
         Search {
             tt,
             history,
@@ -330,7 +350,7 @@ impl<'a> Search<'a> {
             start_time: Instant::now(),
             stop_time: None,
             next_stop_check: STOP_CHECK_INTERVAL,
-            aborted: false,
+            stop_flag,
             verbose_progress: false,
             verbose_next_tick: 0,
             root_stm: Color::White,
@@ -368,7 +388,9 @@ impl<'a> Search<'a> {
             *slot = 0;
         }
         self.seldepth = 0;
-        self.aborted = false;
+        // The stop flag is shared and may have been left `true` by a
+        // previous search (the caller is responsible for handing us a
+        // fresh one when they want a new run). Don't reset here.
         self.start_time = Instant::now();
         self.stop_time = params.max_time.map(|d| self.start_time + d);
         self.max_nodes = params.max_nodes;
@@ -428,7 +450,7 @@ impl<'a> Search<'a> {
                 let prev = self.root_moves[pv_idx].prev_score;
                 let _score = self.aspiration_search(pos, depth as i32, prev);
 
-                if self.aborted {
+                if self.is_aborted() {
                     break 'ids;
                 }
 
@@ -482,7 +504,7 @@ impl<'a> Search<'a> {
         // the tail so `allowed_root` resolves to that one move only.
         // The slot's output lands at `root_moves[multi_pv]` and
         // `self.multi_pv` increments by one per successful forced slot.
-        if !params.force_include.is_empty() && !self.aborted {
+        if !params.force_include.is_empty() && !self.is_aborted() {
             self.run_forced_slots(pos, &params.force_include, max_depth);
 
             // Final re-sort so forced moves interleave with the natural
@@ -533,7 +555,7 @@ impl<'a> Search<'a> {
             .collect();
 
         for &forced_mv in forced {
-            if self.aborted {
+            if self.is_aborted() {
                 break;
             }
             if forced_mv == Move::NONE {
@@ -567,7 +589,7 @@ impl<'a> Search<'a> {
             for depth in 1..=max_depth {
                 let prev = self.root_moves[new_slot].prev_score;
                 let _ = self.aspiration_search(pos, depth as i32, prev);
-                if self.aborted {
+                if self.is_aborted() {
                     break;
                 }
                 self.root_moves[new_slot].prev_score = self.root_moves[new_slot].score;
@@ -638,7 +660,7 @@ impl<'a> Search<'a> {
             // cutNode)` — so we always enter with `cut_node = false`.
             let score = self.negamax(pos, alpha, beta, adjusted_depth, 0, true, true, None, false);
 
-            if self.aborted {
+            if self.is_aborted() {
                 return score;
             }
 
@@ -912,7 +934,7 @@ impl<'a> Search<'a> {
             self.path_keys.pop();
             pos.undo_null_move(saved);
 
-            if self.aborted {
+            if self.is_aborted() {
                 return Value::ZERO;
             }
 
@@ -1073,7 +1095,7 @@ impl<'a> Search<'a> {
                 self.path_keys.pop();
                 pos.undo_move(mv, state);
 
-                if self.aborted {
+                if self.is_aborted() {
                     return Value::ZERO;
                 }
 
@@ -1615,7 +1637,7 @@ impl<'a> Search<'a> {
             self.path_keys.pop();
             pos.undo_move(mv, state);
 
-            if self.aborted {
+            if self.is_aborted() {
                 return Value::ZERO;
             }
 
@@ -1975,7 +1997,7 @@ impl<'a> Search<'a> {
             self.path_keys.pop();
             pos.undo_move(mv, state);
 
-            if self.aborted {
+            if self.is_aborted() {
                 return Value::ZERO;
             }
 
@@ -2090,8 +2112,19 @@ impl<'a> Search<'a> {
         false
     }
 
+    /// Cheap read of the shared stop flag. Used by code paths that
+    /// just need to bail an in-progress recursion without redoing the
+    /// node-cadence / time-deadline / heartbeat checks.
+    fn is_aborted(&self) -> bool {
+        self.stop_flag.load(Ordering::Relaxed)
+    }
+
     fn check_should_stop(&mut self) -> bool {
-        if self.aborted {
+        // Shared stop-flag observation: another thread (or this thread's
+        // own earlier limit-hit) may have set it. Read it on every
+        // call so a helper thread sees the main thread's stop signal
+        // promptly.
+        if self.stop_flag.load(Ordering::Relaxed) {
             return true;
         }
         if self.verbose_progress && self.nodes >= self.verbose_next_tick {
@@ -2106,13 +2139,13 @@ impl<'a> Search<'a> {
             self.next_stop_check = self.nodes + STOP_CHECK_INTERVAL;
             if let Some(n) = self.max_nodes {
                 if self.nodes >= n {
-                    self.aborted = true;
+                    self.stop_flag.store(true, Ordering::Relaxed);
                     return true;
                 }
             }
             if let Some(deadline) = self.stop_time {
                 if Instant::now() >= deadline {
-                    self.aborted = true;
+                    self.stop_flag.store(true, Ordering::Relaxed);
                     return true;
                 }
             }
@@ -2502,19 +2535,9 @@ mod tests {
         // A check-rich position that fed check extensions past MAX_PLY
         // recursion levels crashed with "index out of bounds".
         let tt = TranspositionTable::new(1);
-        let mut history = crate::movepick::ButterflyHistory::new();
-        let mut counter_moves = crate::movepick::CounterMoveTable::new();
-        let mut cont_history = crate::movepick::ContHistStore::new();
-        let mut capture_history = crate::movepick::CaptureHistory::new();
-        let mut pawn_cache = pawns::Table::new();
-        let mut search = Search::new(
-            &tt,
-            &mut history,
-            &mut counter_moves,
-            &mut cont_history,
-            &mut capture_history,
-            &mut pawn_cache,
-        );
+        let mut worker = crate::engine::WorkerState::new();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut search = Search::new(&tt, &mut worker, stop);
         let mut pos = Position::startpos();
 
         // Both entry points must survive being called at the cap.
@@ -2551,19 +2574,9 @@ mod tests {
         // matches) but the clock honestly reflects "four reversible
         // plies have preceded this position."
         let tt = TranspositionTable::new(1);
-        let mut history = crate::movepick::ButterflyHistory::new();
-        let mut counter_moves = crate::movepick::CounterMoveTable::new();
-        let mut cont_history = crate::movepick::ContHistStore::new();
-        let mut capture_history = crate::movepick::CaptureHistory::new();
-        let mut pawn_cache = pawns::Table::new();
-        let mut search = Search::new(
-            &tt,
-            &mut history,
-            &mut counter_moves,
-            &mut cont_history,
-            &mut capture_history,
-            &mut pawn_cache,
-        );
+        let mut worker = crate::engine::WorkerState::new();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut search = Search::new(&tt, &mut worker, stop);
         let pos =
             Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 4 3").unwrap();
 
