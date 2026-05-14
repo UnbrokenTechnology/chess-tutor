@@ -37,17 +37,33 @@ Per-search or per-engine allocations are fine. **Per-node allocations are not** 
 
 ## Next up: close the remaining bench gap to SF11
 
-Two levers landed 2026-05-14: universal `moveCountPruning` (Lever 1) tamed the FEN 26 cold d13 cliff (484 M → 226 k); SF11-style lmrDepth-gated quiet futility (Lever 2b) collapsed the residual deep-tail problem at d14 (104 M → 20.5 M aggregate, 5× fewer nodes; FEN 40 alone 22 M → 466 k, 47× faster).
+Three changes landed 2026-05-14:
+1. **Lever 1: universal `moveCountPruning`** tamed the FEN 26 cold d13 cliff (484 M → 226 k).
+2. **Lever 2b: SF11 lmrDepth-gated quiet futility** collapsed the residual deep-tail problem at d14 (104 M → 20.5 M aggregate, 5× fewer nodes; FEN 40 alone 22 M → 466 k, 47× faster).
+3. **Unified SF11 LMR formula** replaced our `log₂·log₂/2` base with SF11's `int(23.4·ln(i))` table form — direct response to FEN 19 regressing 290× under raw Lever 2b because our smaller `lmrDepth` made the SF11 `< 6` gate fire in nodes SF11 wouldn't fire on. With matched LMR base, the gate behaves as SF11 intended.
 
 ### Where we stand vs SF11
 
-| | d14 nodes | d14 time |
-|---|---|---|
-| **SF11 (46 FENs, 128 MB shared TT)** | 6.93 M | 2.2 s |
-| **Us (45 FENs, 16 MB cold per pos), pre-Lever-2b** | 104.2 M | 21.1 s |
-| **Us (45 FENs, 16 MB cold per pos), post-Lever-2b** | 20.5 M | 7.2 s |
+| | d13 nodes | d13 time | d14 nodes | d14 time |
+|---|---|---|---|---|
+| **SF11 (46 FENs, 128 MB shared TT)** | — | — | 6.93 M | 2.2 s |
+| **Us pre-Lever-2b (16 MB cold per pos)** | 17.5 M | 5.4 s | 104.2 M | 21.1 s |
+| **Us Lever 2b raw (16 MB cold per pos)** | 10.5 M | 4.1 s | 20.5 M | 7.2 s |
+| **Us unified-SF11-LMR (16 MB cold per pos)** | **8.7 M** | **3.9 s** | 57.8 M | 14.1 s |
+| **Us unified-SF11-LMR (128 MB cold per pos)** | — | — | **22.1 M** | **9.5 s** |
 
-Remaining gap to SF11 at d=14: ~3× on nodes / ~3× on time. NPS is comparable (2.8 Mnps vs 3.1 Mnps); the gap is now mostly **TT amortisation** (SF runs shared-TT, we run cold-per-position for honest per-position measurement) plus residual pruning gaps (Lever 2 quadratic SEE, Lever 2c lmrDepth-CMP).
+NPS is comparable to SF11 (~2.8 vs ~3.1 Mnps); the residual gap is **TT amortisation** (SF runs shared-TT, we run cold-per-position for honest per-position measurement) plus residual pruning gaps (Lever 2 quadratic SEE not yet ported).
+
+### Known residual outliers
+
+| FEN | Pre-Lever-2b d=20 (128 MB) | Lever 2b raw d=20 (128 MB) | Unified SF11 LMR d=20 (128 MB) |
+|---|---|---|---|
+| 19 (K+R-vs-K+R race w/ rep history) | 3.62 M | 1.05 B (290× regression) | **392 M (108× regression)** |
+| 41 (K+2R vs K+Q+p) d=14 | not measured | not measured | 44 M at 16 MB, **8.3 M at 128 MB** |
+
+FEN 19's residual 108× regression at d=20 is the next concrete target. Hypothesis: Lever 2 (quadratic SEE quiet pruning, SF11 search.cpp:1027) catches the SEE-negative quiets that survive Lever 2b's futility-with-history gate.
+
+FEN 41's d=14 16-MB outlier (44 M vs 8.3 M at 128 MB) suggests a TT-pressure interaction with the unified LMR — investigate after Lever 2.
 
 ### Outlier-position breakdown (d14, post-Lever-1)
 
@@ -136,12 +152,13 @@ This is the actual SF11 mechanism: **chained extensions don't run away because t
 
 Also relevant: **SF11's `MAX_PLY = 246`; ours is 64.** Even with the right pruning, the deeper natural search horizon would help.
 
-### Candidate next steps, ordered (post-Lever-2b)
+### Candidate next steps, ordered (post-unified-SF11-LMR)
 
-1. **Lever 2 — port SF11's quadratic SEE quiet pruning** (search.cpp:1027). `-(32 - min(lmrDepth, 18)) * lmrDepth²` threshold. Layers on top of Lever 2b; SEE-negative deep quiets that survive futility get caught here. May further tighten the residual FEN 26 / FEN 41 deep tails.
-2. **Lever 2c — port SF11's countermove-history quiet pruning** (search.cpp:1011-1014). Two-table cont-history gate with `lmrDepth < 4 + adj`. We have a depth-based CMP gate (`lmr_d >= 4 + widen` at search.rs:1279); rewriting on top of Lever 2b's pattern would be a small refinement, mostly for completeness — our gate is already lmrDepth-based.
-3. **Singular extensions + multi-cut, fourth attempt** — Lever 2b tamed the chains that previously masked SE's gain. Worth re-attempting now.
-4. **NMP zugzwang verification** (lines 838-886). Separate gap. Worth porting for correctness; orthogonal to the chain pathology.
+1. **Lever 2 — port SF11's quadratic SEE quiet pruning** (search.cpp:1027). `see_ge(move, -(32 - min(lmrDepth, 18)) * lmrDepth²)` threshold. Layers on top of Lever 2b — SEE-negative deep quiets that survive Lever 2b's futility-with-history gate get caught here. Primary target: FEN 19 residual 108× regression at d=20.
+2. **Investigate FEN 41 d=14 16-MB outlier** (44 M vs 8.3 M at 128 MB) — TT-pressure interaction with unified LMR. May resolve naturally with Lever 2.
+3. **Lever 2c — port SF11's countermove-history quiet pruning** (search.cpp:1011-1014). Two-table cont-history gate with `lmrDepth < 4 + adj`. We have a depth-based CMP gate (`lmr_d >= 4 + widen` at search.rs:1279); rewriting on top of Lever 2b's pattern would be a small refinement, mostly for completeness — our gate is already lmrDepth-based.
+4. **Singular extensions + multi-cut, fourth attempt** — Lever 2b + unified LMR tamed the chains. Worth re-attempting now since the base LMR matches what SE was tuned against.
+5. **NMP zugzwang verification** (lines 838-886). Separate gap. Worth porting for correctness; orthogonal to the chain pathology.
 
 ### What remains gated off in tree
 

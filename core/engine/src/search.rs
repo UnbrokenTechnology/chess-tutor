@@ -1309,6 +1309,25 @@ impl<'a> Search<'a> {
             // reasons. Universal LMP (Lever 1, wired into the
             // [`MovePicker`]) handles move-count pruning independently;
             // no LMP check here.
+            // Quiet futility pruning (SF11 search.cpp:1016-1024, "Lever 2b").
+            //
+            // Gate is `lmrDepth < 6`, not raw `depth <= 7` — when chained
+            // extensions keep raw `depth` high at deep ply, LMR still
+            // pushes lmrDepth toward 0, and SF11's gate fires where the
+            // old raw-depth gate didn't. This is the load-bearing
+            // mechanism that prevents the deep-ply quiet tail in
+            // chained-extension endgames (FENs 20 / 26 / 40 in the
+            // bench), per the 2026-05-14 instrumented investigation
+            // (see HANDOFF "Why SF11 doesn't run away").
+            //
+            // History-sum gate matches SF11 verbatim: only futility-
+            // prune when this quiet has a negative composite history
+            // signal (main + cont[0,1,3] < 25000). Without the gate,
+            // SF11's experience is that futility cuts good moves that
+            // happen to land below `eval + margin` for noisy positional
+            // reasons. Universal LMP (Lever 1, wired into the
+            // [`MovePicker`]) handles move-count pruning independently;
+            // no LMP check here.
             let do_futility_prune = !is_root
                 && !in_check
                 && !is_capture
@@ -2182,22 +2201,31 @@ fn cont_key_at(stack: &[StackEntry], ply: usize, offset: usize) -> (bool, bool, 
     (e.in_check, e.was_capture, e.moved_piece_idx, e.to_idx)
 }
 
+/// SF11's `Reductions[]` table (`search.cpp` `Search::init`):
+/// `Reductions[i] = int(23.4 * ln(i))` for `i >= 1` at single thread.
+/// Initialised lazily on first access (one-time `ln()` cost).
+/// Sized for `MAX_MOVES = 256` (SF11's constant); index 0 stays `0`
+/// per SF (default-initialised).
+static SF11_REDUCTIONS: std::sync::LazyLock<[i32; 256]> = std::sync::LazyLock::new(|| {
+    let mut arr = [0i32; 256];
+    for i in 1..256 {
+        arr[i] = (23.4 * (i as f64).ln()) as i32;
+    }
+    arr
+});
+
+/// SF11's late-move reduction (`search.cpp` `Search::reduction`):
+/// `r = Reductions[d] * Reductions[mn]; (r + 511) / 1024 + (!i && r > 1007)`.
+/// Used both by actual LMR application and by Lever 2b's `lmrDepth`
+/// gate, so the two stay consistent. Replaced our earlier
+/// `log₂·log₂/2` formula on 2026-05-14 after the divergence caused
+/// FEN 19 to regress 290× under verbatim SF11 thresholds (see HANDOFF
+/// "Why FEN 19 ran away under raw Lever 2b").
 fn lmr_reduction(depth: i32, move_count: usize, improving: bool) -> i32 {
-    if depth <= 3 || move_count <= 4 {
-        return 0;
-    }
-    let log_d = ((depth as u32).checked_ilog2().unwrap_or(0)) as i32;
-    let log_mc = ((move_count as u32).checked_ilog2().unwrap_or(0)) as i32;
-    let base = (log_d * log_mc / 2).max(1);
-    // Increase reduction by 1 ply when the static eval isn't trending
-    // upward — Stockfish's "!improving" bump in the reduction formula
-    // (`(r + 511) / 1024 + (!i && r > 1007)` line, reduced to a flat +1
-    // for our log-table-free formula).
-    if !improving {
-        base + 1
-    } else {
-        base
-    }
+    let d = depth.clamp(0, (SF11_REDUCTIONS.len() - 1) as i32) as usize;
+    let mc = move_count.min(SF11_REDUCTIONS.len() - 1);
+    let r = SF11_REDUCTIONS[d] * SF11_REDUCTIONS[mc];
+    (r + 511) / 1024 + (!improving && r > 1007) as i32
 }
 
 fn late_move_prune(depth: i32, move_count: usize, improving: bool) -> bool {
@@ -2386,9 +2414,17 @@ mod tests {
     }
 
     #[test]
-    fn lmr_reduction_is_zero_at_shallow_depth() {
-        assert_eq!(lmr_reduction(2, 10, true), 0);
-        assert_eq!(lmr_reduction(5, 4, true), 0);
+    fn lmr_reduction_matches_sf11_at_sample_points() {
+        // Sample points hand-computed from SF11's formula:
+        // `r = Reductions[d] * Reductions[mn]; (r + 511) / 1024 + (!i && r > 1007)`
+        // with `Reductions[i] = int(23.4 * ln(i))`.
+        //   R[5]=37, R[8]=48, R[10]=53, R[20]=70
+        // d=8, mc=5, improving=true:  r=48*37=1776,  (1776+511)/1024 = 2
+        assert_eq!(lmr_reduction(8, 5, true), 2);
+        // d=10, mc=10, improving=true: r=53*53=2809, (2809+511)/1024 = 3
+        assert_eq!(lmr_reduction(10, 10, true), 3);
+        // d=20, mc=20, improving=true: r=70*70=4900, (4900+511)/1024 = 5
+        assert_eq!(lmr_reduction(20, 20, true), 5);
     }
 
     #[test]
@@ -2399,7 +2435,10 @@ mod tests {
     }
 
     #[test]
-    fn lmr_reduction_increases_when_not_improving() {
+    fn lmr_reduction_increases_when_not_improving_above_r_gate() {
+        // SF11's `!improving && r > 1007` bonus only kicks in once
+        // `r = R[d]*R[mn] > 1007`. At (d=10, mc=20) that's
+        // 53*70=3710 > 1007, so non-improving adds +1.
         let r_improving = lmr_reduction(10, 20, true);
         let r_not_improving = lmr_reduction(10, 20, false);
         assert_eq!(r_not_improving, r_improving + 1);
