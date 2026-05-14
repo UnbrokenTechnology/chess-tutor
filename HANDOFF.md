@@ -78,7 +78,16 @@ These are all **horizon-stretching endgames** with long forced sequences that in
 
 **Lever 1: universal `moveCountPruning` (LANDED).** ~10 LOC change. FEN 26 cold d13 went 484 M → 226 k (2,140×). 45-pos cold d13 bench went 101 M → 17.5 M (5.8×). Cost: FEN 43 mate puzzle moved from "mate at d5 / 3.3 k" to "mate at d8 / 9.9 k" — same family as SF's ~2 Elo check-extension estimate. Acceptable.
 
-**Lever 2 (NOT TESTED): quadratic SEE quiet pruning** — `-(32 - min(lmrDepth, 18)) * lmrDepth²` instead of our `Value::ZERO` threshold (SF11 search.cpp:1027). After Lever 2b, predicted to be small on the remaining outliers (FEN 26 d=14, FEN 41) — both retain some deep tail but the dominant pathology is now gone.
+**Lever 2: quadratic SEE quiet pruning (TESTED 2026-05-14, REVERTED — regression).** Ported SF11 search.cpp:1027 verbatim — `see_ge(move, -(32 - min(lmrDepth, 18)) * lmrDepth²)` for quiets, layered on top of Lever 2b under the same Step 13 outer gate. Hoped it would catch the SEE-negative deep quiets that survived Lever 2b's history-sum gate (FEN 19 residual).
+
+Result: catastrophic regression on the same K+R-vs-K+R-with-passers family Lever 2b couldn't fully fix:
+- 45-pos d=14 128 MB cold: 22.1 M → 1.28 B (58× worse)
+- FEN 41 d=14 128 MB cold: 8.3 M → 1.26 B (150× worse) — almost all of the aggregate regression
+- FEN 19 d=17-19: 11×/5.7×/3.4× regressions (only d=20 slightly better)
+
+Hypothesis: in long forced rook-vs-rook sequences, the quiets that SF11's quadratic threshold prunes are actually correct king/rook maneuvers whose SEE-negative-by-a-few-cp signal misrepresents their forcing value. Pruning them causes the search to fail-low repeatedly, generating massive re-search overhead. Same shape as Lever 2b's history-sum gate let through these moves on purpose; Lever 2 takes them out, which is the wrong call in this position class.
+
+Reverted. Build green, 633 tests pass. Source: cleanly removed the 30-line block at search.rs:1378 — re-add from this HANDOFF entry if a future attempt has reason to believe the failure mode is different.
 
 **Lever 2b: SF11 quiet-futility lmrDepth + history form (LANDED 2026-05-14).** Replaced our raw-`depth <= 7` gate with SF11 search.cpp:1016-1024 verbatim: `lmrDepth < 6 && static_eval + 235 + 172*lmrDepth <= alpha && (mainH + ch0 + ch1 + ch3) < 25000`, gated by `pos.non_pawn_material(us) > 0` (SF11 Step 13 outer gate). The previous "predicted small" was wrong — instrumented diagnosis showed that with chained extensions keeping raw depth high at deep ply, our raw-depth gate disabled futility precisely where it was needed. Aggregate impact (cold TT, `--new-game-between-positions`):
 
@@ -154,11 +163,10 @@ Also relevant: **SF11's `MAX_PLY = 246`; ours is 64.** Even with the right pruni
 
 ### Candidate next steps, ordered (post-unified-SF11-LMR)
 
-1. **Lever 2 — port SF11's quadratic SEE quiet pruning** (search.cpp:1027). `see_ge(move, -(32 - min(lmrDepth, 18)) * lmrDepth²)` threshold. Layers on top of Lever 2b — SEE-negative deep quiets that survive Lever 2b's futility-with-history gate get caught here. Primary target: FEN 19 residual 108× regression at d=20.
-2. **Investigate FEN 41 d=14 16-MB outlier** (44 M vs 8.3 M at 128 MB) — TT-pressure interaction with unified LMR. May resolve naturally with Lever 2.
-3. **Lever 2c — port SF11's countermove-history quiet pruning** (search.cpp:1011-1014). Two-table cont-history gate with `lmrDepth < 4 + adj`. We have a depth-based CMP gate (`lmr_d >= 4 + widen` at search.rs:1279); rewriting on top of Lever 2b's pattern would be a small refinement, mostly for completeness — our gate is already lmrDepth-based.
-4. **Singular extensions + multi-cut, fourth attempt** — Lever 2b + unified LMR tamed the chains. Worth re-attempting now since the base LMR matches what SE was tuned against.
-5. **NMP zugzwang verification** (lines 838-886). Separate gap. Worth porting for correctness; orthogonal to the chain pathology.
+1. **Investigate why K+R-vs-K+R-with-passers endgames stretch on our search.** Same shape as FEN 19, FEN 38, FEN 41 — all positions where unified-SF11-LMR + Lever 2b leaves significant deep tail (108× FEN 19 at d=20, 8.3M FEN 41 at d=14 128MB). **Lever 2 made this class WORSE not better** (see "Levers tested" below). The fix is somewhere we haven't looked.
+2. **Lever 2c — port SF11's countermove-history quiet pruning** (search.cpp:1011-1014). Two-table cont-history gate with `lmrDepth < 4 + adj`. We have a depth-based CMP gate (`lmr_d >= 4 + widen` at search.rs:1279); rewriting on top of Lever 2b's pattern would be a small refinement, mostly for completeness — our gate is already lmrDepth-based.
+3. **Singular extensions + multi-cut, fourth attempt** — Lever 2b + unified LMR tamed many chains. Worth re-attempting now since the base LMR matches what SE was tuned against.
+4. **NMP zugzwang verification** (lines 838-886). Separate gap. Worth porting for correctness; orthogonal to the chain pathology.
 
 ### What remains gated off in tree
 

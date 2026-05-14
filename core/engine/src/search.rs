@@ -1297,28 +1297,7 @@ impl<'a> Search<'a> {
             // pushes lmrDepth toward 0, and SF11's gate fires where the
             // old raw-depth gate didn't. This is the load-bearing
             // mechanism that prevents the deep-ply quiet tail in
-            // chained-extension endgames (FENs 20 / 26 / 40 in the
-            // bench), per the 2026-05-14 instrumented investigation
-            // (see HANDOFF "Why SF11 doesn't run away").
-            //
-            // History-sum gate matches SF11 verbatim: only futility-
-            // prune when this quiet has a negative composite history
-            // signal (main + cont[0,1,3] < 25000). Without the gate,
-            // SF11's experience is that futility cuts good moves that
-            // happen to land below `eval + margin` for noisy positional
-            // reasons. Universal LMP (Lever 1, wired into the
-            // [`MovePicker`]) handles move-count pruning independently;
-            // no LMP check here.
-            // Quiet futility pruning (SF11 search.cpp:1016-1024, "Lever 2b").
-            //
-            // Gate is `lmrDepth < 6`, not raw `depth <= 7` — when chained
-            // extensions keep raw `depth` high at deep ply, LMR still
-            // pushes lmrDepth toward 0, and SF11's gate fires where the
-            // old raw-depth gate didn't. This is the load-bearing
-            // mechanism that prevents the deep-ply quiet tail in
-            // chained-extension endgames (FENs 20 / 26 / 40 in the
-            // bench), per the 2026-05-14 instrumented investigation
-            // (see HANDOFF "Why SF11 doesn't run away").
+            // chained-extension endgames (FENs 20 / 26 / 40 in the bench).
             //
             // History-sum gate matches SF11 verbatim: only futility-
             // prune when this quiet has a negative composite history
