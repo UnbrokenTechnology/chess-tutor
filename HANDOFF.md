@@ -25,19 +25,29 @@ cargo clippy --all-targets
 cargo build --profile profiling --bin chess-tutor
 # → target/profiling/chess-tutor.exe
 
-# Bench (SF11-compatible — same default position list, default depth 13):
-./target/release/chess-tutor bench 16 1 13                              # shared-TT (SF default)
-./target/release/chess-tutor bench 16 1 13 default depth --new-game-between-positions  # cold-TT per position
+# Bench (SF11-compatible — `<tt_mb> <threads> <depth> [fen_file] [limit_type]`):
+./target/release/chess-tutor bench 16 1 13                              # 1 thread, shared TT
+./target/release/chess-tutor bench 128 8 20 default depth --new-game-between-positions  # 8 threads, cold TT
 ./target/release/chess-tutor bench 16 1 13 path/to/fens.txt             # custom positions
+
+# Play (CLI) and multi-thread retrospective:
+./target/release/chess-tutor play --threads 4              # 4 thread engine moves; retrospective uses all cores
+./target/release/chess-tutor play --deterministic          # retrospective single-thread (bit-reproducible narration)
 ```
 
 ## Heap allocation policy
 
 Per-search or per-engine allocations are fine. **Per-node allocations are not** — use stack arrays or pool from a thread-local. The `MovePicker` buffer pool (thread-local `Vec<Box<MoveBufs>>`) is the canonical pattern; copy it for any new feature that needs per-call scratch.
 
-## Next up: close the remaining bench gap to SF11
+## Next up: teaching UI iteration
 
-Six changes landed 2026-05-14:
+The engine is now performant enough for the planned mobile use case: at depth 12–14 the GUI feels real-time, retrospective is sub-300 ms on hard positions and ~100 ms on typical middlegames, full d=20 bench is 43 s with 8 threads (was an unfinishable multi-hour run a week ago). Further engine perf work has diminishing returns relative to the teaching-UX work. The remaining perf opportunities are listed in "Engine perf, deferred" below — none are blocking.
+
+**This session's focus**: iterate on the teaching UI. See [`core/engine/src/analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!` for the design brief on the move-analysis pipeline (Phase 2 cheap-pass / surprise detection, Phase 4 signal-mask, Phase 5 tactic library) and the `narration` crate for the prose layer. Continued real-game playthrough is how the wording and thresholds get tuned — every retrospective narrator has unit tests for shape but the prose itself was picked a priori.
+
+## Engine perf — current state (2026-05-14)
+
+Seven major changes landed today:
 1. **Lever 1: universal `moveCountPruning`** tamed the FEN 26 cold d13 cliff (484 M → 226 k).
 2. **Lever 2b: SF11 lmrDepth-gated quiet futility** collapsed the residual deep-tail problem at d14 (104 M → 20.5 M aggregate, 5× fewer nodes; FEN 40 alone 22 M → 466 k, 47× faster).
 3. **Unified SF11 LMR formula** replaced our `log₂·log₂/2` base with SF11's `int(23.4·ln(i))` table form — direct response to FEN 19 regressing 290× under raw Lever 2b because our smaller `lmrDepth` made the SF11 `< 6` gate fire in nodes SF11 wouldn't fire on. With matched LMR base, the gate behaves as SF11 intended.
@@ -96,6 +106,17 @@ Most of the d14 overshoot lives in three positions. From the user's last 45-pos 
 These are all **horizon-stretching endgames** with long forced sequences that include checks. The Lever-1 win on FEN 26 at d13 was that universal LMP slices off responding quiets in the check chain; at d20 the chain is just long enough that even with universal LMP, the residual node count is hundreds of millions. They're qualitatively the same shape as the prior FEN-26 cliff but stretched out over more depth.
 
 ### Levers tested
+
+**Lazy SMP multi-threading (LANDED 2026-05-14).** Engine grows `Vec<WorkerState>` (per-thread history / counter-moves / cont-history / capture-history / pawn-cache); main thread runs the canonical iterative-deepening loop and returns the result; `threads - 1` helper threads run the same loop with their own state and contribute only via the shared TT. Stop coordination via `Arc<AtomicBool>` set when main thread finishes. CLI `bench <tt> <threads> <depth>` and `play --threads N` expose it. Retrospective + hint panel also use `available_parallelism()` by default; `--deterministic` collapses to single-thread for bit-identical narration. Aggregate scaling on this 24-core machine:
+
+| | d=14 bench | d=20 bench |
+|---|---|---|
+| 1 thread | 6.5 s | 116.8 s |
+| 4 threads | 3.7 s (1.77×) | 71.1 s (1.64×) |
+| 8 threads | 3.1 s (2.11×) | **43.0 s (2.72×)** |
+| Multi-PV=3 d=14 FEN 20 (retrospective workload) | 880 ms | 226 ms (8T) |
+
+Per-position variance is high under Lazy SMP (a single FEN at 8T can swing 1.7s–26s between runs because TT-race ordering varies); the aggregate is stable because variance averages across the 45-pos set. Determinism contract: `threads=1` is bit-deterministic across runs (verified at FEN 26 d=13 = 135,061 nodes every run); all analytical paths (REPL `analyze` / `search`, retrospective, hint panel) default to `threads=1` unless the caller explicitly sets `threads > 1` via SearchParams or the CLI. Sub-linear 2-4-thread speedup is the known cost of "same-depth helpers all run the same iterative-deepening sequence"; SF11's `skipSize` / `skipPhase` de-syncing would lift this but isn't ported yet.
 
 **SF11 aspiration depth-reduction-on-fail-high (LANDED 2026-05-14).** Ported the `failed_high_cnt` mechanism from SF11 search.cpp:450, 453, 485, 492. Consecutive fail-highs accumulate the counter; each re-search runs at `max(1, rootDepth - failed_high_cnt)`. The reduction resets to 0 on every fail-low. The result is that fail-high chains are progressively cheaper — a 6-attempt fail-high cycle at d=20 (previously all at d=20) now runs at d=20, 19, 18, 17, 16, 16 — converging on a shallower-but-still-useful PV instead of paying 6× full depth.
 
@@ -208,49 +229,46 @@ This is the actual SF11 mechanism: **chained extensions don't run away because t
 
 Also relevant: **SF11's `MAX_PLY = 246`; ours is 64.** Even with the right pruning, the deeper natural search horizon would help.
 
-### Candidate next steps, ordered (post-qsearch-depth)
-
-The K+R-vs-K+R-with-passers stretch was diagnosed and solved 2026-05-14: it was **qsearch chains running to MAX_PLY because qsearch ignored depth**. Porting SF11's `depth - 1` recursion + `QS_RECAPTURES` filter collapsed FEN 19 d=20 from 391 M → 7.8 M (50×). The "Why SF11 doesn't run away — the depth-metric gap" section below was about negamax pruning; turns out the actual gap was one level deeper, in qsearch itself.
-
-1. **Singular extensions + multi-cut, fourth attempt** — three previous attempts (2026-04-30, 2026-05-12, 2026-05-14) regressed on horizon-stretching forced sequences. Hypothesised root cause was the extension chain stacking deeper; with qsearch chains now bounded, the SE failure shape may be different. Worth re-attempting on top of qs-depth.
-2. **NMP zugzwang verification** (search.cpp:838-886). Tried 2026-05-14: net-neutral at aggregate d=14 but regresses FEN 19 d=19 ~8.7× (8.7M → 54.9M nodes). It's a correctness feature (avoids zugzwang false-positives) not a speed feature. Re-attempt after the search is otherwise tight, weighing the correctness vs perf trade-off.
-3. **Lever 2c — port SF11's countermove-history quiet pruning** (search.cpp:1011-1014). Two-table cont-history gate with `lmrDepth < 4 + adj`. Small refinement on top of Lever 2b.
-4. **SF11 qsearch delta/futility prune** (search.cpp:1471-1492). Tried 2026-05-14: regressed Kiwipete +72%, FEN 3 +62% on top of qs-depth. The pre-do `gives_check(m)` helper SF11 has would let us avoid the per-move do/undo overhead our port pays — implementing it (via a `check_squares` cache) may make this re-attemptable.
-
 ### What remains gated off in tree
 
 `endgame.rs` was split into a directory module ([`core/engine/src/endgame/`](core/engine/src/endgame/)) with one file per evaluator. `probe()` returns `ProbeResult::{Override, Scale, ScaleBoth, None}`. Twelve scaling functions ported with unit tests: `KRPKR`, `KRPKB`, `KRPPKRP`, `KBPKB`, `KBPPKB`, `KBPKN`, `KNPK`, `KNPKB`, `KBPsK`, `KQKRPs`, `KPsK`, `KPKP`. Dispatch chain wrapped in `if SCALING_ENABLED { ... }` (currently `false`); four `dispatcher_routes_to_*` tests are `#[ignore]`d. Was originally framed as a fix for the "endgame bombers" — that framing was largely a misread; Lever 1 collapsed most of the bench-cost gap without scaling. Re-enabling is still potentially worthwhile for *teaching-accurate* endgame evals (e.g. recognising fortress draws), but is no longer load-bearing for raw bench performance.
 
 ## Open dockets
 
-### Engine perf reference numbers (2026-05-14, post-qsearch-depth)
+### Engine perf reference numbers (2026-05-14, post-Lazy-SMP)
 
-**Bench (SF11 default 45 positions, 16 MB cold-TT-per-position):**
-- d13: 8.4 M nodes / 3.8 s / 2.2 Mnps (was 10.5 M / 4.1 s pre-qs-depth).
-- d14: 14.2 M nodes / 6.4 s / 2.2 Mnps (was 20.5 M / 7.2 s pre-qs-depth).
+**Single-thread bench (SF11 default 45 positions, `--new-game-between-positions`):**
+- d13 / 16 MB: 8.4 M nodes / 3.8 s / 2.2 Mnps
+- d14 / 16 MB: 12.0 M nodes / 5.2 s / 2.3 Mnps
+- d14 / 128 MB: 13.1 M nodes / 6.5 s / 2.0 Mnps
+- d20 / 128 MB: 226 M nodes / 116 s / 2.0 Mnps
 
-**Bench (128 MB cold-TT-per-position):**
-- d14: 14.4 M nodes / 7.3 s / 2.0 Mnps (was 22.1 M / 9.5 s pre-qs-depth).
+**Multi-thread bench (this machine, 24 logical cores, 128 MB shared TT cold-per-pos):**
+- d=14: 6.5 s (1T) → 5.1 s (2T) → 3.7 s (4T) → 3.1 s (8T)
+- d=20: 117 s (1T) → 71 s (4T) → **43 s (8T)**
 
-NPS dropped to ~2.0–2.2 Mnps with qs-depth (was 2.6–2.8 Mnps). The qsearch frame now does slightly more per-call work (computing recapture_square), but **vastly** fewer frames run because long capture chains terminate at -5 depth. Net wall-clock is faster at every depth measured. Gap to SF11 d=14 (6.93 M / 2.2 s @ 128 MB shared TT) is now ~2× on nodes / ~3× on time.
+Single-thread NPS is ~2.0–2.2 Mnps (vs SF11's 3.1 Mnps). The qsearch depth-tracking added some per-frame work for the depth bookkeeping but the node savings dominate; further NPS recovery would come from the deferred `pos.occupied()` incremental field.
 
-**Quadrant check** (the four positions used to A/B Lever 1; 16 MB cold, `--new-game-between-positions`, post-qs-depth):
+**Per-position snapshot** (single-thread, `--new-game-between-positions`):
 
-| Position | Depth | Nodes | Time |
-|---|---|---|---|
-| FEN 1 (startpos) | 13 | 356 k | 191 ms |
-| FEN 26 | 13 | 138 k | 52 ms |
-| Italian Game | 13 | 228 k (FEN 2 Kiwipete) | 120 ms |
-| FEN 19 (K+R race) | 20 | 7.8 M | 2.4 s |
-| FEN 41 (K+2R vs K+Q+p) | 14 (16 MB) | 1.45 M | 518 ms |
-| Italian Game | 18 | 7.9 M | 4.5 s |
+| Position | Depth | TT | Nodes | Time |
+|---|---|---|---|---|
+| FEN 1 (startpos) | 13 | 16 MB | 356 k | 191 ms |
+| FEN 1 (startpos) | 20 | 128 MB | 28.9 M | 17.5 s |
+| FEN 26 (K+R endgame) | 13 | 16 MB | 138 k | 52 ms |
+| FEN 2 (Kiwipete) | 13 | 16 MB | 228 k | 120 ms |
+| FEN 19 (K+R race) | 20 | 128 MB | 7.8 M | 2.4 s |
+| FEN 20 (K+Q endgame) | 20 | 128 MB | 10.0 M | 3.7 s |
+| FEN 41 (K+2R vs K+Q+p) | 14 | 16 MB | 1.45 M | 518 ms |
+| FEN 41 (K+2R vs K+Q+p) | 20 | 128 MB | 23.8 M | 9.7 s |
+| Italian Game | 18 | 16 MB | 7.9 M | 4.5 s |
 
 **SF11 reference (128 MB TT, our machine, 46 FENs incl. 1 Chess960 we skip):**
 - d7: 182 k nodes / 0.1 s / 1.7 Mnps
 - d14: 6.93 M / 2.2 s / 3.1 Mnps
 - d20: 68.17 M / 22.1 s / 3.1 Mnps
 
-NPS parity is real (we hit 3.3 Mnps on the d14 bench). The remaining gap to SF is **node count, not throughput**: at d14 we're ~3.5× their nodes; at d20 we don't yet finish in any reasonable time on three positions (FEN 20, FEN 26, FEN 40 each in the 150–530 M range at d20 before they finish, if they do).
+Post all the 2026-05-14 changes, every position finishes at d=20 in a few seconds (worst is FEN 1 startpos at 28.9 M / 17.5 s single-threaded; FEN 41 at 23.8 M / 9.7 s; everything else under 11 M / 6.5 s). The aggregate single-thread gap to SF11 d=14 is ~2× nodes / ~3× time; per-position the gap is uniform rather than concentrated in outliers. NPS gap (~2.0 Mnps vs ~3.1 Mnps) is the main remaining single-thread headroom, but is diffuse across positions and would need micro-optimisation work to close (incremental `pos.occupied()` is the highest-likelihood standalone win). With Lazy SMP at 8 threads the wall-clock gap effectively closes — we run the full d=20 bench in 43 s vs SF11 single-thread's 22.1 s, and the user has multi-core throughout the target deployment surfaces (desktop + iOS/Android).
 
 ### Engine perf, deferred
 
@@ -265,7 +283,12 @@ The current production search has, in tree: PGO, reverse-futility pruning, statS
 - **Razoring** (SF11 step 7, ~1 Elo). Trivial code change.
 
 **Per-node speedups still to try (NPS gain at fixed search shape):**
-- **Incremental `pos.occupied()`** as a `by_all: Bitboard` field, toggled in `remove_piece` / `put_piece`. Likely actually-real gain (removes work, no cache trade-off).
+- **Incremental `pos.occupied()`** as a `by_all: Bitboard` field, toggled in `remove_piece` / `put_piece`. Likely actually-real gain (removes work, no cache trade-off). Highest-likelihood standalone NPS win; closes much of the ~2.0 → 3.1 Mnps gap to SF11.
+
+**Threading refinements (deferred):**
+- **Singular extensions + multi-cut, fourth attempt** — three previous attempts regressed on horizon-stretching forced sequences. Hypothesised root cause was the extension chain stacking deeper; with qsearch chains now bounded by qs-depth, the SE failure shape may be different.
+- **NPM gate for retrospective threading** — Lazy SMP wastes cycles on positions that converge in <50 ms anyway. A guard could check static-eval / non-pawn material at the root and fall back to single-thread for "easy" positions.
+- **Better thread scheduling (skipped depths)** — current Lazy SMP has all helpers running the same iterative-deepening sequence. SF11's `skipSize` / `skipPhase` pattern de-syncs them by depth so different threads explore different cones simultaneously. Would likely lift the 2-4 thread regime (currently sub-linear speedup) closer to 4+ thread linear scaling.
 
 **Failed experiments worth not retrying** (full detail in git log around 2026-05-11..2026-05-12):
 - Material hash table — cache hit rate was high but wall-clock-neutral; `endgame::probe` dominates the uncached path.
@@ -277,7 +300,7 @@ The current production search has, in tree: PGO, reverse-futility pruning, statS
 
 **Cross-position TT bench behaviour.** Shared TT at 16 MB makes the endgame positions ~17–17,000× faster than cold because earlier middlegame entries happen to be useful. At 128 MB the shared TT becomes net-harmful (old entries crowd out the deep entries the endgames want). The underlying issue is the per-position cost itself, not a TT bug. Post-Lever-1 the magnitude is much smaller (cold/shared ratios are now 2–6× rather than 17–17,000×), so this is mostly de-mooted.
 
-**`ENGINE_TURN_NODE_CAP` review** — currently a flat 5 M at [`core/cli/src/play.rs:35`](core/cli/src/play.rs). Engine play hits the cap consistently at depth 20 (5,001,216 nodes per move). Historically necessary because some closed positions ran 30+ minutes uncapped. With Lever 1 in tree the worst-cases are now seconds rather than minutes, so worth re-running a few d20 positions uncapped to pick a number in the 15–50 M range, or making the cap depth-aware.
+**`ENGINE_TURN_NODE_CAP` review** — currently a flat 5 M at [`core/cli/src/play.rs:35`](core/cli/src/play.rs) and same in [`desktop/src/main.rs`](desktop/src/main.rs). Engine play hits the cap consistently at depth 20. Historically necessary because some closed positions ran 30+ minutes uncapped. With the 2026-05-14 perf landings in tree the worst single-thread cases are now seconds rather than minutes (FEN 1 startpos d=20 = 17.5 s is the new worst at 1 thread, ~6 s at 4 threads). Worth re-running a few d20 positions uncapped to pick a number in the 15–50 M range or making the cap depth-aware. Lower priority now that Lazy SMP also shortens wall-clock.
 
 **Temporary perf-investigation infrastructure currently in tree** (clean up when no longer needed): pawn-cache `hits` / `misses` counters + `Engine::pawn_cache_stats()` accessor + CLI `pawn$:` line in `search` output; dhat-heap feature in CLI Cargo.toml + global allocator hook in `main.rs`; `Search::nodes_per_ply` histogram + `seldepth` counter + `Engine::last_nodes_per_ply()` / `last_seldepth()` accessors; `chess-tutor bench --verbose` (prints per-position selDepth + compact ply histogram) and `--positions 20,26,40-41` (1-based whitelist).
 
