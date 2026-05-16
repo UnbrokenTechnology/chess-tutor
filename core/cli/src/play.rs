@@ -195,6 +195,10 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
             writeln!(out, "draw by threefold repetition.")?;
             break;
         }
+        if pos.has_insufficient_material() {
+            writeln!(out, "draw by insufficient material.")?;
+            break;
+        }
 
         let mover = pos.side_to_move();
         let mover_name = match mover {

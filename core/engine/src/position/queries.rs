@@ -49,6 +49,62 @@ impl Position {
     pub fn non_pawn_material_total(&self) -> Value {
         self.non_pawn_material[0] + self.non_pawn_material[1]
     }
+
+    /// True when the remaining material on the board can never produce
+    /// a checkmate. Used by the play loops (CLI + desktop) to terminate
+    /// the game in a draw rather than let the user shuffle pieces
+    /// forever.
+    ///
+    /// The rule applied (the "liberal" interpretation chosen for this
+    /// app) covers FIDE 5.2.2 plus the same-coloured-bishops extension:
+    ///
+    /// - K vs K
+    /// - K vs K + one minor (knight or bishop)
+    /// - Any position where both sides have only bishops (no knights, no
+    ///   pawns, no rooks, no queens) and **all** bishops on the board
+    ///   stand on a single colour of square. Covers KB vs KB
+    ///   same-colour, KBB vs K with both bishops on one colour, KBB vs
+    ///   KB with all three bishops on one colour, etc.
+    ///
+    /// Deliberately not auto-drawn (consistent with FIDE 5.2.2, which
+    /// requires *no* mating sequence even with opponent cooperation —
+    /// the cases below admit a cooperative mate):
+    ///
+    /// - K + N + N vs K (helpmate exists)
+    /// - K + B vs K + N (a few helpmate positions exist)
+    /// - K + B + N vs K (forced mate — clearly not insufficient)
+    pub fn has_insufficient_material(&self) -> bool {
+        // Any pawn / rook / queen leaves room for a mate somewhere.
+        if self.pieces(PieceType::Pawn).any()
+            || self.pieces(PieceType::Rook).any()
+            || self.pieces(PieceType::Queen).any()
+        {
+            return false;
+        }
+
+        let wn = self.count(Color::White, PieceType::Knight);
+        let bn = self.count(Color::Black, PieceType::Knight);
+        let wb = self.count(Color::White, PieceType::Bishop);
+        let bb = self.count(Color::Black, PieceType::Bishop);
+        let minors = wn + bn + wb + bb;
+
+        // K vs K, or K vs K + one minor (no other side has any minor
+        // because total <= 1).
+        if minors <= 1 {
+            return true;
+        }
+
+        // Knight-free positions where all bishops share a square colour
+        // can't mate — no opposite-coloured-square coverage exists.
+        if wn == 0 && bn == 0 {
+            let bishops = self.pieces(PieceType::Bishop);
+            if (bishops & DARK_SQUARES).is_empty() || (bishops & LIGHT_SQUARES).is_empty() {
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 // =========================================================================
@@ -150,5 +206,109 @@ mod tests {
         let p = Position::startpos();
         let expected = p.non_pawn_material(Color::White) + p.non_pawn_material(Color::Black);
         assert_eq!(p.non_pawn_material_total(), expected);
+    }
+
+    // ---- has_insufficient_material ----------------------------------
+
+    #[test]
+    fn insufficient_k_vs_k() {
+        let p = Position::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert!(p.has_insufficient_material());
+    }
+
+    #[test]
+    fn insufficient_k_vs_kn() {
+        let p = Position::from_fen("4k3/8/8/8/8/8/8/4KN2 w - - 0 1").unwrap();
+        assert!(p.has_insufficient_material());
+    }
+
+    #[test]
+    fn insufficient_k_vs_kb() {
+        let p = Position::from_fen("4k3/8/8/8/8/8/8/4KB2 w - - 0 1").unwrap();
+        assert!(p.has_insufficient_material());
+    }
+
+    #[test]
+    fn insufficient_kb_vs_kb_same_colour() {
+        // White bishop on c1 (dark), black bishop on f8 (dark). Both
+        // on dark squares.
+        let p = Position::from_fen("4kb2/8/8/8/8/8/8/2B1K3 w - - 0 1").unwrap();
+        assert!(p.has_insufficient_material());
+    }
+
+    #[test]
+    fn insufficient_kbb_vs_k_same_colour() {
+        // Two white bishops on c1 and a3 (both dark squares).
+        let p = Position::from_fen("4k3/8/8/8/8/B7/8/2B1K3 w - - 0 1").unwrap();
+        assert!(p.has_insufficient_material());
+    }
+
+    #[test]
+    fn insufficient_kbb_vs_kb_all_same_colour() {
+        // Three bishops, all on dark squares (a3, c1, f8). Liberal
+        // rule covers this — no opposite-colour-square coverage means
+        // mate is impossible regardless of bishop count.
+        let p = Position::from_fen("4kb2/8/8/8/8/B7/8/2B1K3 w - - 0 1").unwrap();
+        assert!(p.has_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_kb_vs_kb_opposite_colours() {
+        // White bishop on c1 (dark), black bishop on f1 (light). Mate
+        // possible with cooperation → FIDE 5.2.2 keeps the game alive.
+        let p = Position::from_fen("4k3/8/8/8/8/8/8/2B1KB2 w - - 0 1").unwrap();
+        assert!(!p.has_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_kbb_vs_k_opposite_colours() {
+        // White bishops on c1 (dark) and f1 (light) — the bishop pair.
+        let p = Position::from_fen("4k3/8/8/8/8/8/8/2B1KB2 w - - 0 1").unwrap();
+        assert!(!p.has_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_knn_vs_k() {
+        // Two knights vs lone king: helpmate exists, not auto-drawn.
+        let p = Position::from_fen("4k3/8/8/8/8/8/8/3NKN2 w - - 0 1").unwrap();
+        assert!(!p.has_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_kbn_vs_k() {
+        // Bishop + knight vs lone king — the classic forced mate.
+        let p = Position::from_fen("4k3/8/8/8/8/8/8/3BKN2 w - - 0 1").unwrap();
+        assert!(!p.has_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_kb_vs_kn() {
+        // KB vs KN — helpmates exist, not auto-drawn.
+        let p = Position::from_fen("3nk3/8/8/8/8/8/8/3BK3 w - - 0 1").unwrap();
+        assert!(!p.has_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_with_any_pawn() {
+        // K + P vs K is not insufficient — the pawn can promote.
+        let p = Position::from_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1").unwrap();
+        assert!(!p.has_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_with_any_rook() {
+        let p = Position::from_fen("4k3/8/8/8/8/8/8/4K2R w - - 0 1").unwrap();
+        assert!(!p.has_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_with_any_queen() {
+        let p = Position::from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1").unwrap();
+        assert!(!p.has_insufficient_material());
+    }
+
+    #[test]
+    fn sufficient_startpos() {
+        assert!(!Position::startpos().has_insufficient_material());
     }
 }

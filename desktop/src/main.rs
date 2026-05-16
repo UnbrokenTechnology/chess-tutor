@@ -858,17 +858,26 @@ impl App {
 
     fn game_outcome(&self) -> Option<&'static str> {
         let mut scratch = self.position.clone();
-        if !legal_moves_vec(&mut scratch).is_empty() {
-            return None;
+        if legal_moves_vec(&mut scratch).is_empty() {
+            return Some(if self.position.in_check() {
+                match self.position.side_to_move() {
+                    Color::White => "Checkmate — Black wins.",
+                    Color::Black => "Checkmate — White wins.",
+                }
+            } else {
+                "Stalemate — draw."
+            });
         }
-        if self.position.in_check() {
-            Some(match self.position.side_to_move() {
-                Color::White => "Checkmate — Black wins.",
-                Color::Black => "Checkmate — White wins.",
-            })
-        } else {
-            Some("Stalemate — draw.")
+        if self.position.halfmove_clock() >= 100 {
+            return Some("Draw — 50-move rule.");
         }
+        if threefold_reached(&self.position_keys) {
+            return Some("Draw — threefold repetition.");
+        }
+        if self.position.has_insufficient_material() {
+            return Some("Draw — insufficient material.");
+        }
+        None
     }
 
     // ---- View helpers ---------------------------------------------------
@@ -1620,6 +1629,16 @@ fn pixel_to_square(local: egui::Vec2, cell: f32, flipped: bool) -> Option<Square
         File::from_index(file_idx).unwrap(),
         Rank::from_index(rank_idx).unwrap(),
     ))
+}
+
+/// True when the position currently at the back of `position_keys`
+/// has appeared three or more times in the run-length-encoded path.
+/// Mirrors `core/cli/src/play.rs::threefold_reached`.
+fn threefold_reached(position_keys: &[u64]) -> bool {
+    let Some(&current) = position_keys.last() else {
+        return false;
+    };
+    position_keys.iter().filter(|&&k| k == current).count() >= 3
 }
 
 fn piece_glyph(piece: Piece) -> &'static str {
