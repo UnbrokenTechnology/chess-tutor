@@ -151,6 +151,11 @@ enum Command {
         /// multiple moves.
         #[arg(long = "force-include", value_name = "MOVE")]
         force_include: Vec<String>,
+        /// Emit per-depth aspiration / fail-high / fail-low events to
+        /// stderr. Useful for diagnosing aspiration blowups and
+        /// pathological positions.
+        #[arg(long)]
+        verbose_progress: bool,
     },
     /// Multi-position search benchmark. Argument order and defaults
     /// mirror Stockfish 11's `bench` command: `tt_mb threads limit
@@ -405,6 +410,7 @@ fn main() -> Result<()> {
             top_percent,
             threads,
             force_include,
+            verbose_progress,
         } => {
             let mut pos =
                 Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
@@ -426,7 +432,7 @@ fn main() -> Result<()> {
                 multi_pv: multi_pv.max(1),
                 game_history: Vec::new(),
                 force_include: force_include_moves,
-                verbose_progress: false,
+                verbose_progress,
                 threads: threads.max(1),
                 // One-shot CLI search/analyze — analytical, no bot mask.
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,

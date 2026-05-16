@@ -1420,8 +1420,28 @@ impl<'a> Search<'a> {
                 continue;
             }
 
-            // SEE pruning on losing captures at shallow depth.
-            if !is_root && is_capture && depth <= 6 && !gives_check {
+            // SEE pruning on losing captures at shallow depth. The
+            // `best_score > MATED_IN_MAX_PLY` gate mirrors SF11's step
+            // 13 outer condition (search.cpp:998) and is **load-bearing
+            // for correctness**: without it, the first move at an
+            // in-check node with one capture-evasion can be pruned
+            // before being searched, leaving `best_score = -INFINITE`.
+            // That sentinel then propagates through `value_to_tt` (which
+            // stores INFINITE+ply, exceeding MATE), gets read back as
+            // INFINITE on subsequent probes, and feeds a self-sustaining
+            // INFINITE chain — visible as an aspiration loop that can't
+            // exit because beta saturates at INFINITE. (The other two
+            // step-13 prunes already carry this gate; SEE was the
+            // outlier.) `pos.non_pawn_material(us_at_node) > 0` is
+            // SF11's third outer gate — pure-pawn endgames also skip
+            // shallow-prune for soundness.
+            if !is_root
+                && is_capture
+                && depth <= 6
+                && !gives_check
+                && best_score > Value::MATED_IN_MAX_PLY
+                && pos.non_pawn_material(us_at_node).0 > 0
+            {
                 let margin = Value(-200 * depth);
                 pos.undo_move(mv, state);
                 if !pos.see_ge(mv, margin) {
