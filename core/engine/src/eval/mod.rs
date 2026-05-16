@@ -43,6 +43,7 @@ pub use threats::ThreatsBreakdown;
 use crate::attacks::king_attacks;
 use crate::bitboard::{Bitboard, RANK_2, RANK_3, RANK_6, RANK_7};
 use crate::material::{self, MaterialEval};
+use crate::opponent::{EvalCategory, EvalMask};
 use crate::pawns::{self, PawnsEval};
 use crate::position::Position;
 use crate::types::{Color, File, PieceType, Rank, ScaleFactor, Score, Square, Value};
@@ -488,9 +489,10 @@ impl EvalTrace {
 /// Evaluate `pos` and return a [`Value`] from the side-to-move's point of
 /// view. This form does not use a pawn cache — analytical / UI callers
 /// should use this; the search hot path goes through
-/// [`evaluate_with_pawn_cache`].
+/// [`evaluate_with_pawn_cache`]. Always runs the unbiased eval (no
+/// [`EvalMask`]); the bot's mask is applied only inside `Search`.
 pub fn evaluate(pos: &Position) -> Value {
-    evaluate_inner(pos, pawns::evaluate(pos), None)
+    evaluate_inner(pos, pawns::evaluate(pos), EvalMask::EMPTY, None)
 }
 
 /// Evaluate `pos` using the supplied pawn-structure cache. The hot path
@@ -498,17 +500,28 @@ pub fn evaluate(pos: &Position) -> Value {
 /// between sibling and child nodes, and probing the cache avoids
 /// recomputing the most expensive single eval term (~20% of search time
 /// in profiling).
-pub fn evaluate_with_pawn_cache(pos: &Position, pawn_cache: &mut pawns::Table) -> Value {
-    evaluate_inner(pos, pawn_cache.evaluate(pos), None)
+///
+/// `mask` lets the play engine zero out named categories (e.g.
+/// [`EvalCategory::KingSafety`]) so the bot plays as if blind to that
+/// concept. Pass [`EvalMask::EMPTY`] for unbiased eval — that is the
+/// hot path and the gating branches fold under branch prediction.
+pub fn evaluate_with_pawn_cache(
+    pos: &Position,
+    pawn_cache: &mut pawns::Table,
+    mask: EvalMask,
+) -> Value {
+    evaluate_inner(pos, pawn_cache.evaluate(pos), mask, None)
 }
 
 /// Evaluate `pos` and additionally capture a per-term [`EvalTrace`]. Use
 /// for UI layers ("why is this move good?") rather than for search's
 /// per-node calls — the trace-building adds local bookkeeping, though the
-/// per-term scoring itself is the same cost.
+/// per-term scoring itself is the same cost. Always runs the unbiased
+/// eval — the trace must reflect true best play so retrospective verdicts
+/// can hold the student to it.
 pub fn evaluate_with_trace(pos: &Position) -> (Value, EvalTrace) {
     let mut trace = EvalTrace::zero();
-    let v = evaluate_inner(pos, pawns::evaluate(pos), Some(&mut trace));
+    let v = evaluate_inner(pos, pawns::evaluate(pos), EvalMask::EMPTY, Some(&mut trace));
     (v, trace)
 }
 
@@ -541,6 +554,7 @@ fn piece_value_balance(pos: &Position) -> Score {
 fn evaluate_inner(
     pos: &Position,
     pawns_eval: PawnsEval,
+    mask: EvalMask,
     mut trace: Option<&mut EvalTrace>,
 ) -> Value {
     let mut e = Evaluator::new_with_pawns(pos, pawns_eval);
@@ -564,10 +578,16 @@ fn evaluate_inner(
     // Seed the running score with the incrementally-maintained PSQ score
     // (material + positional), the material imbalance polynomial, and
     // the pawn-structure score — exactly the same three "free" terms the
-    // reference picks up before any work happens.
+    // reference picks up before any work happens. `EvalCategory::
+    // PawnStructure` can mask off the pawn term; material and imbalance
+    // are always live (disabling them would make the bot blind to piece
+    // values, which isn't a useful teaching mode).
     let material = pos.psq_score();
     let imbalance = e.material.imbalance;
-    let mut score = material + imbalance + e.pawns.score();
+    let mut score = material + imbalance;
+    if !mask.is_disabled(EvalCategory::PawnStructure) {
+        score += e.pawns.score();
+    }
 
     // --- Lazy eval (SF11 evaluate.cpp:790-793) ---
     //
@@ -608,30 +628,54 @@ fn evaluate_inner(
     e.initialize(Color::Black);
 
     // Per-piece-type positional terms, interleaved with mobility
-    // accumulation. Populate attack tables as a side effect.
+    // accumulation. The pieces walk also populates attack tables that
+    // king / threats / passed read later — we always *run* it, even
+    // when masked, and only gate the contribution to `score`. This
+    // keeps the dependent terms producing the right values when their
+    // own categories are still enabled.
     let white_pieces = pieces::evaluate(&mut e, Color::White);
     let black_pieces = pieces::evaluate(&mut e, Color::Black);
-    score += white_pieces.total() - black_pieces.total();
-    score += e.mobility[Color::White.index()].total() - e.mobility[Color::Black.index()].total();
+    if !mask.is_disabled(EvalCategory::Pieces) {
+        score += white_pieces.total() - black_pieces.total();
+    }
+    if !mask.is_disabled(EvalCategory::Mobility) {
+        score +=
+            e.mobility[Color::White.index()].total() - e.mobility[Color::Black.index()].total();
+    }
 
     let white_king = king::evaluate(&e, Color::White);
     let black_king = king::evaluate(&e, Color::Black);
-    score += white_king.total() - black_king.total();
+    if !mask.is_disabled(EvalCategory::KingSafety) {
+        score += white_king.total() - black_king.total();
+    }
 
     let white_threats = threats::evaluate(&e, Color::White);
     let black_threats = threats::evaluate(&e, Color::Black);
-    score += white_threats.total() - black_threats.total();
+    if !mask.is_disabled(EvalCategory::Threats) {
+        score += white_threats.total() - black_threats.total();
+    }
 
     let white_passed = passed::evaluate(&e, Color::White);
     let black_passed = passed::evaluate(&e, Color::Black);
-    score += white_passed.total() - black_passed.total();
+    if !mask.is_disabled(EvalCategory::PassedPawns) {
+        score += white_passed.total() - black_passed.total();
+    }
 
     let white_space = space::evaluate(&e, Color::White);
     let black_space = space::evaluate(&e, Color::Black);
-    score += white_space - black_space;
+    if !mask.is_disabled(EvalCategory::Space) {
+        score += white_space - black_space;
+    }
 
+    // Initiative is a multiplier on the (mg, eg) tail of `score` —
+    // when masked off we just skip it. The argument `score` is the
+    // running sum *after* the previous (possibly-masked) categories,
+    // which is what we want: initiative scales the bot's current
+    // picture of the position, not a hypothetical unmasked one.
     let initiative_score = initiative::evaluate(&e, score);
-    score += initiative_score;
+    if !mask.is_disabled(EvalCategory::Initiative) {
+        score += initiative_score;
+    }
 
     // Tapered interpolation between mg and eg scores. The eg half is
     // additionally scaled by the side-specific ScaleFactor.
@@ -777,6 +821,55 @@ mod tests {
     }
 
     // ---- Determinism --------------------------------------------------
+
+    #[test]
+    fn empty_mask_matches_unmasked_evaluate() {
+        // Sanity for the hot path: the mask-aware entry point with
+        // an empty mask must produce bit-identical values to the
+        // bare `evaluate(pos)` it replaced. Any divergence here is
+        // a bug in the mask plumbing (probably an `else` branch
+        // that picks up the masked value instead of the unmasked
+        // sum).
+        let positions = [
+            "r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5",
+            "r3k2r/pppq1ppp/2n2n2/3pp3/3PP3/2N2N2/PPPQ1PPP/R3K2R w KQkq - 0 1",
+            "4k3/8/8/8/8/8/8/4K2R w K - 0 1",
+        ];
+        for fen in positions {
+            let p = Position::from_fen(fen).expect("test FEN");
+            let mut cache = pawns::Table::new();
+            let bare = evaluate(&p);
+            let masked = evaluate_with_pawn_cache(&p, &mut cache, EvalMask::EMPTY);
+            assert_eq!(
+                bare, masked,
+                "empty mask should match bare evaluate at {fen}",
+            );
+        }
+    }
+
+    #[test]
+    fn disabling_king_safety_changes_eval_when_king_safety_was_contributing() {
+        // Pick a position where the king is genuinely exposed so the
+        // KingSafety term has a non-zero contribution. With the
+        // category masked off, the resulting score must differ.
+        // (A null assertion would be too weak — we want to know the
+        // gate actually short-circuits the += line, not just that
+        // some line ran.)
+        let p = Position::from_fen(
+            "r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5",
+        )
+        .expect("test FEN");
+        let mut cache = pawns::Table::new();
+        let full = evaluate_with_pawn_cache(&p, &mut cache, EvalMask::EMPTY);
+        let mut mask = EvalMask::EMPTY;
+        mask.disable(EvalCategory::KingSafety);
+        let mut cache2 = pawns::Table::new();
+        let masked = evaluate_with_pawn_cache(&p, &mut cache2, mask);
+        assert_ne!(
+            full, masked,
+            "masking off KingSafety should change the score in a real midgame position",
+        );
+    }
 
     #[test]
     fn evaluate_is_pure() {

@@ -88,15 +88,97 @@ pub enum BookSelection {
 #[derive(Clone, Debug, Default)]
 pub struct NoiseProfile {}
 
-/// Bitset over evaluation terms the bot is "blind" to — disabled terms
-/// contribute zero to the eval, simulating an opponent who doesn't
+/// Top-level evaluation categories the bot can be made "blind" to.
+/// Each category corresponds to one `score +=` line in
+/// [`crate::eval::evaluate`]; masking a category zeros its
+/// contribution to the running sum. Material and imbalance aren't
+/// exposed — disabling them would make the bot play essentially
+/// random moves and isn't a meaningful teaching mode.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum EvalCategory {
+    PawnStructure = 0,
+    Pieces = 1,
+    Mobility = 2,
+    KingSafety = 3,
+    Threats = 4,
+    PassedPawns = 5,
+    Space = 6,
+    Initiative = 7,
+}
+
+impl EvalCategory {
+    pub const ALL: [EvalCategory; 8] = [
+        EvalCategory::PawnStructure,
+        EvalCategory::Pieces,
+        EvalCategory::Mobility,
+        EvalCategory::KingSafety,
+        EvalCategory::Threats,
+        EvalCategory::PassedPawns,
+        EvalCategory::Space,
+        EvalCategory::Initiative,
+    ];
+
+    /// Stable, lowercase, kebab-case identifier for CLI input /
+    /// settings persistence (`king-safety`, `pawn-structure`, ...).
+    pub fn slug(self) -> &'static str {
+        match self {
+            EvalCategory::PawnStructure => "pawn-structure",
+            EvalCategory::Pieces => "pieces",
+            EvalCategory::Mobility => "mobility",
+            EvalCategory::KingSafety => "king-safety",
+            EvalCategory::Threats => "threats",
+            EvalCategory::PassedPawns => "passed-pawns",
+            EvalCategory::Space => "space",
+            EvalCategory::Initiative => "initiative",
+        }
+    }
+
+    /// Reverse of [`Self::slug`]. Returns `None` for unrecognised
+    /// input.
+    pub fn from_slug(s: &str) -> Option<EvalCategory> {
+        EvalCategory::ALL.iter().copied().find(|c| c.slug() == s)
+    }
+}
+
+/// Bitset over [`EvalCategory`]. Disabled categories contribute zero
+/// to the bot's evaluation, simulating an opponent who doesn't
 /// understand that concept (e.g. mask off pawn structure to spar
 /// against a sub-1200 positional player).
 ///
-/// Phase A ships an empty default; the signal-disabling pillar
-/// populates the mask later.
-#[derive(Clone, Debug, Default)]
-pub struct EvalMask {}
+/// Default-empty mask is the unbiased eval — every category
+/// contributes. Empty masks are the hot path; the gating branches in
+/// [`crate::eval::evaluate`] should fold to near-zero overhead under
+/// branch prediction.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub struct EvalMask(u8);
+
+impl EvalMask {
+    pub const EMPTY: EvalMask = EvalMask(0);
+
+    /// True when no categories are disabled — the eval runs unbiased.
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// True when `c` is masked off and should contribute zero.
+    pub fn is_disabled(self, c: EvalCategory) -> bool {
+        (self.0 >> c as u8) & 1 == 1
+    }
+
+    pub fn disable(&mut self, c: EvalCategory) {
+        self.0 |= 1 << c as u8;
+    }
+
+    pub fn enable(&mut self, c: EvalCategory) {
+        self.0 &= !(1 << c as u8);
+    }
+
+    /// Iterate the categories that are currently disabled, in
+    /// [`EvalCategory::ALL`] order.
+    pub fn disabled_iter(self) -> impl Iterator<Item = EvalCategory> {
+        EvalCategory::ALL.into_iter().filter(move |c| self.is_disabled(*c))
+    }
+}
 
 /// Mix the wall clock with a process-wide monotonic counter through
 /// SplitMix64. The counter guarantees uniqueness across same-nanosecond
@@ -150,5 +232,32 @@ mod tests {
         let a = OpponentProfile::new_random().seed;
         let b = OpponentProfile::new_random().seed;
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn eval_mask_starts_empty_and_round_trips() {
+        let mut m = EvalMask::EMPTY;
+        assert!(m.is_empty());
+        for c in EvalCategory::ALL {
+            assert!(!m.is_disabled(c));
+        }
+        m.disable(EvalCategory::KingSafety);
+        m.disable(EvalCategory::PawnStructure);
+        assert!(!m.is_empty());
+        assert!(m.is_disabled(EvalCategory::KingSafety));
+        assert!(m.is_disabled(EvalCategory::PawnStructure));
+        assert!(!m.is_disabled(EvalCategory::Mobility));
+        m.enable(EvalCategory::KingSafety);
+        assert!(!m.is_disabled(EvalCategory::KingSafety));
+        let disabled: Vec<_> = m.disabled_iter().collect();
+        assert_eq!(disabled, vec![EvalCategory::PawnStructure]);
+    }
+
+    #[test]
+    fn eval_category_slug_round_trips() {
+        for c in EvalCategory::ALL {
+            assert_eq!(EvalCategory::from_slug(c.slug()), Some(c));
+        }
+        assert_eq!(EvalCategory::from_slug("nope"), None);
     }
 }

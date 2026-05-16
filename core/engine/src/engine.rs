@@ -13,6 +13,7 @@
 
 use crate::eval::EvalTrace;
 use crate::movepick::{ButterflyHistory, CaptureHistory, ContHistStore, CounterMoveTable};
+use crate::opponent::EvalMask;
 use crate::pawns;
 use crate::position::Position;
 use crate::search::{Search, StopFlag};
@@ -123,6 +124,12 @@ pub struct SearchParams {
     /// required by callers that need bit-identical results across
     /// runs (analytical engine clones, teaching retrospectives).
     pub threads: usize,
+    /// Evaluation categories the bot should be "blind" to for this
+    /// search. Default [`EvalMask::EMPTY`] runs the standard unbiased
+    /// eval. Analytical paths (retrospective, hint, REPL `analyze`)
+    /// must keep this `EMPTY` so the student sees true best play in
+    /// the feedback layer.
+    pub eval_mask: EvalMask,
 }
 
 impl Default for SearchParams {
@@ -136,6 +143,7 @@ impl Default for SearchParams {
             force_include: Vec::new(),
             verbose_progress: false,
             threads: 1,
+            eval_mask: EvalMask::EMPTY,
         }
     }
 }

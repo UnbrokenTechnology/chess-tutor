@@ -262,6 +262,7 @@ fn build_params(limit_type: &str, limit: u64, threads: usize) -> Result<SearchPa
         force_include: Vec::new(),
         verbose_progress: false,
         threads,
+        eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
     };
     match limit_type {
         "depth" => {

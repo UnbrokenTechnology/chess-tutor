@@ -68,6 +68,9 @@ pub fn run_and_render(
         force_include: vec![user_mv],
         verbose_progress: false,
         threads: cfg.threads.max(1),
+        // Retrospective must judge the user's move against true best
+        // play — never apply the opponent's mid-game eval mask here.
+        eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
     };
     let analyses = analyze_position(engine, pre_move_pos, params);
     let opts = NarrationOptions {

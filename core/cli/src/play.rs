@@ -16,7 +16,7 @@ use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::openings::{self, OpeningId, OpeningIdentification};
-use chess_tutor_engine::opponent::{BookSelection, OpponentProfile};
+use chess_tutor_engine::opponent::{BookSelection, EvalCategory, EvalMask, OpponentProfile};
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::traps::{self, PendingTrap, TrapEvent, TrapHit};
@@ -93,7 +93,7 @@ struct HistoryEntry {
     book_cursor_before: Option<BookCursor>,
 }
 
-pub fn play_loop(cfg: PlayConfig) -> Result<()> {
+pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
     let mut pos = match &cfg.start_fen {
         Some(fen) => Position::from_fen(fen).map_err(|e| anyhow::anyhow!("invalid --fen: {e}"))?,
         None => Position::startpos(),
@@ -130,7 +130,7 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     )?;
     writeln!(
         out,
-        "commands: moves | eval | search | analyze | retrospect | explain-best | openings | undo | fen | flip | resign | help | quit"
+        "commands: moves | eval | search | analyze | retrospect | explain-best | openings | eval-mask | undo | fen | flip | resign | help | quit"
     )?;
     // Log the opponent seed so a varied game can be replayed exactly.
     writeln!(
@@ -145,6 +145,10 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     if let Some(cursor) = &book_cursor {
         let entry = cursor.opening();
         writeln!(out, "book: {} {}", entry.eco, entry.name)?;
+    }
+    if !cfg.opponent.eval_mask.is_empty() {
+        let disabled: Vec<_> = cfg.opponent.eval_mask.disabled_iter().map(|c| c.slug()).collect();
+        writeln!(out, "eval-mask: bot blind to {}", disabled.join(", "))?;
     }
     // Editable view of the opponent's allowed-openings set. Changes
     // via the `openings allow / deny / reset` commands take effect on
@@ -333,6 +337,7 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                 Err(e) => writeln!(out, "{}", e)?,
             },
             "openings" => run_openings_command(&mut out, arg, &mut allowed_book, &book_cursor)?,
+            "eval-mask" => run_eval_mask_command(&mut out, arg, &mut cfg.opponent.eval_mask)?,
             "fen" => writeln!(out, "{}", pos.to_fen())?,
             "flip" => manual_flip = !manual_flip,
             "undo" => match history.pop() {
@@ -504,6 +509,11 @@ fn play_engine_turn(
         force_include: Vec::new(),
         verbose_progress: cfg.search_progress,
         threads: cfg.threads,
+        // Play engine move — apply the opponent's eval mask so the
+        // bot plays "as if blind to" the masked categories. This is
+        // the only path that consumes the mask; every analytical
+        // construction below uses EvalMask::EMPTY.
+        eval_mask: cfg.opponent.eval_mask,
     };
     write!(out, "engine thinking (depth {})... ", cfg.depth)?;
     out.flush()?;
@@ -569,6 +579,10 @@ fn run_search_report(
         // REPL `search` is analytical — stay single-threaded so
         // repeated invocations on the same position match bit-for-bit.
         threads: 1,
+        // Analytical paths always run the unbiased eval so the
+        // student sees true best play, regardless of any signal mask
+        // the bot is currently using mid-game.
+        eval_mask: EvalMask::EMPTY,
     };
     let started = Instant::now();
     let lines = engine.search(pos, params);
@@ -648,6 +662,8 @@ fn run_analyze_report(
         verbose_progress: false,
         // REPL `analyze` is analytical — single-threaded.
         threads: 1,
+        // Analytical: always unbiased eval.
+        eval_mask: EvalMask::EMPTY,
     };
     let started = Instant::now();
     let analyses = analyze_position(engine, pos, params);
@@ -884,6 +900,73 @@ fn deny_openings(
         "openings: removed {removed} matching {pattern:?} (now {} allowed; effective next game).",
         ids.len(),
     )
+}
+
+/// Dispatch for the `eval-mask` REPL command. Mutates the
+/// [`OpponentProfile::eval_mask`] in place so subsequent engine
+/// moves pick up the change without restarting the game.
+fn run_eval_mask_command(
+    out: &mut io::StdoutLock<'_>,
+    arg: &str,
+    mask: &mut EvalMask,
+) -> io::Result<()> {
+    let (subverb, subarg) = match arg.split_once(char::is_whitespace) {
+        Some((v, a)) => (v.trim(), a.trim()),
+        None => (arg.trim(), ""),
+    };
+    match subverb {
+        "" | "list" => print_eval_mask(out, mask),
+        "disable" => match EvalCategory::from_slug(subarg) {
+            Some(cat) => {
+                mask.disable(cat);
+                writeln!(out, "eval-mask: bot now blind to {}.", cat.slug())
+            }
+            None => writeln!(
+                out,
+                "unknown category {subarg:?}; try one of: {}",
+                slug_list(),
+            ),
+        },
+        "enable" => match EvalCategory::from_slug(subarg) {
+            Some(cat) => {
+                mask.enable(cat);
+                writeln!(out, "eval-mask: bot now considers {} again.", cat.slug())
+            }
+            None => writeln!(
+                out,
+                "unknown category {subarg:?}; try one of: {}",
+                slug_list(),
+            ),
+        },
+        "reset" => {
+            *mask = EvalMask::EMPTY;
+            writeln!(out, "eval-mask: all categories re-enabled.")
+        }
+        other => writeln!(
+            out,
+            "unknown eval-mask subcommand {other:?} — try: list | disable CAT | enable CAT | reset",
+        ),
+    }
+}
+
+fn slug_list() -> String {
+    EvalCategory::ALL
+        .iter()
+        .map(|c| c.slug())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_eval_mask(out: &mut io::StdoutLock<'_>, mask: &EvalMask) -> io::Result<()> {
+    if mask.is_empty() {
+        return writeln!(out, "eval-mask: all categories on (bot uses full eval).");
+    }
+    writeln!(out, "eval-mask:")?;
+    for cat in EvalCategory::ALL {
+        let state = if mask.is_disabled(cat) { "off" } else { "on " };
+        writeln!(out, "  [{state}] {}", cat.slug())?;
+    }
+    Ok(())
 }
 
 fn print_selected(out: &mut io::StdoutLock<'_>, cursor: &Option<BookCursor>) -> io::Result<()> {
@@ -1173,6 +1256,14 @@ fn print_help(out: &mut io::StdoutLock<'_>) -> io::Result<()> {
     writeln!(
         out,
         "                    inspect or edit the opening book; PAT is a case-insensitive substring"
+    )?;
+    writeln!(
+        out,
+        "  eval-mask [list | disable CAT | enable CAT | reset]"
+    )?;
+    writeln!(
+        out,
+        "                    toggle bot's blindness to eval categories (effective from next engine move)"
     )?;
     writeln!(out, "  undo     take back one ply")?;
     writeln!(out, "  fen      print the current FEN")?;

@@ -122,6 +122,9 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                     threads: std::thread::available_parallelism()
                         .map(|n| n.get())
                         .unwrap_or(1),
+                    // Retrospective is analytical — always unbiased
+                    // eval, regardless of any mid-game bot mask.
+                    eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 };
                 let analyses = analyze_position(&mut analysis_engine, &mut pre_move_pos, params);
                 let text = format_retrospective(
@@ -163,6 +166,8 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                     threads: std::thread::available_parallelism()
                         .map(|n| n.get())
                         .unwrap_or(1),
+                    // Hint panel is analytical — unbiased eval.
+                    eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 };
                 let analyses = analyze_position(&mut analysis_engine, &mut pos, params);
                 let _ = tx.send(WorkerResult::Analyze { for_key, analyses });
@@ -589,6 +594,10 @@ impl App {
             threads: std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1),
+            // Play engine move — apply the opponent's mid-game eval
+            // mask so the bot plays as if blind to the masked
+            // categories.
+            eval_mask: self.opponent.eval_mask,
         };
         self.engine_thinking = true;
         let _ = self.worker_tx.send(WorkerJob::Search {

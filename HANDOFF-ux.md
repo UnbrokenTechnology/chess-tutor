@@ -10,12 +10,17 @@ See [`core/engine/src/analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!` f
 
 ## Opponent profile / bot variability (in flight)
 
-Goal: ship bot-tuning toggles so games aren't deterministic from move 1, and so the student can practice against specific openings or weakened opponents. Phase A landed an empty [`OpponentProfile`](core/engine/src/opponent.rs) skeleton; Phase B landed the opening-book pillar (curated default subset, CLI `openings` command, `--no-book` flag, book cursor in play loop + desktop). Read the [`opponent.rs`](core/engine/src/opponent.rs) and [`book.rs`](core/engine/src/book.rs) module docs for the strict invariant: **analytical paths (retrospective, hint, `analyze`) must never consult the profile** — they need to judge the user's move against true best play.
+Goal: ship bot-tuning toggles so games aren't deterministic from move 1, and so the student can practice against specific openings or weakened opponents. Phases A (skeleton), B (opening book), and C (eval signal mask) landed. Read the [`opponent.rs`](core/engine/src/opponent.rs) module doc for the strict invariant: **analytical paths (retrospective, hint, `analyze`) must never consult the profile** — they need to judge the user's move against true best play.
 
-Remaining pillars, one PR each, A/B-tested against a real game between landings:
+Remaining pillar:
 
-- **Phase C — eval signal mask.** Bitset over [`TermId`](core/engine/src/analysis/term_id.rs); each eval term gates its contribution. Needs perf check after — eval is hot-path. Lets the student spar against an opponent who "doesn't know about" king safety / pawn structure / etc.
 - **Phase D — move noise.** Search with `multi_pv = K`, sample top results weighted by score gap; with `blunder_chance` extend the pool. Reuses existing MultiPV infrastructure.
+
+Phase C surface (delivered):
+- 8 toggleable [`EvalCategory`](core/engine/src/opponent.rs) values: `pawn-structure`, `pieces`, `mobility`, `king-safety`, `threats`, `passed-pawns`, `space`, `initiative`. Material and imbalance are deliberately not exposed (disabling them produces gibberish play, not a teaching scenario).
+- CLI: `--disable-eval CATEGORY[,CATEGORY...]` startup flag + REPL `eval-mask list / disable CAT / enable CAT / reset` (toggles take effect on the next engine move).
+- Desktop: reads `self.opponent.eval_mask` when queuing the play search; no UI for editing yet — wants a settings panel mirroring the CLI surface.
+- Perf: TT=16 1T d=13 bench identical to pre-Phase-C (8 per-category branches fold under branch prediction on the empty-mask hot path).
 
 Opening-book follow-on work, deferred:
 - Grow the curated default from 8 entries; current list lives in [`CURATED`](core/engine/src/book.rs) (covered by the `every_curated_entry_resolves` regression test).

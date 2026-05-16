@@ -259,6 +259,14 @@ enum Command {
         /// this flag to force the engine to search from move 1.
         #[arg(long = "no-book", action = clap::ArgAction::SetTrue)]
         no_book: bool,
+        /// Comma-separated list of evaluation categories the bot
+        /// should be blind to for this game (e.g.
+        /// `--disable-eval king-safety,pawn-structure`). Categories:
+        /// pawn-structure | pieces | mobility | king-safety | threats
+        /// | passed-pawns | space | initiative. The mid-game REPL
+        /// `eval-mask` command can toggle individual categories.
+        #[arg(long = "disable-eval", value_name = "CATEGORY[,CATEGORY...]")]
+        disable_eval: Option<String>,
     },
 }
 
@@ -351,6 +359,8 @@ fn main() -> Result<()> {
                 force_include: Vec::new(),
                 verbose_progress: false,
                 threads: threads.max(1),
+                // One-shot CLI search/analyze — analytical, no bot mask.
+                eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
             };
 
             if analyze {
@@ -475,6 +485,7 @@ fn main() -> Result<()> {
             deterministic,
             seed,
             no_book,
+            disable_eval,
         } => {
             let mut opponent = match seed {
                 Some(s) => chess_tutor_engine::opponent::OpponentProfile::with_seed(s),
@@ -482,6 +493,18 @@ fn main() -> Result<()> {
             };
             if no_book {
                 opponent.book = chess_tutor_engine::opponent::BookSelection::None;
+            }
+            if let Some(list) = disable_eval {
+                for token in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let cat = chess_tutor_engine::opponent::EvalCategory::from_slug(token)
+                        .with_context(|| {
+                            format!(
+                                "unknown eval category {:?} (try one of: pawn-structure, pieces, mobility, king-safety, threats, passed-pawns, space, initiative)",
+                                token,
+                            )
+                        })?;
+                    opponent.eval_mask.disable(cat);
+                }
             }
             play::play_loop(play::PlayConfig {
                 start_fen: fen,

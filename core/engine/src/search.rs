@@ -18,6 +18,7 @@
 //! scaffolding here should accept them without API churn.
 
 use crate::eval::{evaluate_with_pawn_cache, evaluate_with_trace, EvalTrace};
+use crate::opponent::EvalMask;
 use crate::movepick::{
     cont_history_update, ButterflyHistory, CaptureHistory, ContHistKeys, ContHistStore,
     CounterMoveTable, MovePicker, BUTTERFLY_HISTORY_BOUND, CAPTURE_HISTORY_BOUND, CONT_HISTORY_BOUND,
@@ -306,6 +307,14 @@ pub(crate) struct Search<'a> {
     /// [`Search::run`] so contempt can be applied asymmetrically
     /// (root prefers playing on; opponent is nudged toward drawing).
     root_stm: Color,
+
+    /// Evaluation-category mask the bot is "blind" to for this
+    /// search. [`EvalMask::EMPTY`] is the hot path; populated only
+    /// for play-engine searches whose [`crate::engine::SearchParams::
+    /// eval_mask`] was set by an [`crate::opponent::OpponentProfile`].
+    /// Captured from `params` at `run()` start; passed to every
+    /// `evaluate_with_pawn_cache` call inside the search.
+    eval_mask: EvalMask,
 }
 
 impl<'a> Search<'a> {
@@ -354,6 +363,7 @@ impl<'a> Search<'a> {
             verbose_progress: false,
             verbose_next_tick: 0,
             root_stm: Color::White,
+            eval_mask: EvalMask::EMPTY,
         }
     }
 
@@ -394,6 +404,7 @@ impl<'a> Search<'a> {
         self.start_time = Instant::now();
         self.stop_time = params.max_time.map(|d| self.start_time + d);
         self.max_nodes = params.max_nodes;
+        self.eval_mask = params.eval_mask;
         self.next_stop_check = STOP_CHECK_INTERVAL;
         self.verbose_progress = params.verbose_progress;
         self.verbose_next_tick = VERBOSE_TICK_INTERVAL;
@@ -833,7 +844,7 @@ impl<'a> Search<'a> {
         } else if tt_hit && probe.data.eval != Value::NONE {
             probe.data.eval
         } else {
-            evaluate_with_pawn_cache(pos, self.pawn_cache)
+            evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask)
         };
         let static_eval = self.apply_contempt(raw_static_eval, pos);
 
@@ -2053,7 +2064,7 @@ impl<'a> Search<'a> {
     /// pruning decisions should go through this, but **not** values
     /// written into the TT — see `probe.save(..., raw_eval)` below.
     fn search_eval(&mut self, pos: &Position) -> Value {
-        let raw = evaluate_with_pawn_cache(pos, self.pawn_cache);
+        let raw = evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask);
         Value(raw.0 + self.contempt_for_pov(pos.side_to_move()))
     }
 
