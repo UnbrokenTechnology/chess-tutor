@@ -81,13 +81,20 @@ use util::{
 
 /// Knobs that change the shape of the rendered narration without
 /// affecting which terms are computed.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct NarrationOptions {
     /// When true, a `Best` verdict still runs the full term-level
     /// narration instead of short-circuiting after the one-line
-    /// headline. Useful when the student wants to understand *why*
-    /// their move was the best, not just *that* it was.
+    /// headline. Defaults on: a student who picks the right move
+    /// for the wrong reason — or no reason at all — learns nothing
+    /// from a bare congratulatory line.
     pub explain_best: bool,
+}
+
+impl Default for NarrationOptions {
+    fn default() -> Self {
+        Self { explain_best: true }
+    }
 }
 
 /// Format the retrospective for `user_move` given a slice of

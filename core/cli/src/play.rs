@@ -15,6 +15,7 @@ use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::openings::{self, OpeningIdentification};
+use chess_tutor_engine::opponent::OpponentProfile;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::traps::{self, PendingTrap, TrapEvent, TrapHit};
@@ -68,6 +69,11 @@ pub struct PlayConfig {
     /// reproducibility, not for game-play behaviour. Set this when
     /// you need the same game to play out identically across runs.
     pub deterministic: bool,
+    /// Bot personality / variability toggles for this game. Phase A:
+    /// the only populated field is [`OpponentProfile::seed`], logged
+    /// at game start. Subsequent phases hook opening books, eval
+    /// signal masking, and move noise into this struct.
+    pub opponent: OpponentProfile,
 }
 
 /// One played ply — enough to undo the move and show what was played.
@@ -105,8 +111,8 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     let mut retrospect_enabled = true;
     // When true, `Best` verdicts still render the full per-term
     // narration so the student learns *why* their move was best.
-    // Toggle via `explain-best on/off`; initial value comes from the
-    // CLI `--explain-best` flag.
+    // Default on; flip via REPL `explain-best off` or the CLI
+    // `--no-explain-best` startup flag.
     let mut explain_best = cfg.explain_best;
 
     let stdin = io::stdin();
@@ -119,6 +125,14 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     writeln!(
         out,
         "commands: moves | eval | search | analyze | retrospect | explain-best | undo | fen | flip | resign | help | quit"
+    )?;
+    // Log the opponent seed so a varied game can be replayed exactly.
+    // Phase A: the seed isn't used yet, but printing it now means the
+    // habit is established before later phases actually consume it.
+    writeln!(
+        out,
+        "opponent seed: {} (pass --seed {} to replay this game)",
+        cfg.opponent.seed, cfg.opponent.seed,
     )?;
     match cfg.engine_color {
         EngineColor::White => writeln!(out, "engine plays white, you play black.")?,

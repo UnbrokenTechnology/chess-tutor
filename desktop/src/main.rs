@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use chess_tutor_engine::analysis::{analyze_position, MoveAnalysis};
 use chess_tutor_engine::engine::{Engine, SearchLine, SearchParams};
 use chess_tutor_engine::movegen::legal_moves_vec;
+use chess_tutor_engine::opponent::OpponentProfile;
 use chess_tutor_engine::position::{Position, StateInfo};
 use chess_tutor_engine::san;
 use chess_tutor_engine::types::{Color, File, Move, MoveKind, Piece, PieceType, Rank, Square, Value};
@@ -122,10 +123,12 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                         .unwrap_or(1),
                 };
                 let analyses = analyze_position(&mut analysis_engine, &mut pre_move_pos, params);
-                let opts = NarrationOptions {
-                    explain_best: false,
-                };
-                let text = format_retrospective(&pre_move_pos, &analyses, user_move, &opts);
+                let text = format_retrospective(
+                    &pre_move_pos,
+                    &analyses,
+                    user_move,
+                    &NarrationOptions::default(),
+                );
                 let _ = tx.send(WorkerResult::Retrospective {
                     gen,
                     target_index,
@@ -260,6 +263,12 @@ struct App {
     /// Latest analyze result. Tagged with the position key it was
     /// computed for so stale arrivals can be discarded.
     hint_result: Option<HintResult>,
+
+    /// Bot personality / variability for the current game. Reseeded
+    /// on every New Game; Phase A only stores the seed (logged to
+    /// stderr at game start). Later phases will read book / mask /
+    /// noise from this struct during move selection.
+    opponent: OpponentProfile,
 }
 
 struct HintResult {
@@ -298,7 +307,12 @@ impl App {
             hint_open: false,
             hint_thinking: false,
             hint_result: None,
+            opponent: OpponentProfile::new_random(),
         };
+        eprintln!(
+            "opponent seed: {} (record this to replay the game)",
+            app.opponent.seed,
+        );
         app.maybe_queue_engine_search();
         app
     }
@@ -319,6 +333,11 @@ impl App {
         self.viewing_index = None;
         self.engine_plays = engine_plays;
         self.depth = depth;
+        self.opponent = OpponentProfile::new_random();
+        eprintln!(
+            "opponent seed: {} (record this to replay the game)",
+            self.opponent.seed,
+        );
         self.close_hint();
         let _ = self.worker_tx.send(WorkerJob::NewGame);
         self.maybe_queue_engine_search();

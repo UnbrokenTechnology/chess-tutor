@@ -207,12 +207,13 @@ enum Command {
         flip: bool,
         #[arg(long)]
         light_mode: bool,
-        /// When true, the automatic retrospective narrates *why* each
-        /// `Best` move was best (per-term breakdown), not just the
-        /// congratulatory headline. Default off — the student can
-        /// flip it on at runtime via the REPL `explain-best` toggle.
-        #[arg(long)]
-        explain_best: bool,
+        /// Suppress the per-term breakdown on `Best` verdicts —
+        /// only the congratulatory headline prints. Default behaviour
+        /// is to narrate *why* the move was best so the student who
+        /// guessed right still learns the reasoning. Toggle at
+        /// runtime via the REPL `explain-best` command.
+        #[arg(long = "no-explain-best", action = clap::ArgAction::SetTrue)]
+        no_explain_best: bool,
         /// When true, print the current FEN before each side's turn.
         /// Useful for debugging — if the engine hangs or plays a bad
         /// move, the last-printed FEN reproduces the position exactly.
@@ -247,6 +248,12 @@ enum Command {
         /// stays the same.
         #[arg(long)]
         deterministic: bool,
+        /// Seed for the opponent's pseudo-randomness (opening line
+        /// pick in Phase B, move sampling in later phases). Default:
+        /// random per run, logged at game start. Pass a fixed value
+        /// to replay an identical bot game.
+        #[arg(long)]
+        seed: Option<u64>,
     },
 }
 
@@ -455,13 +462,18 @@ fn main() -> Result<()> {
             ascii,
             flip,
             light_mode,
-            explain_best,
+            no_explain_best,
             show_fens,
             reset_engine_per_move,
             search_progress,
             threads,
             deterministic,
+            seed,
         } => {
+            let opponent = match seed {
+                Some(s) => chess_tutor_engine::opponent::OpponentProfile::with_seed(s),
+                None => chess_tutor_engine::opponent::OpponentProfile::new_random(),
+            };
             play::play_loop(play::PlayConfig {
                 start_fen: fen,
                 engine_color,
@@ -470,7 +482,8 @@ fn main() -> Result<()> {
                 ascii,
                 flip,
                 light_mode,
-                explain_best,
+                opponent,
+                explain_best: !no_explain_best,
                 show_fens,
                 reset_engine_per_move,
                 search_progress,

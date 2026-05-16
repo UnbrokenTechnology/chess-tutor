@@ -18,6 +18,7 @@ pub mod material;
 pub mod movegen;
 pub mod movepick;
 pub mod openings;
+pub mod opponent;
 pub mod pawns;
 pub mod position;
 pub mod prefetch;
