@@ -254,6 +254,11 @@ enum Command {
         /// to replay an identical bot game.
         #[arg(long)]
         seed: Option<u64>,
+        /// Disable the opening book for this game. Default behaviour
+        /// is to pick a random line from the curated default set; pass
+        /// this flag to force the engine to search from move 1.
+        #[arg(long = "no-book", action = clap::ArgAction::SetTrue)]
+        no_book: bool,
     },
 }
 
@@ -469,11 +474,15 @@ fn main() -> Result<()> {
             threads,
             deterministic,
             seed,
+            no_book,
         } => {
-            let opponent = match seed {
+            let mut opponent = match seed {
                 Some(s) => chess_tutor_engine::opponent::OpponentProfile::with_seed(s),
                 None => chess_tutor_engine::opponent::OpponentProfile::new_random(),
             };
+            if no_book {
+                opponent.book = chess_tutor_engine::opponent::BookSelection::None;
+            }
             play::play_loop(play::PlayConfig {
                 start_fen: fen,
                 engine_color,

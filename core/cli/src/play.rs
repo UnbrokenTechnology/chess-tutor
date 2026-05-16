@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use chess_tutor_engine::analysis::analyze_position;
+use chess_tutor_engine::book::BookCursor;
 use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
-use chess_tutor_engine::openings::{self, OpeningIdentification};
-use chess_tutor_engine::opponent::OpponentProfile;
+use chess_tutor_engine::openings::{self, OpeningId, OpeningIdentification};
+use chess_tutor_engine::opponent::{BookSelection, OpponentProfile};
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::traps::{self, PendingTrap, TrapEvent, TrapHit};
@@ -85,6 +86,11 @@ struct HistoryEntry {
     /// applied. On `undo`, we restore this so the trap cursor walks
     /// backward with the game.
     pending_before: Option<PendingTrap>,
+    /// Snapshot of the opening-book cursor as it was *before* this
+    /// move advanced (or dropped) it. On `undo`, we restore this so
+    /// the cursor walks backward with the game — including
+    /// resurrecting a cursor the move dropped.
+    book_cursor_before: Option<BookCursor>,
 }
 
 pub fn play_loop(cfg: PlayConfig) -> Result<()> {
@@ -124,16 +130,28 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     )?;
     writeln!(
         out,
-        "commands: moves | eval | search | analyze | retrospect | explain-best | undo | fen | flip | resign | help | quit"
+        "commands: moves | eval | search | analyze | retrospect | explain-best | openings | undo | fen | flip | resign | help | quit"
     )?;
     // Log the opponent seed so a varied game can be replayed exactly.
-    // Phase A: the seed isn't used yet, but printing it now means the
-    // habit is established before later phases actually consume it.
     writeln!(
         out,
         "opponent seed: {} (pass --seed {} to replay this game)",
         cfg.opponent.seed, cfg.opponent.seed,
     )?;
+    // Pick an opening line for this game, if the profile allows one
+    // and we're starting from startpos. Cursor is mutated as the
+    // game progresses; dropped on first deviation.
+    let mut book_cursor = BookCursor::pick(&cfg.opponent, &pos);
+    if let Some(cursor) = &book_cursor {
+        let entry = cursor.opening();
+        writeln!(out, "book: {} {}", entry.eco, entry.name)?;
+    }
+    // Editable view of the opponent's allowed-openings set. Changes
+    // via the `openings allow / deny / reset` commands take effect on
+    // the *next* game (the current cursor was already picked above);
+    // we still let the user query and edit it so they can shape their
+    // practice list while a game is in flight.
+    let mut allowed_book: BookSelection = cfg.opponent.book.clone();
     match cfg.engine_color {
         EngineColor::White => writeln!(out, "engine plays white, you play black.")?,
         EngineColor::Black => writeln!(out, "engine plays black, you play white.")?,
@@ -179,6 +197,25 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
         }
 
         if is_engine_turn(mover, cfg.engine_color) {
+            // Book first: if the cursor still has a move queued, play
+            // it directly without invoking the search. This is the
+            // only place the book overrides search results — see the
+            // BookCursor docs for the strict invariant that
+            // analytical paths must not consult the book.
+            if let Some(book_mv) = book_cursor.as_ref().and_then(|c| c.peek()) {
+                let san_text = san::format(&pos, book_mv);
+                writeln!(out, "book: engine plays {san_text}")?;
+                apply_move_and_scan(
+                    &mut out,
+                    &mut pos,
+                    book_mv,
+                    &mut history,
+                    &mut position_keys,
+                    &mut pending_trap,
+                    &mut book_cursor,
+                )?;
+                continue;
+            }
             play_engine_turn(
                 &mut out,
                 &mut pos,
@@ -187,6 +224,7 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                 &mut history,
                 &mut position_keys,
                 &mut pending_trap,
+                &mut book_cursor,
             )?;
             continue;
         }
@@ -294,6 +332,7 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                 )?,
                 Err(e) => writeln!(out, "{}", e)?,
             },
+            "openings" => run_openings_command(&mut out, arg, &mut allowed_book, &book_cursor)?,
             "fen" => writeln!(out, "{}", pos.to_fen())?,
             "flip" => manual_flip = !manual_flip,
             "undo" => match history.pop() {
@@ -301,6 +340,7 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                     pos.undo_move(entry.mv, entry.state);
                     position_keys.pop();
                     pending_trap = entry.pending_before;
+                    book_cursor = entry.book_cursor_before;
                     writeln!(out, "undid {}", entry.san)?;
                 }
                 None => writeln!(out, "nothing to undo.")?,
@@ -331,6 +371,7 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                         &mut history,
                         &mut position_keys,
                         &mut pending_trap,
+                        &mut book_cursor,
                     )?;
                     if let Some((mut pre_pos, game_hist)) = pre_move_snapshot {
                         let cfg_r = RetrospectiveConfig {
@@ -434,6 +475,7 @@ fn is_engine_turn(side: Color, engine_color: EngineColor) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // cohesive runtime-state slices the play loop owns
 fn play_engine_turn(
     out: &mut io::StdoutLock<'_>,
     pos: &mut Position,
@@ -442,6 +484,7 @@ fn play_engine_turn(
     history: &mut Vec<HistoryEntry>,
     position_keys: &mut Vec<u64>,
     pending_trap: &mut Option<PendingTrap>,
+    book_cursor: &mut Option<BookCursor>,
 ) -> io::Result<()> {
     if cfg.reset_engine_per_move {
         engine.new_game();
@@ -490,7 +533,7 @@ fn play_engine_turn(
         nodes,
         nps_m,
     )?;
-    apply_move_and_scan(out, pos, mv, history, position_keys, pending_trap)?;
+    apply_move_and_scan(out, pos, mv, history, position_keys, pending_trap, book_cursor)?;
     Ok(())
 }
 
@@ -717,6 +760,147 @@ fn parse_analyze_command(input: &str) -> Result<AnalyzeArgs, String> {
 /// Parse the optional `on` / `off` argument for a toggle command.
 /// `Ok(None)` means no argument — caller should render the current
 /// state. `Ok(Some(bool))` is an explicit set; `Err` is a bad token.
+/// Dispatch for the `openings` REPL command. Edits the allowed-set for
+/// the *next* game; queries display the current allowed-set and the
+/// live cursor (read-only).
+fn run_openings_command(
+    out: &mut io::StdoutLock<'_>,
+    arg: &str,
+    allowed: &mut BookSelection,
+    cursor: &Option<BookCursor>,
+) -> io::Result<()> {
+    let (subverb, subarg) = match arg.split_once(char::is_whitespace) {
+        Some((v, a)) => (v.trim(), a.trim()),
+        None => (arg.trim(), ""),
+    };
+    match subverb {
+        "" => print_openings_status(out, allowed, cursor),
+        "list" => print_allowed_list(out, allowed),
+        "allow" => allow_openings(out, allowed, subarg),
+        "deny" => deny_openings(out, allowed, subarg),
+        "reset" => {
+            *allowed = BookSelection::Allowed(chess_tutor_engine::book::curated_default_ids());
+            let count = allowed_count(allowed);
+            writeln!(
+                out,
+                "openings: reset to curated default ({count} entries; effective next game).",
+            )
+        }
+        "selected" => print_selected(out, cursor),
+        other => writeln!(
+            out,
+            "unknown openings subcommand {other:?} — try: list | allow PAT | deny PAT | reset | selected",
+        ),
+    }
+}
+
+fn allowed_count(allowed: &BookSelection) -> usize {
+    match allowed {
+        BookSelection::None => 0,
+        BookSelection::Allowed(ids) => ids.len(),
+    }
+}
+
+fn print_openings_status(
+    out: &mut io::StdoutLock<'_>,
+    allowed: &BookSelection,
+    cursor: &Option<BookCursor>,
+) -> io::Result<()> {
+    let count = allowed_count(allowed);
+    writeln!(out, "openings: {count} allowed in book; {} this game.",
+        if cursor.is_some() { "in book" } else { "out of book" })?;
+    writeln!(out, "  try: openings list | allow PAT | deny PAT | reset | selected")
+}
+
+fn print_allowed_list(out: &mut io::StdoutLock<'_>, allowed: &BookSelection) -> io::Result<()> {
+    let ids = match allowed {
+        BookSelection::None => &[][..],
+        BookSelection::Allowed(v) => v.as_slice(),
+    };
+    if ids.is_empty() {
+        return writeln!(out, "openings: allowed set is empty (engine plays from search).");
+    }
+    writeln!(out, "openings allowed ({}):", ids.len())?;
+    for id in ids {
+        if let Some(entry) = openings::entry(*id) {
+            writeln!(out, "  {} {}", entry.eco, entry.name)?;
+        }
+    }
+    Ok(())
+}
+
+fn allow_openings(
+    out: &mut io::StdoutLock<'_>,
+    allowed: &mut BookSelection,
+    pattern: &str,
+) -> io::Result<()> {
+    if pattern.is_empty() {
+        return writeln!(out, "usage: openings allow <pattern>");
+    }
+    let matches = openings::find_ids_matching(pattern);
+    if matches.is_empty() {
+        return writeln!(out, "openings: no opening matches {pattern:?}.");
+    }
+    let mut current: Vec<OpeningId> = match allowed {
+        BookSelection::None => Vec::new(),
+        BookSelection::Allowed(v) => std::mem::take(v),
+    };
+    let before = current.len();
+    for id in matches {
+        if !current.contains(&id) {
+            current.push(id);
+        }
+    }
+    let added = current.len() - before;
+    *allowed = BookSelection::Allowed(current);
+    writeln!(
+        out,
+        "openings: added {added} matching {pattern:?} (now {} allowed; effective next game).",
+        allowed_count(allowed),
+    )
+}
+
+fn deny_openings(
+    out: &mut io::StdoutLock<'_>,
+    allowed: &mut BookSelection,
+    pattern: &str,
+) -> io::Result<()> {
+    if pattern.is_empty() {
+        return writeln!(out, "usage: openings deny <pattern>");
+    }
+    let matches = openings::find_ids_matching(pattern);
+    if matches.is_empty() {
+        return writeln!(out, "openings: no opening matches {pattern:?}.");
+    }
+    let ids = match allowed {
+        BookSelection::None => return writeln!(out, "openings: book is already off."),
+        BookSelection::Allowed(v) => v,
+    };
+    let before = ids.len();
+    ids.retain(|id| !matches.contains(id));
+    let removed = before - ids.len();
+    writeln!(
+        out,
+        "openings: removed {removed} matching {pattern:?} (now {} allowed; effective next game).",
+        ids.len(),
+    )
+}
+
+fn print_selected(out: &mut io::StdoutLock<'_>, cursor: &Option<BookCursor>) -> io::Result<()> {
+    match cursor {
+        None => writeln!(out, "openings: out of book this game."),
+        Some(c) => {
+            let entry = c.opening();
+            writeln!(out, "openings: in book — {} {}", entry.eco, entry.name)?;
+            // The cursor's next move is shown via the play loop's
+            // "book: engine plays X" line when the bot moves, so we
+            // don't duplicate it here — keeping the output deterministic
+            // regardless of whose turn it is.
+            Ok(())
+        }
+    }
+}
+
 fn parse_toggle(input: &str) -> Result<Option<bool>, String> {
     match input.trim() {
         "" => Ok(None),
@@ -754,6 +938,7 @@ fn apply_move(
     history: &mut Vec<HistoryEntry>,
     position_keys: &mut Vec<u64>,
     pending_before: Option<PendingTrap>,
+    book_cursor_before: Option<BookCursor>,
 ) {
     let san = san::format(pos, mv);
     let state = pos.do_move(mv);
@@ -762,13 +947,16 @@ fn apply_move(
         state,
         san,
         pending_before,
+        book_cursor_before,
     });
     position_keys.push(pos.key());
 }
 
 /// [`apply_move`] plus full trap bookkeeping: advance the pending
-/// cursor when a trap is live, and otherwise look for a newly-fired
-/// trap on the post-move position.
+/// cursor when a trap is live, look for a newly-fired trap on the
+/// post-move position, and advance / drop the opening-book cursor.
+/// All three pieces of state are snapshotted into the new
+/// [`HistoryEntry`] so `undo` rolls them back together.
 fn apply_move_and_scan(
     out: &mut io::StdoutLock<'_>,
     pos: &mut Position,
@@ -776,9 +964,12 @@ fn apply_move_and_scan(
     history: &mut Vec<HistoryEntry>,
     position_keys: &mut Vec<u64>,
     pending_trap: &mut Option<PendingTrap>,
+    book_cursor: &mut Option<BookCursor>,
 ) -> io::Result<()> {
-    // Snapshot the pending state for undo BEFORE we advance it.
+    // Snapshot pending-trap and book-cursor BEFORE we advance them, so
+    // `undo` restores the world exactly as it was before this move.
     let pending_snapshot = pending_trap.clone();
+    let book_snapshot = book_cursor.clone();
 
     // If a trap is already mid-refutation, advance the cursor using
     // the pre-move position (san::parse needs legal-move context).
@@ -798,7 +989,14 @@ fn apply_move_and_scan(
     let from = mv.from();
     let to = mv.to();
 
-    apply_move(pos, mv, history, position_keys, pending_snapshot);
+    apply_move(
+        pos,
+        mv,
+        history,
+        position_keys,
+        pending_snapshot,
+        book_snapshot,
+    );
 
     // Only scan for newly-fired traps when nothing is already pending.
     // Overlapping traps are theoretically possible but vanishingly
@@ -811,6 +1009,17 @@ fn apply_move_and_scan(
             announce_trap_hit(out, &hit)?;
             *pending_trap = Some(PendingTrap::new(entry, hit));
         }
+    }
+
+    // Book bookkeeping: any move (engine book play, engine search,
+    // human reply) gets observed. A diverging move drops the cursor;
+    // a matching move advances it. Exhausted lines (cursor alive but
+    // peek() returned None) also drop here, because observe sees no
+    // expected ply to match against.
+    let dropped = book_cursor.as_mut().is_some_and(|c| !c.observe(mv));
+    if dropped {
+        *book_cursor = None;
+        writeln!(out, "out of book — engine now plays from search.")?;
     }
 
     Ok(())
@@ -957,6 +1166,14 @@ fn print_help(out: &mut io::StdoutLock<'_>) -> io::Result<()> {
         out,
         "  explain-best [on|off] narrate why Best moves were best, not just the headline"
     )?;
+    writeln!(
+        out,
+        "  openings [list | allow PAT | deny PAT | reset | selected]"
+    )?;
+    writeln!(
+        out,
+        "                    inspect or edit the opening book; PAT is a case-insensitive substring"
+    )?;
     writeln!(out, "  undo     take back one ply")?;
     writeln!(out, "  fen      print the current FEN")?;
     writeln!(out, "  flip     flip the board")?;
@@ -1027,14 +1244,14 @@ mod tests {
         // First cycle: two visits to the startpos. Still not a draw.
         for m in cycle {
             let mv = crate::uci::parse(&mut pos, m).unwrap();
-            apply_move(&mut pos, mv, &mut history, &mut keys, None);
+            apply_move(&mut pos, mv, &mut history, &mut keys, None, None);
         }
         assert!(!threefold_reached(&keys), "second visit must not draw");
 
         // Second cycle: three visits to the startpos. Draw.
         for m in cycle {
             let mv = crate::uci::parse(&mut pos, m).unwrap();
-            apply_move(&mut pos, mv, &mut history, &mut keys, None);
+            apply_move(&mut pos, mv, &mut history, &mut keys, None, None);
         }
         assert!(threefold_reached(&keys), "third visit is threefold");
     }

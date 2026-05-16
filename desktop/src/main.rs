@@ -3,6 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chess_tutor_engine::analysis::{analyze_position, MoveAnalysis};
+use chess_tutor_engine::book::BookCursor;
 use chess_tutor_engine::engine::{Engine, SearchLine, SearchParams};
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::opponent::OpponentProfile;
@@ -222,6 +223,11 @@ struct HistoryEntry {
     retrospective_text: Option<String>,
     /// Filled for moves the engine made. Carries score / depth / time.
     engine_info: Option<EngineInfo>,
+    /// Snapshot of the opening-book cursor as it was *before* this
+    /// move advanced (or dropped) it. On takeback we restore this so
+    /// the cursor walks backward with the game — including
+    /// resurrecting a cursor the move dropped.
+    book_cursor_before: Option<BookCursor>,
 }
 
 struct App {
@@ -265,10 +271,14 @@ struct App {
     hint_result: Option<HintResult>,
 
     /// Bot personality / variability for the current game. Reseeded
-    /// on every New Game; Phase A only stores the seed (logged to
-    /// stderr at game start). Later phases will read book / mask /
-    /// noise from this struct during move selection.
+    /// on every New Game; the play loop reads `book` to pick an
+    /// opening line and consults [`Self::book_cursor`] to follow it.
     opponent: OpponentProfile,
+    /// Live opening-book cursor for the current game. `Some` while
+    /// the bot is still following the picked line; dropped on the
+    /// first deviation, exhaustion, or any takeback that uncovers a
+    /// pre-book state.
+    book_cursor: Option<BookCursor>,
 }
 
 struct HintResult {
@@ -308,11 +318,10 @@ impl App {
             hint_thinking: false,
             hint_result: None,
             opponent: OpponentProfile::new_random(),
+            book_cursor: None,
         };
-        eprintln!(
-            "opponent seed: {} (record this to replay the game)",
-            app.opponent.seed,
-        );
+        app.book_cursor = BookCursor::pick(&app.opponent, &app.position);
+        log_new_game_intro(&app.opponent, &app.book_cursor);
         app.maybe_queue_engine_search();
         app
     }
@@ -334,10 +343,8 @@ impl App {
         self.engine_plays = engine_plays;
         self.depth = depth;
         self.opponent = OpponentProfile::new_random();
-        eprintln!(
-            "opponent seed: {} (record this to replay the game)",
-            self.opponent.seed,
-        );
+        self.book_cursor = BookCursor::pick(&self.opponent, &self.position);
+        log_new_game_intro(&self.opponent, &self.book_cursor);
         self.close_hint();
         let _ = self.worker_tx.send(WorkerJob::NewGame);
         self.maybe_queue_engine_search();
@@ -484,6 +491,7 @@ impl App {
     fn apply_move(&mut self, mv: Move) {
         let san_str = san::format(&self.position, mv);
         let moved_by = self.position.side_to_move();
+        let book_cursor_before = self.book_cursor.clone();
         let state = self.position.do_move(mv);
         self.position_keys.push(self.position.key());
         self.history.push(HistoryEntry {
@@ -494,7 +502,15 @@ impl App {
             position_after: self.position.clone(),
             retrospective_text: None,
             engine_info: None,
+            book_cursor_before,
         });
+        // Advance / drop the book cursor in the same step that records
+        // the move, so the cursor stays consistent with history.
+        let dropped = self.book_cursor.as_mut().is_some_and(|c| !c.observe(mv));
+        if dropped {
+            self.book_cursor = None;
+            eprintln!("out of book — engine now plays from search.");
+        }
         self.deselect();
     }
 
@@ -525,6 +541,7 @@ impl App {
         if let Some(entry) = self.history.pop() {
             self.position.undo_move(entry.mv, entry.state);
             self.position_keys.pop();
+            self.book_cursor = entry.book_cursor_before;
             self.deselect();
         }
     }
@@ -546,6 +563,16 @@ impl App {
         }
         let mut scratch = self.position.clone();
         if legal_moves_vec(&mut scratch).is_empty() {
+            return;
+        }
+        // Book first: if the cursor has a queued move, play it
+        // synchronously and skip the worker round-trip entirely. The
+        // engine_info field stays None for these moves (no search ran);
+        // the move list panel will need to recognise book moves as a
+        // separate case once we surface them in the UI.
+        if let Some(book_mv) = self.book_cursor.as_ref().and_then(|c| c.peek()) {
+            eprintln!("book: engine plays {}", san::format(&self.position, book_mv));
+            self.apply_move(book_mv);
             return;
         }
         let params = SearchParams {
@@ -1193,6 +1220,22 @@ fn format_score_root_pov(score: Value, _root_stm: Color) -> String {
     } else {
         let pawns = score.0 as f32 / Value::PAWN_MG.0 as f32;
         format!("{:+.2}", pawns)
+    }
+}
+
+/// Log the new-game header to stderr: the opponent seed so a varied
+/// game can be reproduced, and the picked opening line (if any) so the
+/// user knows what they're up against. Sent to stderr — not the GUI —
+/// because the desktop hasn't grown a status surface for this yet;
+/// the launcher shell window is the de facto session log for now.
+fn log_new_game_intro(opponent: &OpponentProfile, cursor: &Option<BookCursor>) {
+    eprintln!(
+        "opponent seed: {} (record this to replay the game)",
+        opponent.seed,
+    );
+    if let Some(c) = cursor {
+        let entry = c.opening();
+        eprintln!("book: {} {}", entry.eco, entry.name);
     }
 }
 

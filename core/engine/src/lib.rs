@@ -10,6 +10,7 @@ pub mod analysis;
 pub mod attacks;
 pub mod bitbases;
 pub mod bitboard;
+pub mod book;
 pub mod endgame;
 pub mod engine;
 pub mod eval;

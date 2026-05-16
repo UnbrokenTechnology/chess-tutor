@@ -28,6 +28,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::openings::OpeningId;
+
 /// Per-game opponent configuration. See module-level docs.
 #[derive(Clone, Debug, Default)]
 pub struct OpponentProfile {
@@ -42,34 +44,39 @@ pub struct OpponentProfile {
 }
 
 impl OpponentProfile {
-    /// Empty profile with a freshly randomised seed. Use when starting
-    /// a new interactive game.
+    /// Profile for a new interactive game: random seed + curated
+    /// default opening book on. Use [`Self::with_seed`] to reproduce
+    /// a previous game by passing back its logged seed.
     pub fn new_random() -> Self {
-        Self {
-            seed: random_seed(),
-            ..Self::default()
-        }
+        Self::with_seed(random_seed())
     }
 
-    /// Empty profile with a fixed seed — for reproducing a previous
-    /// game or for tests.
+    /// Profile with a fixed seed and the curated default opening
+    /// book. Used both for replaying a logged game and for tests
+    /// that want repeatable opening picks. To get a behaviour-free
+    /// profile (no book, no noise, no mask) use
+    /// [`OpponentProfile::default`] instead — that path is for tests
+    /// of code that must not touch the book.
     pub fn with_seed(seed: u64) -> Self {
         Self {
+            book: BookSelection::Allowed(crate::book::curated_default_ids()),
+            noise: NoiseProfile::default(),
+            eval_mask: EvalMask::default(),
             seed,
-            ..Self::default()
         }
     }
 }
 
 /// Which opening lines, if any, the bot may play out of book.
-///
-/// Phase A ships only [`BookSelection::None`]; subsequent variants are
-/// added when the book pillar lands.
 #[derive(Clone, Debug, Default)]
 pub enum BookSelection {
     /// Engine plays from move 1 — no opening book consulted.
     #[default]
     None,
+    /// Pick uniformly at game start (seeded by [`OpponentProfile::seed`])
+    /// from this set of [`OpeningId`]s. An empty vec is treated the
+    /// same as [`BookSelection::None`].
+    Allowed(Vec<OpeningId>),
 }
 
 /// Move-sampling noise: how often the bot picks a top-K alternative
@@ -118,16 +125,21 @@ mod tests {
 
     #[test]
     fn default_profile_is_empty_noop() {
+        // `Default` is the no-behaviour constructor — used by tests
+        // of code that must not touch the book.
         let p = OpponentProfile::default();
         assert!(matches!(p.book, BookSelection::None));
         assert_eq!(p.seed, 0);
     }
 
     #[test]
-    fn with_seed_preserves_seed_and_keeps_rest_default() {
+    fn with_seed_preserves_seed_and_enables_curated_book() {
         let p = OpponentProfile::with_seed(0xDEAD_BEEF);
         assert_eq!(p.seed, 0xDEAD_BEEF);
-        assert!(matches!(p.book, BookSelection::None));
+        match &p.book {
+            BookSelection::Allowed(ids) => assert!(!ids.is_empty()),
+            BookSelection::None => panic!("with_seed should enable the curated book"),
+        }
     }
 
     #[test]

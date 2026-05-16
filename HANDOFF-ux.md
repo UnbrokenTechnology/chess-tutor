@@ -10,13 +10,19 @@ See [`core/engine/src/analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!` f
 
 ## Opponent profile / bot variability (in flight)
 
-Goal: ship bot-tuning toggles so games aren't deterministic from move 1, and so the student can practice against specific openings or weakened opponents. Phase A landed an empty [`OpponentProfile`](core/engine/src/opponent.rs) skeleton plumbed through CLI + desktop, with a random-per-game seed logged at game start. Read the module `//!` for the strict invariant: **analytical paths (retrospective, hint, `analyze`) must never consult the profile** — they need to judge the user's move against true best play.
+Goal: ship bot-tuning toggles so games aren't deterministic from move 1, and so the student can practice against specific openings or weakened opponents. Phase A landed an empty [`OpponentProfile`](core/engine/src/opponent.rs) skeleton; Phase B landed the opening-book pillar (curated default subset, CLI `openings` command, `--no-book` flag, book cursor in play loop + desktop). Read the [`opponent.rs`](core/engine/src/opponent.rs) and [`book.rs`](core/engine/src/book.rs) module docs for the strict invariant: **analytical paths (retrospective, hint, `analyze`) must never consult the profile** — they need to judge the user's move against true best play.
 
 Remaining pillars, one PR each, A/B-tested against a real game between landings:
 
-- **Phase B — opening book.** Reuse the existing Lichess CC0 TSV DB at [`core/engine/data/openings/*.tsv`](core/engine/data/openings/) — each row is already a labeled PGN line, so we add a forward index over the same 3,937-entry dataset (the reverse index for name detection is built today in [`openings.rs`](core/engine/src/openings.rs)). Curated default subset of 30–50 well-known openings, on by default. Book cursor in the play loop intercepts move pick while in book, falls through to engine search on first deviation. CLI commands: `openings list / allow / deny / reset`. Teaching-note overlay (separate `book_notes.toml` keyed by opening id) is optional and populated lazily.
 - **Phase C — eval signal mask.** Bitset over [`TermId`](core/engine/src/analysis/term_id.rs); each eval term gates its contribution. Needs perf check after — eval is hot-path. Lets the student spar against an opponent who "doesn't know about" king safety / pawn structure / etc.
 - **Phase D — move noise.** Search with `multi_pv = K`, sample top results weighted by score gap; with `blunder_chance` extend the pool. Reuses existing MultiPV infrastructure.
+
+Opening-book follow-on work, deferred:
+- Grow the curated default from 8 entries; current list lives in [`CURATED`](core/engine/src/book.rs) (covered by the `every_curated_entry_resolves` regression test).
+- Teaching-note overlay — separate `book_notes.toml` keyed by `(eco, name)` with short prose blurbs the GUI surfaces alongside the book line. Empty to start; populate the marquee openings first.
+- Desktop UI for opening selection / status — today the only desktop surface is a stderr log on new-game. Wants at minimum: a "book: <opening>" line under the move list, plus a settings panel mirroring the CLI `openings` command.
+- "New game in book" REPL command — CLI `openings allow/deny` only takes effect on the next game; a `new-game` REPL verb would re-pick a cursor in the current REPL session.
+- Transposition-aware book matching — current cursor drops on any move-order divergence from the canonical line, even when the resulting position is the same. Low priority (curated lines are mostly canonical move orders).
 
 Decisions locked in:
 - Book entries are discrete TSV rows, not branches — "Caro-Kann Variation X" is its own opening, separate from "Caro-Kann".

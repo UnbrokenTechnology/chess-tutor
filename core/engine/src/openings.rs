@@ -1,21 +1,30 @@
-//! Opening-name lookup.
+//! Opening-name lookup and opening-line data.
 //!
-//! Given a position, return the ECO code and opening name
-//! (e.g. `"B90 — Sicilian Defense: Najdorf"`). Purely descriptive —
-//! does **not** feed move classification. Moves are always judged on
-//! merit (via the search + [`crate::eval::EvalTrace`]), not on whether
-//! they match a database entry. Opening names are vocabulary the
-//! student can use to talk about the positions they're playing.
+//! Two roles, sharing one TSV parse at first use:
+//!
+//! 1. **Recognition** (reverse index) — given a position, return the
+//!    ECO code + opening name (e.g. `"B90 — Sicilian Defense: Najdorf"`)
+//!    so the UI can label what the player is playing. Purely
+//!    descriptive — does not feed move classification; moves are
+//!    always judged on merit via the search + [`crate::eval::EvalTrace`].
+//! 2. **Selection** (forward index) — given an [`OpeningId`], return
+//!    the move sequence as `Vec<Move>` so the opponent's opening book
+//!    ([`crate::book`]) can play through a chosen line. See
+//!    [`entries`], [`entry`], [`find_id_exact`], and
+//!    [`find_ids_matching`].
 //!
 //! # How it works
 //!
 //! The Lichess CC0 openings database ships as five TSV files (one per
 //! ECO letter A–E), each row carrying `eco \t name \t pgn`. We bundle
 //! the raw TSVs, replay each PGN once at first use through our own
-//! [`Position`] / [`crate::san`] stack, and build a `HashMap` keyed by
-//! the resulting position's **EPD** (FEN with the halfmove and
-//! fullmove counters stripped). Lookup at runtime is a single
-//! `HashMap::get`.
+//! [`Position`] / [`crate::san`] stack, and build:
+//! - a `Vec<OpeningEntry>` of every replayable row (the forward index;
+//!   row position in the vector is the row's stable [`OpeningId`]);
+//! - a `HashMap<EPD, OpeningId>` keyed by the final position's EPD
+//!   (FEN with halfmove and fullmove counters stripped — the reverse
+//!   index). Recognition lookup is a single `HashMap::get` + vector
+//!   indexing.
 //!
 //! EPD matching handles most transpositions naturally because the TSV
 //! stores multiple move-order variants for the same named opening.
@@ -28,6 +37,7 @@ use std::sync::OnceLock;
 
 use crate::position::Position;
 use crate::san;
+use crate::types::Move;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpeningIdentification {
@@ -38,20 +48,63 @@ pub struct OpeningIdentification {
     pub name: String,
 }
 
+/// Stable handle to one row of the bundled opening TSVs. Assigned at
+/// database build time (= row index in concatenated A→E order); stable
+/// for the life of a process. Not stable across rebuilds of the bundled
+/// TSV data — never persist these to disk; resolve names through
+/// [`find_id_exact`] when reading user-saved selections.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct OpeningId(u32);
+
+impl OpeningId {
+    /// Underlying row index — exposed only so the opponent module can
+    /// hash it into seeded RNG draws. Not for external persistence.
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// One parsed opening line — both metadata and replayable moves.
+#[derive(Debug, Clone)]
+pub struct OpeningEntry {
+    pub id: OpeningId,
+    pub eco: String,
+    pub name: String,
+    /// Moves from `Position::startpos()` to the final position. Every
+    /// move is legal at the time it is played; the sequence is what
+    /// the book cursor walks through ply by ply.
+    pub line: Vec<Move>,
+}
+
+impl From<&OpeningEntry> for OpeningIdentification {
+    fn from(e: &OpeningEntry) -> Self {
+        Self {
+            eco: e.eco.clone(),
+            name: e.name.clone(),
+        }
+    }
+}
+
+struct Database {
+    entries: Vec<OpeningEntry>,
+    by_epd: HashMap<String, OpeningId>,
+}
+
 const TSV_A: &str = include_str!("../data/openings/a.tsv");
 const TSV_B: &str = include_str!("../data/openings/b.tsv");
 const TSV_C: &str = include_str!("../data/openings/c.tsv");
 const TSV_D: &str = include_str!("../data/openings/d.tsv");
 const TSV_E: &str = include_str!("../data/openings/e.tsv");
 
-static DB: OnceLock<HashMap<String, OpeningIdentification>> = OnceLock::new();
+static DB: OnceLock<Database> = OnceLock::new();
 
-fn db() -> &'static HashMap<String, OpeningIdentification> {
+fn db() -> &'static Database {
     DB.get_or_init(build_db)
 }
 
-fn build_db() -> HashMap<String, OpeningIdentification> {
-    let mut db = HashMap::with_capacity(4096);
+fn build_db() -> Database {
+    let mut entries: Vec<OpeningEntry> = Vec::with_capacity(4096);
+    let mut by_epd: HashMap<String, OpeningId> = HashMap::with_capacity(4096);
     for tsv in [TSV_A, TSV_B, TSV_C, TSV_D, TSV_E] {
         for line in tsv.lines().skip(1) {
             // Silently skip malformed rows and unparseable PGNs — one
@@ -59,19 +112,27 @@ fn build_db() -> HashMap<String, OpeningIdentification> {
             let Some((eco, name, pgn)) = parse_row(line) else {
                 continue;
             };
-            let Some(epd) = play_pgn_to_epd(pgn) else {
+            let Some((final_pos, moves)) = replay_pgn(pgn) else {
                 continue;
             };
-            // First writer wins, matching the prior-repo behaviour:
-            // if two TSV rows transpose to the same EPD, we keep the
-            // one that appears first in the file order (A → E).
-            db.entry(epd).or_insert_with(|| OpeningIdentification {
+            let id = OpeningId(entries.len() as u32);
+            entries.push(OpeningEntry {
+                id,
                 eco: eco.to_string(),
                 name: name.to_string(),
+                line: moves,
             });
+            // First writer wins for the reverse index: if two TSV rows
+            // transpose to the same EPD, we keep the one that appears
+            // first in file order (A → E). Both rows still exist in
+            // the forward `entries` vector — duplicates are only
+            // collapsed in the EPD-keyed lookup.
+            by_epd
+                .entry(fen_to_epd(&final_pos.to_fen()))
+                .or_insert(id);
         }
     }
-    db
+    Database { entries, by_epd }
 }
 
 fn parse_row(line: &str) -> Option<(&str, &str, &str)> {
@@ -82,19 +143,21 @@ fn parse_row(line: &str) -> Option<(&str, &str, &str)> {
     Some((eco, name, pgn))
 }
 
-/// Play a PGN sequence starting from the standard position. Returns
-/// the resulting position's EPD, or `None` if any token fails to parse
-/// or no legal move matches.
-fn play_pgn_to_epd(pgn: &str) -> Option<String> {
+/// Replay a PGN move sequence from the standard position. Returns
+/// the final position and the moves played, or `None` if any token
+/// fails to parse.
+fn replay_pgn(pgn: &str) -> Option<(Position, Vec<Move>)> {
     let mut pos = Position::startpos();
+    let mut moves = Vec::new();
     for token in pgn.split_whitespace() {
         if is_move_number(token) {
             continue;
         }
         let mv = san::parse(&mut pos, token).ok()?;
         let _ = pos.do_move(mv);
+        moves.push(mv);
     }
-    Some(fen_to_epd(&pos.to_fen()))
+    Some((pos, moves))
 }
 
 /// `"1."`, `"2."`, `"10..."`, `"3..."` and similar — move-number
@@ -131,7 +194,8 @@ fn fen_to_epd(fen: &str) -> String {
 
 /// Look up an opening by the EPD of the current position.
 pub fn identify_from_epd(epd: &str) -> Option<OpeningIdentification> {
-    db().get(epd).cloned()
+    let id = db().by_epd.get(epd).copied()?;
+    db().entries.get(id.0 as usize).map(OpeningIdentification::from)
 }
 
 /// Look up an opening by full FEN (halfmove/fullmove counters are
@@ -146,6 +210,47 @@ pub fn identify_from_fen(fen: &str) -> Option<OpeningIdentification> {
 /// the database was built.
 pub fn identify(position: &Position) -> Option<OpeningIdentification> {
     identify_from_fen(&position.to_fen())
+}
+
+// =========================================================================
+// Forward index — for opening-book selection
+// =========================================================================
+
+/// All bundled opening lines, in the order they appear in the source
+/// TSVs (A → E). Indexed by [`OpeningId`].
+pub fn entries() -> &'static [OpeningEntry] {
+    &db().entries
+}
+
+/// Look up one entry by its stable id.
+pub fn entry(id: OpeningId) -> Option<&'static OpeningEntry> {
+    db().entries.get(id.0 as usize)
+}
+
+/// Exact match on ECO code and full opening name. Returns the first
+/// matching id, or `None` if no row matches. Used by the curated
+/// default list to bind hand-picked entry references to ids — a
+/// failed resolution means the bundled TSV no longer carries that
+/// exact name (caller decides whether to log + skip or panic).
+pub fn find_id_exact(eco: &str, name: &str) -> Option<OpeningId> {
+    db()
+        .entries
+        .iter()
+        .find(|e| e.eco == eco && e.name == name)
+        .map(|e| e.id)
+}
+
+/// Case-insensitive substring match on the opening name. Returns
+/// every matching id in the order they appear in the TSV. Used by
+/// the CLI `openings allow / deny <pattern>` commands.
+pub fn find_ids_matching(pattern: &str) -> Vec<OpeningId> {
+    let needle = pattern.to_ascii_lowercase();
+    db()
+        .entries
+        .iter()
+        .filter(|e| e.name.to_ascii_lowercase().contains(&needle))
+        .map(|e| e.id)
+        .collect()
 }
 
 #[cfg(test)]
@@ -233,7 +338,7 @@ mod tests {
         // five headers). Collisions collapse duplicates, and a handful
         // of rows may fail to parse — but the live DB should still be
         // in the thousands.
-        let size = db().len();
+        let size = db().by_epd.len();
         assert!(
             size > 2_500,
             "opening DB shrunk unexpectedly: {size} entries",
