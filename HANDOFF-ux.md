@@ -14,7 +14,44 @@ Goal: ship bot-tuning toggles so games aren't deterministic from move 1, and so 
 
 Remaining pillar:
 
-- **Phase D — move noise.** Search with `multi_pv = K`, sample top results weighted by score gap; with `blunder_chance` extend the pool. Reuses existing MultiPV infrastructure.
+- **Phase D — move noise / blunder.** Bot occasionally plays a not-quite-best move (variety between equally-good replies, plus an opt-in "exploitable blunder" knob so the student gets practice spotting and punishing mistakes).
+
+### Phase D design sketch (read before coding)
+
+**Two related knobs in [`NoiseProfile`](core/engine/src/opponent.rs)** (currently empty stub):
+
+- `candidate_pool: usize` (default `1` = no noise) — search width to consider when sampling.
+- `temperature_cp: i32` (default `0`) — softmax temperature in centipawns over the score gap from #1. Low = peakier ("usually #1"); high = flatter ("often picks #2-#K when scores are close").
+- `blunder_chance: f32` (default `0.0`, range `0.0–1.0`) — probability per move of skipping the natural top-K and picking a deliberately worse move.
+- `blunder_severity_cp: i32` (default `100`) — how much worse a blunder must be vs. #1 to count.
+
+(Exact field names / ranges open; pick during implementation. The four knobs above are the *concept* shape — the user's stated needs were "occasional good-but-not-best move" and "occasional blunder to exploit.")
+
+**Mechanism — sampling layer sits in the play loop, not the engine:**
+
+1. Play search runs with `SearchParams::multi_pv = profile.noise.candidate_pool` (today both CLI play and desktop hard-code `1`).
+2. Engine returns ranked `SearchLine`s as today.
+3. New helper (e.g. `noise.rs` mirroring `book.rs`): `NoiseProfile::pick(seed, &[SearchLine]) -> usize` returns the index into the result list. Softmax weighted by score deltas; blunder branch widens the candidate pool when it fires.
+4. Play loop applies `lines[pick]` instead of `lines[0]`.
+
+**Strict invariant (same as Phases B / C):** analytical paths must not sample. Retrospective / hint / `analyze` still ask for `multi_pv = 3` for their own ranking purposes, but the user's move is still judged against `lines[0]` (true best). Search params on analytical paths build `noise: ...` as today.
+
+**Determinism:** derive a per-move seed from `profile.seed` + `move_number`. Same starting seed + same human moves = same bot moves and same noise picks. Per the existing `feedback_determinism` rule.
+
+**Integration points (mirror Phase C):**
+
+- `core/engine/src/opponent.rs`: extend `NoiseProfile` fields, add `Default` impl. Constructors `new_random` / `with_seed` populate sensible defaults (likely `pool=1`, `temperature=0`, `blunder=0.0` — all-off until user opts in).
+- New `core/engine/src/noise.rs` (or fold into `opponent.rs` if small): the `pick` helper + small RNG. No engine plumbing — sampling happens after search returns.
+- CLI: `--noise-pool N`, `--noise-temp CP`, `--blunder-chance F` startup flags + REPL `noise [show | pool N | temp CP | blunder F | reset]` command. Updates `cfg.opponent.noise` in-place like `eval-mask` does.
+- CLI [`play_engine_turn`](core/cli/src/play.rs) and desktop [`maybe_queue_engine_search`](desktop/src/main.rs): set `params.multi_pv = profile.noise.candidate_pool.max(1)`; after the search, call the noise picker to choose which line index to play. The book branch in both files still short-circuits — sampling only applies when the engine actually searches.
+
+**Perf note:** `multi_pv > 1` costs roughly `K×` the single-PV time (each slot is a separate IDS pass). Acceptable — the user opted into weakened play. No need to gate on `noise.candidate_pool > 1` to skip MultiPV when off, since `multi_pv.max(1) == 1` already takes the fast path.
+
+**Open design questions to flag before/during implementation:**
+
+- Is "blunder" a separate knob or just very-high temperature? Argument for separate: temperature samples from an existing top-K cluster (which is usually close in score), while blunders pick moves intentionally outside the cluster.
+- ELO presets later? `--bot-elo 1200` could pick `(pool, temp, blunder)` for you. Defer unless the manual knobs feel clunky in practice.
+- Does the retrospective ever narrate bot blunders? Today retrospective only fires on USER moves. A separate "opponent commentary" line ("the bot just played a mistake — can you find the punishment?") would be a nice teaching surface but is out of scope for Phase D.
 
 Phase C surface (delivered):
 - 8 toggleable [`EvalCategory`](core/engine/src/opponent.rs) values: `pawn-structure`, `pieces`, `mobility`, `king-safety`, `threats`, `passed-pawns`, `space`, `initiative`. Material and imbalance are deliberately not exposed (disabling them produces gibberish play, not a teaching scenario).
