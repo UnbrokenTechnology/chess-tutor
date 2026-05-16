@@ -405,6 +405,22 @@ struct App {
     /// — there's no game in progress to cancel back to, so the only
     /// path forward is to commit a configuration.
     first_launch: bool,
+
+    /// `Some` while the user has clicked a pawn onto the promotion
+    /// rank and we're waiting for them to choose which piece to
+    /// promote to. Carries the four candidate promotion moves (Q / R /
+    /// B / N variants of the same from→to). Cleared on pick, off-board
+    /// click, or any state-changing action (new game, takeback).
+    pending_promotion: Option<PendingPromotion>,
+}
+
+struct PendingPromotion {
+    /// Promotion-rank square — target of every candidate, and the
+    /// anchor for the picker stack.
+    to: Square,
+    /// The four legal promotion moves with shared `from` / `to`. Order
+    /// is Q, R, B, N to match the on-screen stack.
+    candidates: [Move; 4],
 }
 
 struct HintResult {
@@ -451,6 +467,7 @@ impl App {
             opponent: OpponentProfile::new_random(),
             book_cursor: None,
             first_launch: true,
+            pending_promotion: None,
         }
     }
 
@@ -467,8 +484,7 @@ impl App {
         self.position_keys = vec![position.key()];
         self.position = position;
         self.history.clear();
-        self.selected = None;
-        self.legal_from_selected.clear();
+        self.deselect();
         self.viewing_index = None;
         self.engine_plays = engine_plays;
         self.depth = depth;
@@ -612,14 +628,30 @@ impl App {
         if candidates.is_empty() {
             return false;
         }
-        let mv = candidates
-            .iter()
-            .copied()
-            .find(|m| m.kind() == MoveKind::Promotion && m.promoted_to() == PieceType::Queen)
-            .unwrap_or(candidates[0]);
 
-        // Snapshot pre-move state for the retrospective job before
-        // mutating self.position / self.position_keys.
+        // Promotion: legal-move generation produces one move per piece
+        // type (Q / R / B / N). Open the picker instead of silently
+        // queening — `apply_promotion_choice` will run once the user
+        // clicks one of the four pieces.
+        if candidates.iter().all(|m| m.kind() == MoveKind::Promotion) {
+            if let Some(pending) = build_pending_promotion(&candidates) {
+                self.pending_promotion = Some(PendingPromotion {
+                    to: target,
+                    candidates: pending,
+                });
+                return true;
+            }
+        }
+
+        let mv = candidates[0];
+        self.apply_user_move(mv);
+        true
+    }
+
+    /// Finalise a move chosen via the regular click path *or* the
+    /// promotion picker. Snapshots pre-move state for the retrospective
+    /// job, applies the move, and clears the hint panel.
+    fn apply_user_move(&mut self, mv: Move) {
         let pre_move_pos = self.position.clone();
         let pre_move_history = game_history_for_search(&self.position_keys);
 
@@ -635,7 +667,6 @@ impl App {
             target_index,
         });
         self.close_hint();
-        true
     }
 
     fn apply_move(&mut self, mv: Move) {
@@ -699,6 +730,7 @@ impl App {
     fn deselect(&mut self) {
         self.selected = None;
         self.legal_from_selected.clear();
+        self.pending_promotion = None;
     }
 
     fn maybe_queue_engine_search(&mut self) {
@@ -1366,6 +1398,15 @@ impl App {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(board_size, board_size), egui::Sense::click());
 
+        // Escape cancels a pending promotion. Treat like an off-picker
+        // click — drop both the promotion state and the selection so
+        // the user starts the move from scratch.
+        if self.pending_promotion.is_some()
+            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            self.deselect();
+        }
+
         let clicked_square = response
             .clicked()
             .then(|| {
@@ -1450,8 +1491,52 @@ impl App {
             }
         }
 
+        // Promotion picker overlay: a vertical stack of [Q, R, B, N]
+        // anchored at the promotion target, paint *after* the regular
+        // board so it overdraws any piece on the squares it covers.
+        if let Some(pending) = self.pending_promotion.as_ref() {
+            let picker_bg = egui::Color32::from_rgb(0xff, 0xff, 0xff);
+            let picker_stroke = egui::Stroke::new(2.0, egui::Color32::BLACK);
+            let promoter_color = self.position.side_to_move();
+            for (i, mv) in pending.candidates.iter().enumerate() {
+                let pt = mv.promoted_to();
+                let sq = picker_square_at(pending.to, i);
+                let (dc, dr) = square_to_display_coords(sq, self.flipped);
+                let top_left =
+                    rect.min + egui::vec2(dc as f32 * cell, dr as f32 * cell);
+                let cell_rect = egui::Rect::from_min_size(top_left, egui::vec2(cell, cell));
+                painter.rect_filled(cell_rect, 0.0, picker_bg);
+                painter.rect_stroke(cell_rect, 0.0, picker_stroke);
+                painter.text(
+                    cell_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    piece_glyph(Piece::new(promoter_color, pt)),
+                    egui::FontId::proportional(cell * 0.7),
+                    egui::Color32::BLACK,
+                );
+            }
+        }
+
         if let Some(sq) = clicked_square {
-            self.handle_click(sq);
+            // Promotion picker takes precedence: a click on one of the
+            // four picker squares applies that promotion; anything else
+            // cancels (deselect drops the pending state too).
+            if let Some(pending) = self.pending_promotion.take() {
+                let picker_squares: [Square; 4] =
+                    std::array::from_fn(|i| picker_square_at(pending.to, i));
+                if let Some(idx) = picker_squares.iter().position(|&s| s == sq) {
+                    let chosen = pending.candidates[idx];
+                    self.apply_user_move(chosen);
+                    self.maybe_queue_engine_search();
+                } else {
+                    // Click landed outside the picker — cancel. We
+                    // already `take()`d the pending state, so deselect
+                    // just clears the lingering pawn selection.
+                    self.deselect();
+                }
+            } else {
+                self.handle_click(sq);
+            }
         }
     }
 }
@@ -1629,6 +1714,55 @@ fn pixel_to_square(local: egui::Vec2, cell: f32, flipped: bool) -> Option<Square
         File::from_index(file_idx).unwrap(),
         Rank::from_index(rank_idx).unwrap(),
     ))
+}
+
+/// Display (column, row) for `sq` given board orientation. Mirrors
+/// the inverse of [`pixel_to_square`].
+fn square_to_display_coords(sq: Square, flipped: bool) -> (u8, u8) {
+    let file_idx = sq.file().index() as u8;
+    let rank_idx = sq.rank().index() as u8;
+    if flipped {
+        (7 - file_idx, rank_idx)
+    } else {
+        (file_idx, 7 - rank_idx)
+    }
+}
+
+/// The `i`-th square in the promotion picker stack: index 0 = the
+/// promotion target itself, then walking back along the file toward
+/// the centre of the board. Always returns a valid square because
+/// promotions land on rank 0 or rank 7, leaving four ranks of headroom
+/// in the relevant direction.
+fn picker_square_at(target: Square, i: usize) -> Square {
+    let file = target.file();
+    let target_rank = target.rank().index() as i8;
+    // Promotion target is on rank 8 (idx 7, white promoting) or rank 1
+    // (idx 0, black promoting). Walk inward.
+    let direction: i8 = if target_rank == 7 { -1 } else { 1 };
+    let rank_idx = (target_rank + direction * i as i8) as u8;
+    Square::new(file, Rank::from_index(rank_idx).unwrap())
+}
+
+/// Order the four promotion candidates from `candidates` into a fixed
+/// `[Q, R, B, N]` array so the picker overlay can stack them in the
+/// same order regardless of the order legal-move generation emitted.
+/// Returns `None` if fewer than four pieces are represented (which
+/// shouldn't happen for a real promotion but we keep the call site
+/// defensive — under-promotion to a non-Q piece is rare in human play
+/// but never illegal).
+fn build_pending_promotion(candidates: &[Move]) -> Option<[Move; 4]> {
+    let pick = |pt: PieceType| -> Option<Move> {
+        candidates
+            .iter()
+            .copied()
+            .find(|m| m.kind() == MoveKind::Promotion && m.promoted_to() == pt)
+    };
+    Some([
+        pick(PieceType::Queen)?,
+        pick(PieceType::Rook)?,
+        pick(PieceType::Bishop)?,
+        pick(PieceType::Knight)?,
+    ])
 }
 
 /// True when the position currently at the back of `position_keys`
