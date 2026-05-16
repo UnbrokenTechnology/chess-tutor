@@ -18,6 +18,7 @@ pub mod magics;
 pub mod material;
 pub mod movegen;
 pub mod movepick;
+pub mod noise;
 pub mod openings;
 pub mod opponent;
 pub mod pawns;

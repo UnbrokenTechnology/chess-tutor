@@ -23,6 +23,13 @@ use chess_tutor_narration::{format_retrospective, NarrationOptions};
 /// move) so the pause is tolerable on every human move.
 const RETROSPECTIVE_MULTI_PV: usize = 3;
 
+/// Safety caps so a pathological position (notably MultiPV around a
+/// found mate — see search.rs) can't pin the auto-firing
+/// retrospective for minutes. The wall-clock cap is the user-visible
+/// guarantee; the node cap is a backstop.
+const RETROSPECTIVE_NODE_CAP: u64 = 100_000_000;
+const RETROSPECTIVE_TIME_MS: u64 = 10_000;
+
 /// Configuration for a single retrospective pass.
 pub struct RetrospectiveConfig {
     pub max_depth: u32,
@@ -59,10 +66,17 @@ pub fn run_and_render(
     game_history: Vec<u64>,
     user_mv: Move,
 ) -> io::Result<()> {
+    // Honour the user's explicit time budget if set; otherwise apply
+    // the default safety cap. Either way, also apply the node-cap
+    // backstop.
+    let max_time = cfg
+        .max_time_ms
+        .map(Duration::from_millis)
+        .or(Some(Duration::from_millis(RETROSPECTIVE_TIME_MS)));
     let params = SearchParams {
         max_depth: cfg.max_depth,
-        max_nodes: None,
-        max_time: cfg.max_time_ms.map(Duration::from_millis),
+        max_nodes: Some(RETROSPECTIVE_NODE_CAP),
+        max_time,
         multi_pv: RETROSPECTIVE_MULTI_PV,
         game_history,
         force_include: vec![user_mv],

@@ -6,7 +6,8 @@ use chess_tutor_engine::analysis::{analyze_position, MoveAnalysis};
 use chess_tutor_engine::book::BookCursor;
 use chess_tutor_engine::engine::{Engine, SearchLine, SearchParams};
 use chess_tutor_engine::movegen::legal_moves_vec;
-use chess_tutor_engine::opponent::OpponentProfile;
+use chess_tutor_engine::noise::{self, NoisePick};
+use chess_tutor_engine::opponent::{EvalCategory, EvalMask, NoiseProfile, OpponentProfile};
 use chess_tutor_engine::position::{Position, StateInfo};
 use chess_tutor_engine::san;
 use chess_tutor_engine::types::{Color, File, Move, MoveKind, Piece, PieceType, Rank, Square, Value};
@@ -18,6 +19,15 @@ const RETROSPECTIVE_MULTI_PV: usize = 3;
 const HINT_MULTI_PV: usize = 3;
 const DEFAULT_DEPTH: u32 = 10;
 const EVAL_BAR_SATURATION_CP: f32 = 1000.0;
+/// Safety caps for analytical searches that auto-fire (retrospective,
+/// hint panel). Without these, pathological positions — notably
+/// MultiPV around a found mate — can pin the worker thread for
+/// minutes, locking the GUI mid-game. The wall-clock cap is the
+/// user-visible guarantee ("retrospective takes max N seconds"); the
+/// node cap is a backstop in case the time check is starved by
+/// scheduling.
+const ANALYSIS_NODE_CAP: u64 = 100_000_000;
+const ANALYSIS_TIME_MS: u64 = 10_000;
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
@@ -44,6 +54,12 @@ enum WorkerJob {
         pos: Box<Position>,
         params: SearchParams,
         gen: u64,
+        /// Bot noise profile to apply *after* the search returns. The
+        /// engine search itself doesn't read this — `params.multi_pv`
+        /// is set wide enough by the caller to surface candidates.
+        noise: NoiseProfile,
+        seed: u64,
+        ply: u64,
     },
     Retrospective {
         pre_move_pos: Box<Position>,
@@ -65,7 +81,19 @@ enum WorkerJob {
 enum WorkerResult {
     Search {
         gen: u64,
+        /// The move the bot will play, or `None` for terminal
+        /// positions (no legal replies).
+        mv: Option<Move>,
+        /// Search-line context for the chosen move. Present for normal
+        /// / softmax / blunder picks; `None` for wild picks because the
+        /// engine didn't search the wild move specifically. The GUI's
+        /// per-move score/depth display reads this — wild moves end up
+        /// without an engine_info badge.
         line: Option<SearchLine>,
+        /// Diagnostic info for the move list / debug log when noise
+        /// drove the bot off `lines[0]`. `None` on the off-profile /
+        /// engine-best hot path.
+        noise_pick: Option<NoisePickInfo>,
         elapsed: Duration,
     },
     Retrospective {
@@ -79,17 +107,79 @@ enum WorkerResult {
     },
 }
 
+#[derive(Clone, Debug)]
+enum NoisePickInfo {
+    /// Softmax branch fired — sampled `pick_idx` from the top-K.
+    Softmax {
+        pick_idx: usize,
+        num_lines: usize,
+        delta_from_top_cp: i32,
+    },
+    /// Blunder branch fired — picked a deliberately worse line.
+    /// `pick_idx` is always `>= 1`; either a qualifying line or the
+    /// worst-available fallback when no line cleared the severity gap.
+    Blunder {
+        pick_idx: usize,
+        num_lines: usize,
+        delta_from_top_cp: i32,
+    },
+    /// Wild branch fired — bot played `mv`; the engine's preferred
+    /// move was `engine_top`. The two may coincidentally match.
+    Wild {
+        engine_top: Move,
+        engine_top_score: Value,
+    },
+}
+
 fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Context) {
     let mut engine = Engine::default();
     while let Ok(job) = rx.recv() {
         match job {
             WorkerJob::NewGame => engine.new_game(),
-            WorkerJob::Search { mut pos, params, gen } => {
+            WorkerJob::Search { mut pos, params, gen, noise, seed, ply } => {
+                // Wild branch needs the legal-move list — generated
+                // here so the worker stays self-contained.
+                let legal = legal_moves_vec(&mut pos);
                 let started = Instant::now();
                 let lines = engine.search(&mut pos, params);
                 let elapsed = started.elapsed();
-                let line = lines.into_iter().next();
-                let _ = tx.send(WorkerResult::Search { gen, line, elapsed });
+                let pick = noise::pick(&noise, seed, ply, &lines, &legal);
+                let (mv, line, noise_pick) = match pick {
+                    NoisePick::Line(idx) => {
+                        let line = lines.get(idx).cloned();
+                        let mv = line.as_ref().and_then(|l| l.pv.first().copied());
+                        let info = if idx == 0 || lines.is_empty() {
+                            None
+                        } else {
+                            Some(NoisePickInfo::Softmax {
+                                pick_idx: idx,
+                                num_lines: lines.len(),
+                                delta_from_top_cp: lines[idx].score.0 - lines[0].score.0,
+                            })
+                        };
+                        (mv, line, info)
+                    }
+                    NoisePick::Blunder(idx) => {
+                        let line = lines.get(idx).cloned();
+                        let mv = line.as_ref().and_then(|l| l.pv.first().copied());
+                        let info = lines.get(idx).map(|l| NoisePickInfo::Blunder {
+                            pick_idx: idx,
+                            num_lines: lines.len(),
+                            delta_from_top_cp: l.score.0 - lines[0].score.0,
+                        });
+                        (mv, line, info)
+                    }
+                    NoisePick::Wild(wild_mv) => {
+                        let info = lines.first().and_then(|top| {
+                            top.pv.first().map(|&top_mv| NoisePickInfo::Wild {
+                                engine_top: top_mv,
+                                engine_top_score: top.score,
+                            })
+                        });
+                        (Some(wild_mv), None, info)
+                    }
+                };
+                let _ = tx.send(WorkerResult::Search { gen, mv, line, noise_pick, elapsed });
                 ctx.request_repaint();
             }
             WorkerJob::Retrospective {
@@ -107,8 +197,8 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                 let mut analysis_engine = engine.clone();
                 let params = SearchParams {
                     max_depth: depth,
-                    max_nodes: None,
-                    max_time: None,
+                    max_nodes: Some(ANALYSIS_NODE_CAP),
+                    max_time: Some(Duration::from_millis(ANALYSIS_TIME_MS)),
                     multi_pv: RETROSPECTIVE_MULTI_PV,
                     game_history,
                     force_include: vec![user_move],
@@ -152,8 +242,8 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                 let mut analysis_engine = engine.clone();
                 let params = SearchParams {
                     max_depth: depth,
-                    max_nodes: None,
-                    max_time: None,
+                    max_nodes: Some(ANALYSIS_NODE_CAP),
+                    max_time: Some(Duration::from_millis(ANALYSIS_TIME_MS)),
                     multi_pv,
                     game_history,
                     force_include: Vec::new(),
@@ -199,10 +289,20 @@ struct NewGameForm {
     color: ColorChoice,
     fen: String,
     depth: u32,
+    /// Bot move-sampling knobs. Persists across New Game clicks so the
+    /// user can tune incrementally between games without losing prior
+    /// settings.
+    noise: NoiseProfile,
+    /// Eval categories the bot is blind to. Same persistence rule.
+    eval_mask: EvalMask,
     error: Option<String>,
 }
 
 impl NewGameForm {
+    /// Pre-populate from the live game so the dialog reflects what
+    /// the user is currently playing against — encourages incremental
+    /// tweaking rather than rebuilding settings from scratch every
+    /// time they click New Game.
     fn from_current(app: &App) -> Self {
         Self {
             color: match app.engine_plays {
@@ -212,6 +312,22 @@ impl NewGameForm {
             },
             fen: String::new(),
             depth: app.depth,
+            noise: app.opponent.noise.clone(),
+            eval_mask: app.opponent.eval_mask,
+            error: None,
+        }
+    }
+
+    /// Defaults for the first-launch dialog — same shape as
+    /// [`Self::from_current`] would produce for a freshly constructed
+    /// [`App`], but without needing one to exist yet.
+    fn initial() -> Self {
+        Self {
+            color: ColorChoice::White,
+            fen: String::new(),
+            depth: DEFAULT_DEPTH,
+            noise: NoiseProfile::default(),
+            eval_mask: EvalMask::EMPTY,
             error: None,
         }
     }
@@ -284,6 +400,11 @@ struct App {
     /// first deviation, exhaustion, or any takeback that uncovers a
     /// pre-book state.
     book_cursor: Option<BookCursor>,
+    /// True until the user clicks Start in the New Game dialog for
+    /// the first time. While true the dialog hides its Cancel button
+    /// — there's no game in progress to cancel back to, so the only
+    /// path forward is to commit a configuration.
+    first_launch: bool,
 }
 
 struct HintResult {
@@ -302,33 +423,35 @@ impl App {
         let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
         thread::spawn(move || worker_loop(job_rx, result_tx, ctx));
 
+        // First-launch behaviour: open the New Game dialog
+        // immediately so the user picks difficulty / colour before
+        // the bot makes a move. The board still renders behind the
+        // modal, but `engine_plays = None` keeps the engine idle
+        // until Start commits the configuration.
         let position = Position::startpos();
         let position_keys = vec![position.key()];
-        let mut app = Self {
+        Self {
             position,
             position_keys,
             history: Vec::new(),
             selected: None,
             legal_from_selected: Vec::new(),
             flipped: false,
-            engine_plays: Some(Color::Black),
+            engine_plays: None,
             depth: DEFAULT_DEPTH,
             worker_tx: job_tx,
             worker_rx: result_rx,
             gen: 0,
             engine_thinking: false,
             viewing_index: None,
-            new_game_form: None,
+            new_game_form: Some(NewGameForm::initial()),
             hint_open: false,
             hint_thinking: false,
             hint_result: None,
             opponent: OpponentProfile::new_random(),
             book_cursor: None,
-        };
-        app.book_cursor = BookCursor::pick(&app.opponent, &app.position);
-        log_new_game_intro(&app.opponent, &app.book_cursor);
-        app.maybe_queue_engine_search();
-        app
+            first_launch: true,
+        }
     }
 
     fn start_new_game(
@@ -336,6 +459,8 @@ impl App {
         position: Position,
         engine_plays: Option<Color>,
         depth: u32,
+        noise: NoiseProfile,
+        eval_mask: EvalMask,
     ) {
         self.gen = self.gen.wrapping_add(1);
         self.engine_thinking = false;
@@ -347,7 +472,11 @@ impl App {
         self.viewing_index = None;
         self.engine_plays = engine_plays;
         self.depth = depth;
+        // Fresh seed + curated book for the new game; carry over the
+        // noise + eval-mask settings the user picked in the dialog.
         self.opponent = OpponentProfile::new_random();
+        self.opponent.noise = noise;
+        self.opponent.eval_mask = eval_mask;
         self.book_cursor = BookCursor::pick(&self.opponent, &self.position);
         log_new_game_intro(&self.opponent, &self.book_cursor);
         self.close_hint();
@@ -380,6 +509,11 @@ impl App {
     }
 
     fn open_new_game_dialog(&mut self) {
+        // Idempotent: don't trample unsaved tweaks if the user double-
+        // clicks the button or hits it while the dialog is already up.
+        if self.new_game_form.is_some() {
+            return;
+        }
         self.new_game_form = Some(NewGameForm::from_current(self));
     }
 
@@ -411,11 +545,22 @@ impl App {
             ColorChoice::Both => None,
         };
         let depth = form.depth;
+        let noise = form.noise.clone();
+        let eval_mask = form.eval_mask;
         self.new_game_form = None;
-        self.start_new_game(position, engine_plays, depth);
+        self.first_launch = false;
+        self.start_new_game(position, engine_plays, depth, noise, eval_mask);
     }
 
     fn handle_click(&mut self, sq: Square) {
+        // Don't let board clicks fall through when the New Game modal
+        // is up — egui Windows don't block clicks below them by
+        // default, so without this guard the user could move pieces
+        // through the dialog (and at first launch `engine_plays` is
+        // None, so `is_users_turn` would say yes).
+        if self.new_game_form.is_some() {
+            return;
+        }
         // Clicks on the board while viewing back snap to live first;
         // the click itself doesn't otherwise act this frame.
         if self.viewing_index.is_some() {
@@ -584,7 +729,10 @@ impl App {
             max_depth: self.depth,
             max_nodes: Some(ENGINE_TURN_NODE_CAP),
             max_time: None,
-            multi_pv: 1,
+            // Bot noise widens this beyond 1 when the opponent profile
+            // wants alternatives to sample from; off-profile keeps the
+            // engine's single-PV fast path.
+            multi_pv: self.opponent.noise.effective_multi_pv(),
             game_history: game_history_for_search(&self.position_keys),
             force_include: Vec::new(),
             verbose_progress: false,
@@ -604,6 +752,9 @@ impl App {
             pos: Box::new(self.position.clone()),
             params,
             gen: self.gen,
+            noise: self.opponent.noise.clone(),
+            seed: self.opponent.seed,
+            ply: self.position_keys.len() as u64,
         });
     }
 
@@ -615,30 +766,60 @@ impl App {
 
     fn handle_worker_result(&mut self, result: WorkerResult) {
         match result {
-            WorkerResult::Search { gen, line, elapsed } => {
+            WorkerResult::Search { gen, mv, line, noise_pick, elapsed } => {
                 if gen != self.gen {
                     return;
                 }
                 self.engine_thinking = false;
-                let Some(line) = line else {
+                let Some(mv) = mv else {
                     return;
                 };
-                let Some(mv) = line.pv.first().copied() else {
-                    return;
-                };
+                if let Some(info) = &noise_pick {
+                    // Log noise-driven picks to stderr so the user can
+                    // see when the bot is deliberately off the best
+                    // line (otherwise weakened play looks like a bug).
+                    // GUI surface for this lives in deferred Phase D
+                    // follow-on work.
+                    match info {
+                        NoisePickInfo::Softmax { pick_idx, num_lines, delta_from_top_cp } => {
+                            eprintln!(
+                                "noise: softmax picked #{} of {} ({:+} cp from #1)",
+                                pick_idx + 1, num_lines, delta_from_top_cp,
+                            );
+                        }
+                        NoisePickInfo::Blunder { pick_idx, num_lines, delta_from_top_cp } => {
+                            eprintln!(
+                                "noise: blunder picked #{} of {} ({:+} cp from #1)",
+                                pick_idx + 1, num_lines, delta_from_top_cp,
+                            );
+                        }
+                        NoisePickInfo::Wild { engine_top, engine_top_score } => {
+                            eprintln!(
+                                "noise: wild — bot played {} (engine preferred {} at {} cp)",
+                                san::format(&self.position, mv),
+                                san::format(&self.position, *engine_top),
+                                engine_top_score.0,
+                            );
+                        }
+                    }
+                }
                 let root_stm = self.position.side_to_move();
                 self.apply_move(mv);
-                let white_pov = if root_stm == Color::White {
-                    line.score
-                } else {
-                    -line.score
-                };
-                if let Some(entry) = self.history.last_mut() {
-                    entry.engine_info = Some(EngineInfo {
-                        score_white_pov: white_pov,
-                        depth: line.depth,
-                        elapsed,
-                    });
+                // Wild picks have no SearchLine (no search for that
+                // exact move); the per-move score badge stays empty.
+                if let Some(line) = line {
+                    let white_pov = if root_stm == Color::White {
+                        line.score
+                    } else {
+                        -line.score
+                    };
+                    if let Some(entry) = self.history.last_mut() {
+                        entry.engine_info = Some(EngineInfo {
+                            score_white_pov: white_pov,
+                            depth: line.depth,
+                            elapsed,
+                        });
+                    }
                 }
                 // Engine just moved — any open Hint was for the prior
                 // position, so close it.
@@ -1063,51 +1244,105 @@ impl App {
         let Some(form) = self.new_game_form.as_mut() else {
             return;
         };
+        let first_launch = self.first_launch;
         let mut start = false;
         let mut cancel = false;
+        let mut reset_bot = false;
 
-        egui::Window::new("New Game")
+        let title = if first_launch { "Welcome — Set Up Your Game" } else { "New Game" };
+        egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .default_width(420.0)
             .show(ctx, |ui| {
-                ui.add_space(4.0);
-                ui.label("You play as:");
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut form.color, ColorChoice::White, "White");
-                    ui.radio_value(&mut form.color, ColorChoice::Black, "Black");
-                    ui.radio_value(&mut form.color, ColorChoice::Random, "Random");
-                    ui.radio_value(&mut form.color, ColorChoice::Both, "Both");
+                egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.label("You play as:");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut form.color, ColorChoice::White, "White");
+                        ui.radio_value(&mut form.color, ColorChoice::Black, "Black");
+                        ui.radio_value(&mut form.color, ColorChoice::Random, "Random");
+                        ui.radio_value(&mut form.color, ColorChoice::Both, "Both");
+                    });
+                    ui.add_space(8.0);
+
+                    ui.label("Starting position (FEN, leave empty for startpos):");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.fen)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("rnbqkbnr/pppppppp/... (optional)"),
+                    );
+                    if let Some(err) = &form.error {
+                        ui.colored_label(egui::Color32::from_rgb(0xc0, 0x40, 0x40), err);
+                    }
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Engine depth:");
+                        ui.add(egui::Slider::new(&mut form.depth, 1..=20));
+                    });
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.heading("Bot Difficulty");
+                    ui.label(
+                        egui::RichText::new(
+                            "Tune how the bot plays. Defaults give full-strength play; \
+                             raise the mistake knobs for a weaker, more punishable opponent.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    ui.add_space(6.0);
+
+                    draw_noise_controls(ui, &mut form.noise);
+
+                    ui.add_space(8.0);
+                    ui.collapsing("Eval mask (advanced) — categories the bot is blind to", |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Toggle off a concept to simulate an opponent who doesn't \
+                                 understand it (e.g. mask king-safety to spar against a sub-\
+                                 1200 positional player).",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.add_space(4.0);
+                        draw_eval_mask_controls(ui, &mut form.eval_mask);
+                    });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset bot to defaults").clicked() {
+                            reset_bot = true;
+                        }
+                    });
+
+                    ui.add_space(12.0);
                 });
-                ui.add_space(8.0);
 
-                ui.label("Starting position (FEN, leave empty for startpos):");
-                ui.add(
-                    egui::TextEdit::singleline(&mut form.fen)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("rnbqkbnr/pppppppp/... (optional)"),
-                );
-                if let Some(err) = &form.error {
-                    ui.colored_label(egui::Color32::from_rgb(0xc0, 0x40, 0x40), err);
-                }
-                ui.add_space(8.0);
-
+                ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label("Engine depth:");
-                    ui.add(egui::Slider::new(&mut form.depth, 1..=20));
-                });
-                ui.add_space(12.0);
-
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    // Hide Cancel at first launch: there's no game to
+                    // cancel back to, the only path forward is Start.
+                    if !first_launch && ui.button("Cancel").clicked() {
                         cancel = true;
                     }
-                    if ui.button("Start").clicked() {
+                    let start_label = if first_launch { "Start Game" } else { "Start" };
+                    if ui.button(start_label).clicked() {
                         start = true;
                     }
                 });
             });
 
+        if reset_bot {
+            if let Some(f) = self.new_game_form.as_mut() {
+                f.noise = NoiseProfile::default();
+                f.eval_mask = EvalMask::EMPTY;
+            }
+        }
         if cancel {
             self.new_game_form = None;
         } else if start {
@@ -1234,6 +1469,106 @@ fn format_score_root_pov(score: Value, _root_stm: Color) -> String {
 
 /// Log the new-game header to stderr: the opponent seed so a varied
 /// game can be reproduced, and the picked opening line (if any) so the
+/// Render the six bot-noise sliders. Mutates the profile in place.
+/// Kept as a free function so the New Game dialog can borrow `form`
+/// fields mutably without fighting the borrow checker over `self`.
+fn draw_noise_controls(ui: &mut egui::Ui, noise: &mut NoiseProfile) {
+    egui::Grid::new("bot_noise_grid")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Blunder chance:")
+                .on_hover_text(
+                    "Per-move probability of a deliberate mistake. Blunders are picked \
+                     from the engine's top-6; severity controls how bad they are.",
+                );
+            ui.add(
+                egui::Slider::new(&mut noise.blunder_chance, 0.0..=1.0)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+            );
+            ui.end_row();
+
+            ui.label("Blunder severity (cp):")
+                .on_hover_text(
+                    "Preferred minimum score gap (centipawns) a blunder should achieve. \
+                     In quiet positions where no line clears the gate, the bot falls back \
+                     to the worst engine-considered move so the position still degrades.",
+                );
+            ui.add(egui::Slider::new(&mut noise.blunder_severity_cp, 0..=500));
+            ui.end_row();
+
+            ui.label("Wild move chance:")
+                .on_hover_text(
+                    "Per-move probability of picking uniformly from ALL legal moves, \
+                     bypassing the search ranking. Beginner-bot territory — the only \
+                     branch that can pick moves the engine didn't surface.",
+                );
+            ui.add(
+                egui::Slider::new(&mut noise.wild_chance, 0.0..=1.0)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+            );
+            ui.end_row();
+
+            ui.label("Candidate pool:")
+                .on_hover_text(
+                    "How many top moves the bot samples from under softmax noise. \
+                     1 = no sampling (always #1).",
+                );
+            ui.add(egui::Slider::new(&mut noise.candidate_pool, 1..=10));
+            ui.end_row();
+
+            ui.label("Softmax temperature (cp):")
+                .on_hover_text(
+                    "Flatness of the softmax distribution over the candidate pool. \
+                     0 = always #1; higher = more variety among close-scoring moves.",
+                );
+            ui.add(egui::Slider::new(&mut noise.temperature_cp, 0..=500));
+            ui.end_row();
+
+            ui.label("Guaranteed mate-in:")
+                .on_hover_text(
+                    "Bot is guaranteed to convert mates of this length or shorter. \
+                     1 = mate-in-1 is never thrown away. Set to 0 to allow blundering \
+                     any mate.",
+                );
+            ui.add(egui::Slider::new(&mut noise.guaranteed_mate_in, 0..=10));
+            ui.end_row();
+        });
+}
+
+/// Render the eight eval-category checkboxes in a 2-column grid.
+/// Each toggle simulates an opponent who doesn't understand the
+/// corresponding concept (e.g. mask off king-safety for a positionally
+/// naive bot).
+fn draw_eval_mask_controls(ui: &mut egui::Ui, mask: &mut EvalMask) {
+    // Two-column layout to keep the dialog from getting absurdly tall;
+    // 8 categories split 4+4.
+    let half = EvalCategory::ALL.len() / 2;
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            for cat in &EvalCategory::ALL[..half] {
+                eval_mask_checkbox(ui, mask, *cat);
+            }
+        });
+        ui.vertical(|ui| {
+            for cat in &EvalCategory::ALL[half..] {
+                eval_mask_checkbox(ui, mask, *cat);
+            }
+        });
+    });
+}
+
+fn eval_mask_checkbox(ui: &mut egui::Ui, mask: &mut EvalMask, cat: EvalCategory) {
+    let mut disabled = mask.is_disabled(cat);
+    if ui.checkbox(&mut disabled, cat.slug()).changed() {
+        if disabled {
+            mask.disable(cat);
+        } else {
+            mask.enable(cat);
+        }
+    }
+}
+
 /// user knows what they're up against. Sent to stderr — not the GUI —
 /// because the desktop hasn't grown a status surface for this yet;
 /// the launcher shell window is the de facto session log for now.

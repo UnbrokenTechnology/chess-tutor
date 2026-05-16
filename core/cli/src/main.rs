@@ -29,8 +29,23 @@ use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::openings;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
+use chess_tutor_engine::types::Move;
 
 use crate::board::{render as render_board, RenderOptions};
+
+/// Resolve a user-supplied move string to a `Move` legal in `pos`.
+/// Accepts SAN (`Nf3`, `Rxe6+`) or UCI (`g1f3`); tries SAN first.
+fn parse_user_move(pos: &mut Position, input: &str) -> Result<Move> {
+    match san::parse(pos, input) {
+        Ok(mv) => Ok(mv),
+        Err(san_err) => match uci::parse(pos, input) {
+            Ok(mv) => Ok(mv),
+            Err(uci_err) => Err(anyhow::anyhow!(
+                "{input:?} parsed as neither SAN ({san_err}) nor UCI ({uci_err})",
+            )),
+        },
+    }
+}
 
 // Heap profiler. When the `dhat-heap` feature is enabled, every
 // allocation goes through dhat's wrapping allocator, which records the
@@ -129,6 +144,13 @@ enum Command {
         /// don't need bit-identical results.
         #[arg(long, default_value_t = 1)]
         threads: usize,
+        /// Force a move into the MultiPV result. Mirrors the
+        /// retrospective's `force_include` so you can reproduce its
+        /// pathological positions one-shot. Accepts SAN (`Nf3`,
+        /// `Qxe6+`) or UCI (`g1f3`). Repeat the flag to force in
+        /// multiple moves.
+        #[arg(long = "force-include", value_name = "MOVE")]
+        force_include: Vec<String>,
     },
     /// Multi-position search benchmark. Argument order and defaults
     /// mirror Stockfish 11's `bench` command: `tt_mb threads limit
@@ -267,6 +289,42 @@ enum Command {
         /// `eval-mask` command can toggle individual categories.
         #[arg(long = "disable-eval", value_name = "CATEGORY[,CATEGORY...]")]
         disable_eval: Option<String>,
+        /// How many top search lines the bot may sample from when
+        /// softmax noise fires. Default 1 (no sampling — always #1).
+        /// Pair with `--noise-temp` to actually pick from the pool;
+        /// higher values cost roughly K× the per-move search time.
+        #[arg(long = "noise-pool", value_name = "N", default_value_t = 1)]
+        noise_pool: usize,
+        /// Softmax temperature in centipawns. Default 0 (always pick
+        /// #1 even when `--noise-pool > 1`). At 50 a line 50 cp behind
+        /// has ~37% the weight of #1; at 200 it has ~78%. Use to dial
+        /// up variety among close-scoring moves.
+        #[arg(long = "noise-temp", value_name = "CP", default_value_t = 0)]
+        noise_temp: i32,
+        /// Per-move probability the bot drops a deliberate blunder
+        /// (range 0.0–1.0). Default 0.0 (off). When > 0, the search
+        /// widens to surface enough worse-than-best alternatives.
+        #[arg(long = "blunder-chance", value_name = "P", default_value_t = 0.0)]
+        blunder_chance: f32,
+        /// Minimum score gap (centipawns) a candidate must trail #1 by
+        /// to qualify as a blunder. Default 100 — a clear pawn-down
+        /// move the student can plausibly punish.
+        #[arg(long = "blunder-severity", value_name = "CP", default_value_t = 100)]
+        blunder_severity: i32,
+        /// Smallest mate the bot is guaranteed to convert — blunders
+        /// are suppressed when `lines[0]` is a mate-in-N for
+        /// `N <= guaranteed_mate_in`. Default 1 (mate-in-1 is never
+        /// blundered). Set to 0 to allow blunders against any mate.
+        #[arg(long = "guaranteed-mate-in", value_name = "N", default_value_t = 1)]
+        guaranteed_mate_in: u32,
+        /// Per-move probability the bot picks uniformly from ALL legal
+        /// moves, bypassing the engine ranking entirely (range
+        /// 0.0–1.0). Default 0.0 (off). This is the "beginner bot"
+        /// branch — only it can pick moves the engine didn't surface
+        /// (e.g. leaving a piece in a pawn's path). Same mate-guard
+        /// as `--blunder-chance`.
+        #[arg(long = "wild-chance", value_name = "P", default_value_t = 0.0)]
+        wild_chance: f32,
     },
 }
 
@@ -346,17 +404,28 @@ fn main() -> Result<()> {
             analyze,
             top_percent,
             threads,
+            force_include,
         } => {
             let mut pos =
                 Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
             let mut engine = Engine::default();
+            // Resolve `--force-include` strings against the live
+            // position so the user can write `--force-include Rc8+`
+            // or `--force-include f1c8`. SAN parser is lenient on
+            // disambiguation / check / capture markers; falls back
+            // to UCI on failure.
+            let force_include_moves = force_include
+                .iter()
+                .map(|s| parse_user_move(&mut pos, s)
+                    .with_context(|| format!("parsing --force-include {s:?}")))
+                .collect::<Result<Vec<_>>>()?;
             let params = SearchParams {
                 max_depth: depth,
                 max_nodes: nodes,
                 max_time: time_ms.map(Duration::from_millis),
                 multi_pv: multi_pv.max(1),
                 game_history: Vec::new(),
-                force_include: Vec::new(),
+                force_include: force_include_moves,
                 verbose_progress: false,
                 threads: threads.max(1),
                 // One-shot CLI search/analyze — analytical, no bot mask.
@@ -486,6 +555,12 @@ fn main() -> Result<()> {
             seed,
             no_book,
             disable_eval,
+            noise_pool,
+            noise_temp,
+            blunder_chance,
+            blunder_severity,
+            guaranteed_mate_in,
+            wild_chance,
         } => {
             let mut opponent = match seed {
                 Some(s) => chess_tutor_engine::opponent::OpponentProfile::with_seed(s),
@@ -506,6 +581,23 @@ fn main() -> Result<()> {
                     opponent.eval_mask.disable(cat);
                 }
             }
+            if !(0.0..=1.0).contains(&blunder_chance) {
+                anyhow::bail!("--blunder-chance must be in [0.0, 1.0], got {blunder_chance}");
+            }
+            if !(0.0..=1.0).contains(&wild_chance) {
+                anyhow::bail!("--wild-chance must be in [0.0, 1.0], got {wild_chance}");
+            }
+            if noise_pool == 0 {
+                anyhow::bail!("--noise-pool must be at least 1");
+            }
+            opponent.noise = chess_tutor_engine::opponent::NoiseProfile {
+                candidate_pool: noise_pool,
+                temperature_cp: noise_temp,
+                blunder_chance,
+                blunder_severity_cp: blunder_severity,
+                guaranteed_mate_in,
+                wild_chance,
+            };
             play::play_loop(play::PlayConfig {
                 start_fen: fen,
                 engine_color,

@@ -8,50 +8,28 @@ The engine is now performant enough for the planned mobile use case: at depth 12
 
 See [`core/engine/src/analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!` for the design brief on the move-analysis pipeline (Phase 2 cheap-pass / surprise detection, Phase 4 signal-mask, Phase 5 tactic library) and the `narration` crate for the prose layer. Continued real-game playthrough is how the wording and thresholds get tuned — every retrospective narrator has unit tests for shape but the prose itself was picked a priori.
 
-## Opponent profile / bot variability (in flight)
+## Opponent profile / bot variability
 
-Goal: ship bot-tuning toggles so games aren't deterministic from move 1, and so the student can practice against specific openings or weakened opponents. Phases A (skeleton), B (opening book), and C (eval signal mask) landed. Read the [`opponent.rs`](core/engine/src/opponent.rs) module doc for the strict invariant: **analytical paths (retrospective, hint, `analyze`) must never consult the profile** — they need to judge the user's move against true best play.
+Goal: ship bot-tuning toggles so games aren't deterministic from move 1, and so the student can practice against specific openings or weakened opponents. All four pillars — A (skeleton), B (opening book), C (eval signal mask), D (move noise + blunder) — have landed. Read the [`opponent.rs`](core/engine/src/opponent.rs) module doc for the strict invariant: **analytical paths (retrospective, hint, `analyze`) must never consult the profile** — they need to judge the user's move against true best play.
 
-Remaining pillar:
+Phase D surface (delivered 2026-05-16):
+- 6 [`NoiseProfile`](core/engine/src/opponent.rs) knobs, all-off by default. Three branches, evaluated in this order — **blunder → wild → softmax**. Blunder is the calibrated mistake signal (always picks a worse-than-best move when it fires), so it gets first crack; wild is chaotic and fills whatever budget remains.
+  - **Blunder branch** (`blunder_chance: f32`, `blunder_severity_cp: i32` default 100): pick uniformly from engine-considered lines that trail #1 by at least the severity gap. When no line clears the gate (quiet positions where the top-6 are all near each other), fall back to `lines.last()` — the worst engine-considered move — rather than #1. This is deliberate: ensures a weakened bot's position gradually deteriorates over a quiet game instead of mysteriously snapping back to perfect play in tactically-tight stretches. Mate-guarded.
+  - **Wild branch** (`wild_chance: f32`): per-move probability of picking uniformly from **all legal moves**, bypassing the engine ranking entirely. The only branch that can pick a move the search didn't surface — i.e. genuinely beginner-level mistakes like leaving a piece in a pawn's path. Mate-guarded.
+  - **Softmax branch** (`candidate_pool: usize`, `temperature_cp: i32`): Boltzmann-weighted sampling over the top-K when both pool > 1 and temperature > 0.
+  - Plus `guaranteed_mate_in: u32` (default 1) — suppresses blunder + wild branches when the bot sees a mate up to and including that depth, so mate-in-1 is never thrown away.
+- [`noise::pick`](core/engine/src/noise.rs) — pure function `(profile, seed, ply, &lines, &legal_moves) -> NoisePick`. `NoisePick::Line(idx)` for normal/sampled/blunder picks; `NoisePick::Wild(mv)` when the wild branch fires. Deterministic given `(seed, ply)`; per-game seed is logged so a varied game can be replayed by passing `--seed N` back.
+- CLI flags: `--noise-pool N`, `--noise-temp CP`, `--blunder-chance F`, `--blunder-severity CP`, `--wild-chance F`, `--guaranteed-mate-in N`. REPL `noise [show | pool N | temp CP | blunder F | severity CP | wild F | guarantee N | reset]`. Noise-driven engine moves are annotated `[noise: #K of N (-XX cp)]` (sampled) or `[noise: wild — engine preferred X (+Y)]` (wild) so the student knows the bot is off the best line.
+- Desktop: reads `self.opponent.noise` when queuing the play search; sets `params.multi_pv = noise.effective_multi_pv()`. Worker computes legal moves, calls the picker, reports `NoisePickInfo::Sampled` or `NoisePickInfo::Wild` (logged to stderr for now; visible per-move tag in the move list is a follow-on). Wild moves get no `engine_info` badge in the move list (no search-line for that exact move).
+- Desktop New Game dialog: full settings UI with sliders for the six noise knobs + collapsible eval-mask checkboxes + "Reset bot to defaults" button. The dialog auto-opens at first launch (no Cancel — only path forward is to commit a configuration) so the first thing the user does is pick difficulty. Subsequent New Game clicks pre-populate from the current game, so tweaking between games is incremental rather than from-scratch.
+- Perf: off-profile is no-overhead — `is_off()` short-circuits and the engine keeps the single-PV fast path. When sampling is on, MultiPV costs roughly `K×` the single-PV time per move. Wild + softmax-only profiles keep the single-PV fast path because wild doesn't read the lines; only `blunder_chance > 0` widens MultiPV to at least [`BLUNDER_POOL_MIN`](core/engine/src/opponent.rs) (6).
 
-- **Phase D — move noise / blunder.** Bot occasionally plays a not-quite-best move (variety between equally-good replies, plus an opt-in "exploitable blunder" knob so the student gets practice spotting and punishing mistakes).
-
-### Phase D design sketch (read before coding)
-
-**Two related knobs in [`NoiseProfile`](core/engine/src/opponent.rs)** (currently empty stub):
-
-- `candidate_pool: usize` (default `1` = no noise) — search width to consider when sampling.
-- `temperature_cp: i32` (default `0`) — softmax temperature in centipawns over the score gap from #1. Low = peakier ("usually #1"); high = flatter ("often picks #2-#K when scores are close").
-- `blunder_chance: f32` (default `0.0`, range `0.0–1.0`) — probability per move of skipping the natural top-K and picking a deliberately worse move.
-- `blunder_severity_cp: i32` (default `100`) — how much worse a blunder must be vs. #1 to count.
-
-(Exact field names / ranges open; pick during implementation. The four knobs above are the *concept* shape — the user's stated needs were "occasional good-but-not-best move" and "occasional blunder to exploit.")
-
-**Mechanism — sampling layer sits in the play loop, not the engine:**
-
-1. Play search runs with `SearchParams::multi_pv = profile.noise.candidate_pool` (today both CLI play and desktop hard-code `1`).
-2. Engine returns ranked `SearchLine`s as today.
-3. New helper (e.g. `noise.rs` mirroring `book.rs`): `NoiseProfile::pick(seed, &[SearchLine]) -> usize` returns the index into the result list. Softmax weighted by score deltas; blunder branch widens the candidate pool when it fires.
-4. Play loop applies `lines[pick]` instead of `lines[0]`.
-
-**Strict invariant (same as Phases B / C):** analytical paths must not sample. Retrospective / hint / `analyze` still ask for `multi_pv = 3` for their own ranking purposes, but the user's move is still judged against `lines[0]` (true best). Search params on analytical paths build `noise: ...` as today.
-
-**Determinism:** derive a per-move seed from `profile.seed` + `move_number`. Same starting seed + same human moves = same bot moves and same noise picks. Per the existing `feedback_determinism` rule.
-
-**Integration points (mirror Phase C):**
-
-- `core/engine/src/opponent.rs`: extend `NoiseProfile` fields, add `Default` impl. Constructors `new_random` / `with_seed` populate sensible defaults (likely `pool=1`, `temperature=0`, `blunder=0.0` — all-off until user opts in).
-- New `core/engine/src/noise.rs` (or fold into `opponent.rs` if small): the `pick` helper + small RNG. No engine plumbing — sampling happens after search returns.
-- CLI: `--noise-pool N`, `--noise-temp CP`, `--blunder-chance F` startup flags + REPL `noise [show | pool N | temp CP | blunder F | reset]` command. Updates `cfg.opponent.noise` in-place like `eval-mask` does.
-- CLI [`play_engine_turn`](core/cli/src/play.rs) and desktop [`maybe_queue_engine_search`](desktop/src/main.rs): set `params.multi_pv = profile.noise.candidate_pool.max(1)`; after the search, call the noise picker to choose which line index to play. The book branch in both files still short-circuits — sampling only applies when the engine actually searches.
-
-**Perf note:** `multi_pv > 1` costs roughly `K×` the single-PV time (each slot is a separate IDS pass). Acceptable — the user opted into weakened play. No need to gate on `noise.candidate_pool > 1` to skip MultiPV when off, since `multi_pv.max(1) == 1` already takes the fast path.
-
-**Open design questions to flag before/during implementation:**
-
-- Is "blunder" a separate knob or just very-high temperature? Argument for separate: temperature samples from an existing top-K cluster (which is usually close in score), while blunders pick moves intentionally outside the cluster.
-- ELO presets later? `--bot-elo 1200` could pick `(pool, temp, blunder)` for you. Defer unless the manual knobs feel clunky in practice.
-- Does the retrospective ever narrate bot blunders? Today retrospective only fires on USER moves. A separate "opponent commentary" line ("the bot just played a mistake — can you find the punishment?") would be a nice teaching surface but is out of scope for Phase D.
+Phase D follow-on, deferred:
+- **Visible per-move noise tag in the move list.** Worker reports `NoisePickInfo` but it's only logged to stderr. The GUI move list should show a small badge ("noise: wild" or "blunder #6") on the corresponding move so the student can see at a glance which bot moves were deliberately weakened.
+- **ELO presets**. `--bot-elo 1200` (CLI) and a "Preset" dropdown in the desktop dialog that fills in `(pool, temp, blunder, severity, guarantee, wild)` for you. Initial values were sketched in the design discussion: 100 ELO is wild-heavy, 1400 ELO is mostly softmax with a tiny blunder rate. Defer until the manual knobs feel clunky in real play (so we can tune the preset values from actual playthroughs).
+- **Opponent-side retrospective**. Retrospective currently only fires on USER moves. A separate "the bot just played a deliberate mistake — can you find the punishment?" line when `noise_pick.is_some()` and `delta_from_top_cp <= -blunder_severity_cp` would be a powerful teaching surface, but requires resolving the analytical-paths invariant (the analytical search would need to know what the bot's noise profile is *for the user's retrospective only*, not for the bot's own decision).
+- **More aggressive defaults**. Current defaults are all-off; once we have ELO presets and they're tuned from playthrough, the desktop dialog could default to a middle preset (~800 ELO) so a fresh install gives a more human-feeling opponent out of the box.
+- **Seed surface in the GUI.** Desktop logs the seed to stderr but doesn't show it in the UI; players who want to replay a varied game can't easily copy the seed back. Add a status line under the move list or in the New Game dialog with the active seed + a way to paste one in to replay.
 
 Phase C surface (delivered):
 - 8 toggleable [`EvalCategory`](core/engine/src/opponent.rs) values: `pawn-structure`, `pieces`, `mobility`, `king-safety`, `threats`, `passed-pawns`, `space`, `initiative`. Material and imbalance are deliberately not exposed (disabling them produces gibberish play, not a teaching scenario).

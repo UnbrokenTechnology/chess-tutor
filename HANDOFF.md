@@ -12,7 +12,7 @@ A **chess tutor**, not a chess engine. The product surface is move-by-move teach
 
 UIs: CLI (`chess-tutor`), egui desktop (`chess-tutor-desktop`), planned Apple + Android. FFI crate (`core/ffi/`) is the prerequisite for the platform apps and doesn't exist yet.
 
-Tests: **633 engine (+4 ignored) + 105 narration + 49 cli = 787 passing**, clippy clean.
+Tests: **673 engine (+4 ignored) + 105 narration + 49 cli = 827 passing**, clippy clean.
 
 ## Currently iterating on: teaching UX
 

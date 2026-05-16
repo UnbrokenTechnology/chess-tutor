@@ -15,8 +15,11 @@ use chess_tutor_engine::book::BookCursor;
 use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
+use chess_tutor_engine::noise::{self, NoisePick};
 use chess_tutor_engine::openings::{self, OpeningId, OpeningIdentification};
-use chess_tutor_engine::opponent::{BookSelection, EvalCategory, EvalMask, OpponentProfile};
+use chess_tutor_engine::opponent::{
+    BookSelection, EvalCategory, EvalMask, NoiseProfile, OpponentProfile,
+};
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::traps::{self, PendingTrap, TrapEvent, TrapHit};
@@ -130,7 +133,7 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
     )?;
     writeln!(
         out,
-        "commands: moves | eval | search | analyze | retrospect | explain-best | openings | eval-mask | undo | fen | flip | resign | help | quit"
+        "commands: moves | eval | search | analyze | retrospect | explain-best | openings | eval-mask | noise | undo | fen | flip | resign | help | quit"
     )?;
     // Log the opponent seed so a varied game can be replayed exactly.
     writeln!(
@@ -149,6 +152,9 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
     if !cfg.opponent.eval_mask.is_empty() {
         let disabled: Vec<_> = cfg.opponent.eval_mask.disabled_iter().map(|c| c.slug()).collect();
         writeln!(out, "eval-mask: bot blind to {}", disabled.join(", "))?;
+    }
+    if !cfg.opponent.noise.is_off() {
+        writeln!(out, "noise: {}", format_noise_summary(&cfg.opponent.noise))?;
     }
     // Editable view of the opponent's allowed-openings set. Changes
     // via the `openings allow / deny / reset` commands take effect on
@@ -225,6 +231,7 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                 &mut pos,
                 &mut engine,
                 &cfg,
+                &legal,
                 &mut history,
                 &mut position_keys,
                 &mut pending_trap,
@@ -338,6 +345,7 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
             },
             "openings" => run_openings_command(&mut out, arg, &mut allowed_book, &book_cursor)?,
             "eval-mask" => run_eval_mask_command(&mut out, arg, &mut cfg.opponent.eval_mask)?,
+            "noise" => run_noise_command(&mut out, arg, &mut cfg.opponent.noise)?,
             "fen" => writeln!(out, "{}", pos.to_fen())?,
             "flip" => manual_flip = !manual_flip,
             "undo" => match history.pop() {
@@ -486,6 +494,7 @@ fn play_engine_turn(
     pos: &mut Position,
     engine: &mut Engine,
     cfg: &PlayConfig,
+    legal_moves: &[Move],
     history: &mut Vec<HistoryEntry>,
     position_keys: &mut Vec<u64>,
     pending_trap: &mut Option<PendingTrap>,
@@ -494,6 +503,7 @@ fn play_engine_turn(
     if cfg.reset_engine_per_move {
         engine.new_game();
     }
+    let effective_multi_pv = cfg.opponent.noise.effective_multi_pv();
     let params = SearchParams {
         max_depth: cfg.depth,
         // Safety cap: positions where alpha-beta pruning degenerates
@@ -504,7 +514,11 @@ fn play_engine_turn(
         // something rather than hanging indefinitely.
         max_nodes: Some(ENGINE_TURN_NODE_CAP),
         max_time: cfg.time_ms.map(Duration::from_millis),
-        multi_pv: 1,
+        // Bot noise widens this from 1 when the opponent profile
+        // wants alternatives to sample from. With the default
+        // (off) profile this stays 1 and the engine keeps its
+        // single-PV fast path.
+        multi_pv: effective_multi_pv,
         game_history: game_history_for_search(position_keys),
         force_include: Vec::new(),
         verbose_progress: cfg.search_progress,
@@ -520,15 +534,63 @@ fn play_engine_turn(
     let started = Instant::now();
     let lines = engine.search(pos, params);
     let elapsed = started.elapsed();
-    let Some(line) = lines.into_iter().next() else {
+    if lines.is_empty() {
         writeln!(out, "no legal moves.")?;
         return Ok(());
-    };
-    let mv = match line.pv.first() {
-        Some(mv) => *mv,
-        None => {
-            writeln!(out, "(search returned empty pv)")?;
-            return Ok(());
+    }
+    // Per the strict invariant in `opponent.rs`, only the play search
+    // consults the noise profile. The pick is deterministic for a given
+    // (seed, ply) — see `noise::pick`.
+    let ply = position_keys.len() as u64;
+    let pick = noise::pick(&cfg.opponent.noise, cfg.opponent.seed, ply, &lines, legal_moves);
+    let (mv, score_label, noise_tag) = match pick {
+        NoisePick::Line(idx) => {
+            let line = &lines[idx];
+            let Some(&mv) = line.pv.first() else {
+                writeln!(out, "(search returned empty pv)")?;
+                return Ok(());
+            };
+            // Annotate softmax-sampled picks so the student knows the
+            // bot is off the best line. Silent on the common idx == 0
+            // (no-branch-fired) path.
+            let tag = if idx == 0 {
+                String::new()
+            } else {
+                let delta = line.score.0 - lines[0].score.0;
+                format!(" [noise: softmax #{} of {} ({:+} cp)]", idx + 1, lines.len(), delta)
+            };
+            (mv, format_score(line.score), tag)
+        }
+        NoisePick::Blunder(idx) => {
+            let line = &lines[idx];
+            let Some(&mv) = line.pv.first() else {
+                writeln!(out, "(search returned empty pv)")?;
+                return Ok(());
+            };
+            let delta = line.score.0 - lines[0].score.0;
+            let tag = format!(
+                " [noise: blunder #{} of {} ({:+} cp)]",
+                idx + 1, lines.len(), delta,
+            );
+            (mv, format_score(line.score), tag)
+        }
+        NoisePick::Wild(mv) => {
+            // Wild bypassed the engine's ranking. There's no score for
+            // the wild move (we didn't search it), so the score column
+            // shows the engine's preferred move instead — that's the
+            // most useful teaching signal: "I was going to play Nf3
+            // (+0.34) but the bot wild-picked Qh5 instead."
+            let top_san = lines[0]
+                .pv
+                .first()
+                .map(|m| san::format(pos, *m))
+                .unwrap_or_else(|| "?".to_string());
+            let tag = format!(
+                " [noise: wild — engine preferred {} ({})]",
+                top_san,
+                format_score(lines[0].score),
+            );
+            (mv, "wild".to_string(), tag)
         }
     };
     let san_text = san::format(pos, mv);
@@ -536,9 +598,10 @@ fn play_engine_turn(
     let nps_m = engine.last_nps() / 1.0e6;
     writeln!(
         out,
-        "played {} ({}) in {} ms · {} nodes · {:.2} Mnps",
+        "played {} ({}){} in {} ms · {} nodes · {:.2} Mnps",
         san_text,
-        format_score(line.score),
+        score_label,
+        noise_tag,
         elapsed.as_millis(),
         nodes,
         nps_m,
@@ -957,6 +1020,96 @@ fn slug_list() -> String {
         .join(", ")
 }
 
+/// One-line summary of the active noise knobs — used in the game-start
+/// banner and as the default response to `noise` with no argument.
+fn format_noise_summary(n: &NoiseProfile) -> String {
+    if n.is_off() {
+        return "off (bot always plays #1)".to_string();
+    }
+    format!(
+        "pool={} temp={} cp · blunder={:.0}% (severity {}cp) · wild={:.0}% · guaranteed mate-in {}",
+        n.candidate_pool,
+        n.temperature_cp,
+        n.blunder_chance * 100.0,
+        n.blunder_severity_cp,
+        n.wild_chance * 100.0,
+        n.guaranteed_mate_in,
+    )
+}
+
+/// Dispatch for the `noise` REPL command. Mutates the
+/// [`OpponentProfile::noise`] in place so subsequent engine moves pick
+/// up the change; the next call to `play_engine_turn` reads the new
+/// effective MultiPV automatically.
+fn run_noise_command(
+    out: &mut io::StdoutLock<'_>,
+    arg: &str,
+    noise: &mut NoiseProfile,
+) -> io::Result<()> {
+    let (subverb, subarg) = match arg.split_once(char::is_whitespace) {
+        Some((v, a)) => (v.trim(), a.trim()),
+        None => (arg.trim(), ""),
+    };
+    match subverb {
+        "" | "show" => writeln!(out, "noise: {}", format_noise_summary(noise)),
+        "pool" => match subarg.parse::<usize>() {
+            Ok(0) => writeln!(out, "noise: pool must be at least 1."),
+            Ok(n) => {
+                noise.candidate_pool = n;
+                writeln!(out, "noise: pool set to {n} (effective from next engine move).")
+            }
+            Err(_) => writeln!(out, "usage: noise pool <positive integer>"),
+        },
+        "temp" => match subarg.parse::<i32>() {
+            Ok(cp) => {
+                noise.temperature_cp = cp;
+                writeln!(out, "noise: temperature set to {cp} cp.")
+            }
+            Err(_) => writeln!(out, "usage: noise temp <centipawns>"),
+        },
+        "blunder" => match subarg.parse::<f32>() {
+            Ok(p) if (0.0..=1.0).contains(&p) => {
+                noise.blunder_chance = p;
+                writeln!(out, "noise: blunder chance set to {:.0}%.", p * 100.0)
+            }
+            _ => writeln!(out, "usage: noise blunder <0.0-1.0>"),
+        },
+        "wild" => match subarg.parse::<f32>() {
+            Ok(p) if (0.0..=1.0).contains(&p) => {
+                noise.wild_chance = p;
+                writeln!(
+                    out,
+                    "noise: wild chance set to {:.0}% (uniform pick from all legal moves).",
+                    p * 100.0,
+                )
+            }
+            _ => writeln!(out, "usage: noise wild <0.0-1.0>"),
+        },
+        "severity" => match subarg.parse::<i32>() {
+            Ok(cp) if cp >= 0 => {
+                noise.blunder_severity_cp = cp;
+                writeln!(out, "noise: blunder severity set to {cp} cp.")
+            }
+            _ => writeln!(out, "usage: noise severity <non-negative centipawns>"),
+        },
+        "guarantee" => match subarg.parse::<u32>() {
+            Ok(n) => {
+                noise.guaranteed_mate_in = n;
+                writeln!(out, "noise: guaranteed mate-in set to {n} (0 = no mate protected).")
+            }
+            Err(_) => writeln!(out, "usage: noise guarantee <non-negative integer>"),
+        },
+        "reset" => {
+            *noise = NoiseProfile::default();
+            writeln!(out, "noise: reset to off.")
+        }
+        other => writeln!(
+            out,
+            "unknown noise subcommand {other:?} — try: show | pool N | temp CP | blunder F | severity CP | wild F | guarantee N | reset",
+        ),
+    }
+}
+
 fn print_eval_mask(out: &mut io::StdoutLock<'_>, mask: &EvalMask) -> io::Result<()> {
     if mask.is_empty() {
         return writeln!(out, "eval-mask: all categories on (bot uses full eval).");
@@ -1264,6 +1417,14 @@ fn print_help(out: &mut io::StdoutLock<'_>) -> io::Result<()> {
     writeln!(
         out,
         "                    toggle bot's blindness to eval categories (effective from next engine move)"
+    )?;
+    writeln!(
+        out,
+        "  noise [show | pool N | temp CP | blunder F | severity CP | wild F | guarantee N | reset]"
+    )?;
+    writeln!(
+        out,
+        "                    bot move-sampling: top-K + softmax temperature, exploitable blunder, wild beginner-bot branch"
     )?;
     writeln!(out, "  undo     take back one ply")?;
     writeln!(out, "  fen      print the current FEN")?;

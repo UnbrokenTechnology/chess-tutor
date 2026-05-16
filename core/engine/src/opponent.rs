@@ -83,10 +83,107 @@ pub enum BookSelection {
 /// instead of the search's #1, plus the probability of a deliberate
 /// worse-than-good move ("blunder").
 ///
-/// Phase A ships an empty default; the noise pillar populates the
-/// fields later.
-#[derive(Clone, Debug, Default)]
-pub struct NoiseProfile {}
+/// All fields default to a no-op profile (the bot always plays
+/// `lines[0]`). The CLI / desktop layers expose individual knobs so a
+/// student can dial up variety ("don't see the same Italian Game line
+/// every time") or exploitable mistakes ("give me practice spotting
+/// blunders") without weakening one to weaken the other.
+#[derive(Clone, Debug)]
+pub struct NoiseProfile {
+    /// How many top search lines the sampler may pick from when softmax
+    /// noise fires. `1` (default) disables the softmax branch entirely
+    /// — the bot just plays `lines[0]`. Larger values cost roughly K×
+    /// the search time because the engine runs K iterative-deepening
+    /// passes (one per PV slot).
+    pub candidate_pool: usize,
+    /// Softmax temperature in centipawns over the score gap from #1.
+    /// `0` (default) collapses to "always pick #1" even when
+    /// [`Self::candidate_pool`] > 1. Higher values flatten the
+    /// distribution: at `temperature_cp = 50` a #2 line that's 50 cp
+    /// behind has weight `e^-1 ≈ 0.37` relative to #1; at
+    /// `temperature_cp = 200` the same line weights `e^-0.25 ≈ 0.78`.
+    pub temperature_cp: i32,
+    /// Probability per move of deliberately dropping a "blunder" —
+    /// picking uniformly from lines that are at least
+    /// [`Self::blunder_severity_cp`] worse than #1. `0.0` (default)
+    /// disables the branch. Setting this > 0 widens the requested
+    /// MultiPV to [`BLUNDER_POOL_MIN`] so the engine surfaces enough
+    /// worse-than-best alternatives to sample from.
+    pub blunder_chance: f32,
+    /// Preferred minimum score gap (centipawns, from the bot's POV)
+    /// that a line should trail #1 by to be eligible as a blunder pick.
+    /// Default `100` cp — a clear pawn-down move the student can
+    /// plausibly recognise and punish.
+    ///
+    /// This is a *preference*, not a hard floor: if a roll fires but
+    /// no line meets the gap (quiet positions where the top-6 are all
+    /// roughly equal), the picker falls back to the worst engine-
+    /// considered move rather than the engine's best. See
+    /// [`crate::noise`] module docs for why.
+    pub blunder_severity_cp: i32,
+    /// Smallest mate the bot is **guaranteed** to play through —
+    /// blunders are suppressed when `lines[0]` is a mate-in-N for
+    /// `N <= guaranteed_mate_in`. Default `1`: mate-in-1 is never
+    /// blundered (would look like a bug, not a deliberate weakness).
+    /// Set to `0` to allow blunders against any mate; raise it to
+    /// guarantee deeper forced sequences are converted.
+    pub guaranteed_mate_in: u32,
+    /// Probability per move the bot picks **uniformly from all legal
+    /// moves**, bypassing the search ranking entirely. Distinct from
+    /// [`Self::blunder_chance`]: that branch picks from the engine's
+    /// top-K worse-but-still-considered alternatives; this branch can
+    /// pick a move the engine didn't even surface, including
+    /// genuinely beginner-level mistakes like leaving a piece in a
+    /// pawn's path. `0.0` (default) disables the branch.
+    ///
+    /// Mate-guarded the same as [`Self::blunder_chance`] — bot's
+    /// `guaranteed_mate_in` shorter mates are never bypassed.
+    pub wild_chance: f32,
+}
+
+/// Minimum MultiPV the play search needs when blunders are enabled.
+/// Blunder candidates are filtered by score severity; the top 2–3
+/// lines are usually too close in score to qualify, so we widen the
+/// request to surface deliberately worse alternatives.
+pub const BLUNDER_POOL_MIN: usize = 6;
+
+impl Default for NoiseProfile {
+    fn default() -> Self {
+        Self {
+            candidate_pool: 1,
+            temperature_cp: 0,
+            blunder_chance: 0.0,
+            blunder_severity_cp: 100,
+            guaranteed_mate_in: 1,
+            wild_chance: 0.0,
+        }
+    }
+}
+
+impl NoiseProfile {
+    /// True when the profile cannot pick anything but `lines[0]` —
+    /// the play loop uses this to skip the picker entirely.
+    ///
+    /// Temperature alone has no effect when `candidate_pool == 1` (the
+    /// softmax has a one-element pool), so we treat a single-slot pool
+    /// with no blunder *and* no wild as off regardless of temperature.
+    pub fn is_off(&self) -> bool {
+        self.blunder_chance <= 0.0 && self.wild_chance <= 0.0 && self.candidate_pool <= 1
+    }
+
+    /// MultiPV the play search should request given this profile. The
+    /// softmax branch needs `candidate_pool` slots; the blunder branch
+    /// needs at least [`BLUNDER_POOL_MIN`]. Off-profile collapses to
+    /// `1` so the engine keeps its single-PV fast path.
+    pub fn effective_multi_pv(&self) -> usize {
+        let pool = self.candidate_pool.max(1);
+        if self.blunder_chance > 0.0 {
+            pool.max(BLUNDER_POOL_MIN)
+        } else {
+            pool
+        }
+    }
+}
 
 /// Top-level evaluation categories the bot can be made "blind" to.
 /// Each category corresponds to one `score +=` line in
@@ -259,5 +356,56 @@ mod tests {
             assert_eq!(EvalCategory::from_slug(c.slug()), Some(c));
         }
         assert_eq!(EvalCategory::from_slug("nope"), None);
+    }
+
+    #[test]
+    fn default_noise_profile_is_off() {
+        let n = NoiseProfile::default();
+        assert!(n.is_off(), "default noise must be a no-op (always #1)");
+        assert_eq!(n.effective_multi_pv(), 1, "off-profile keeps the single-PV fast path");
+    }
+
+    #[test]
+    fn noise_profile_off_when_pool_one_and_no_blunder() {
+        let n = NoiseProfile {
+            candidate_pool: 1,
+            temperature_cp: 500, // temperature alone with pool=1 is still off
+            blunder_chance: 0.0,
+            ..Default::default()
+        };
+        assert!(n.is_off());
+    }
+
+    #[test]
+    fn noise_profile_on_when_pool_above_one() {
+        let n = NoiseProfile {
+            candidate_pool: 3,
+            temperature_cp: 50,
+            ..Default::default()
+        };
+        assert!(!n.is_off());
+        assert_eq!(n.effective_multi_pv(), 3);
+    }
+
+    #[test]
+    fn noise_profile_blunder_widens_to_minimum_pool() {
+        let n = NoiseProfile {
+            candidate_pool: 1,
+            blunder_chance: 0.1,
+            ..Default::default()
+        };
+        assert!(!n.is_off());
+        assert_eq!(n.effective_multi_pv(), BLUNDER_POOL_MIN);
+    }
+
+    #[test]
+    fn noise_profile_blunder_respects_user_pool_when_larger() {
+        let n = NoiseProfile {
+            candidate_pool: 10,
+            blunder_chance: 0.1,
+            ..Default::default()
+        };
+        // candidate_pool > BLUNDER_POOL_MIN — keep the user's choice.
+        assert_eq!(n.effective_multi_pv(), 10);
     }
 }

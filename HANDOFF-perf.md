@@ -53,6 +53,42 @@ The "pathological outlier" class is essentially gone. Per-position d=20 / 128 MB
 
 These all cluster in the 10–30 M range — healthy deep-search costs, not chain blowups. FEN 1 being the new worst is surprising but it's startpos at d=20, which is inherently expensive (broad PV).
 
+### MultiPV-around-mate pathology (UX-discovered 2026-05-16)
+
+UX playthrough surfaced a pathology orthogonal to the bench outliers: **MultiPV ≥ 2 on a position where #1 is a forced mate runs unboundedly**. Pinned the desktop GUI mid-game while the retrospective tried to rank the user's move against alternatives.
+
+**Reproducer** (`chess-tutor search "..." --depth N --multi-pv K --nodes ...`):
+
+```
+FEN: 4Rb2/p5p1/1p2Q3/2kN2q1/B1p5/8/PPPP1PPP/R1B3K1 w - - 0 24
+```
+
+| Config | Result |
+|---|---|
+| `--multi-pv 1 --depth 10` | 1,760 nodes / 2 ms (finds mate-in-5) |
+| `--multi-pv 2 --depth 10 --nodes 10M` | hits cap at **depth 5** |
+| `--multi-pv 3 --depth 10 --nodes 100M` | hits cap at **depth 4** |
+
+Position is winning (W up R+N+3P) with mate-in-1 available (`Qc6+`). Single-PV finds it instantly; MultiPV explodes.
+
+**SF11 behaviour, by reading `reference/Stockfish-sf_11/src/search.cpp`:**
+
+1. **SF does not short-circuit MultiPV when #1 is mate** — the loop at line 419 (`for (pvIdx = 0; pvIdx < multiPV && !Threads.stop; ++pvIdx)`) runs unconditionally. SF will keep searching to surface mate-in-2 vs mate-in-3 distinctions. This is **load-bearing for our teaching surface** — the retrospective wants to say "you found a mate, but a slower one" rather than just "you found a mate."
+2. **SF mitigates the aspiration blowup via `failedHighCnt` depth reduction** (line 453: `adjustedDepth = max(1, rootDepth - failedHighCnt - searchAgainCounter)`). We ported the *structural* version of this in commit `2dbf5c6` (May) but deferred SF11's specific tuning (`delta = 21 + |prevScore|/256` initial, `delta + delta/4 + 5` growth) because it regressed FEN 26 d=13 by 3× at the time. We use `delta=17` constant + `2×` growth instead — fine for the bench, but evidently not aggressive enough at the boundary of mate scores.
+3. **Thread voting** (line 293) picks the shortest mate across Lazy SMP threads at search end — separate from MultiPV ranking, irrelevant to single-thread analytical paths.
+
+**Theory:** with `prevScore ≈ 32000` (mate value), SF11's `delta = 21 + 32000/256 ≈ 146` puts the aspiration window at `[mate-146, mate+146]`. Any non-mating alternative for PV[2]/PV[3] is by definition >32000 cp worse, so every aspiration attempt for the secondary PVs fails low and rewidens. SF survives this because the depth reduction kicks the per-attempt cost down each iteration; our constant-delta + 2× growth widens more slowly relative to the depth reduction's effect, and at very low search depths (d=4) the depth reduction reaches `max(1, ...)` immediately and we lose the lever entirely.
+
+**Recommended fix order:**
+
+1. **Re-attempt SF11's full aspiration delta tuning** (`21 + |prev|/256` initial + `delta + delta/4 + 5` growth). Now that the rest of the pruning stack has matured since May (qsearch depth tracking, Lever 2b, etc.), the FEN 26 d=13 regression that blocked it before may have a different shape. The repro FEN above is the discriminator — if the new tuning lets multi-PV=3 finish at depth 10 in under 5s, ship it.
+2. **Test SF11's `searchAgainCounter`** (line 453) — the other half of the depth-reduction adjustment we didn't port. It increments when MultiPV iterates without converging, providing additional depth-reduction headroom specifically in the multi-PV-iterates-many-times case our pathology hits.
+3. **If those don't suffice:** consider per-iteration depth caps that scale with `pvIdx` — e.g. PV[1] runs at full depth, PV[2] runs at `depth - 2`, etc. SF doesn't do this; would need a teaching-output design justification (probably "secondary alternatives don't need to match #1's depth for the verdict to be meaningful").
+
+**Hotfix in tree** (2026-05-16): analytical paths (`retrospective.rs`, desktop worker `Retrospective` + `Analyze`) capped at `max_nodes: 100_000_000` and `max_time: 10s` so the GUI degrades to "couldn't fully analyze" instead of locking up. Constants `ANALYSIS_NODE_CAP` / `ANALYSIS_TIME_MS` in `desktop/src/main.rs`; `RETROSPECTIVE_NODE_CAP` / `RETROSPECTIVE_TIME_MS` in `core/cli/src/retrospective.rs`. The caps should remain as a safety net even after the underlying perf is fixed.
+
+**Side-band bug surfaced during the investigation:** `format_score` in `core/cli/src/play.rs` and `core/engine/src/types.rs` mate-distance branch displays `#0` for a 1-ply mate (`MATE - 1 = 31999`). The math is `plies_to_mate = mate - abs = 1` then `moves = (1+1)/2 = 1`, but somewhere upstream the score being formatted is `MATE` itself (32000) not `MATE - 1`. Unrelated to the pathology — a separate display polish item.
+
 ### Outlier-position breakdown (d14, post-Lever-1)
 
 Most of the d14 overshoot lives in three positions. From the user's last 45-pos d14 run:
