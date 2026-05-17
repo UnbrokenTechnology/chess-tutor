@@ -38,15 +38,16 @@ Phase C surface (delivered):
 - Perf: TT=16 1T d=13 bench identical to pre-Phase-C (8 per-category branches fold under branch prediction on the empty-mask hot path).
 
 Opening-book follow-on work, deferred:
-- Grow the curated default from 8 entries; current list lives in [`CURATED`](core/engine/src/book.rs) (covered by the `every_curated_entry_resolves` regression test).
+- **Desktop UI for allowed-openings selection (highest priority).** Default is now "every theoretical opening in the TSV" (~3,900 entries via [`all_ids`](core/engine/src/book.rs)). Users will want a settings panel to narrow that set — both *positive* selection ("I want to practice the Caro-Kann this session") and *negative* ("never play the Sicilian against me, I don't know the theory"). The CLI already has `openings list / allow PAT / deny PAT / reset / selected`; the GUI needs an equivalent surface, ideally as a filter list inside the New Game dialog so each game can pick its own subset without leaving the table. The underlying mechanism (`BookSelection::Allowed(Vec<OpeningId>)`) and the per-ply matching engine already support arbitrary subsets.
 - Teaching-note overlay — separate `book_notes.toml` keyed by `(eco, name)` with short prose blurbs the GUI surfaces alongside the book line. Empty to start; populate the marquee openings first.
-- Desktop UI for opening selection / status — today the only desktop surface is a stderr log on new-game. Wants at minimum: a "book: <opening>" line under the move list, plus a settings panel mirroring the CLI `openings` command.
-- "New game in book" REPL command — CLI `openings allow/deny` only takes effect on the next game; a `new-game` REPL verb would re-pick a cursor in the current REPL session.
-- Transposition-aware book matching — current cursor drops on any move-order divergence from the canonical line, even when the resulting position is the same. Low priority (curated lines are mostly canonical move orders).
+- Desktop UI for opening status — today the only desktop surface is a stderr log on each book move. Wants at minimum a "book: <opening> (ECO Name)" badge in the move list or under the board so the user sees the opening name at a glance.
+- "New game in book" REPL command — CLI `openings allow/deny` only takes effect on the next game; a `new-game` REPL verb would re-create the cursor in the current REPL session.
+- Transposition-aware book matching — current cursor uses move-prefix matching, so games that transpose into a curated line via a different move order won't be recognised. Low priority (most book moves are reached via the canonical order; teaching-tool users typically play standard sequences).
 
 Decisions locked in:
 - Book entries are discrete TSV rows, not branches — "Caro-Kann Variation X" is its own opening, separate from "Caro-Kann".
-- Curated default subset on by default once Phase B ships.
+- Per-ply matching is the only mode (no game-start pre-commit) — see commit `15bb2e8` for the rationale.
+- Default-allowed set is "every TSV entry" — see commit landing this note for the rationale (the 8-entry curated default was too narrow; users want variety AND the freedom to filter).
 - Seed is random per game, logged in the play prompt; pass `--seed <n>` to replay.
 - London System and other piece-placement-defined "systems" are out of scope for opponent profile; system detection is a separate quality issue against [`openings.rs`](core/engine/src/openings.rs).
 

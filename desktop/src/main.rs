@@ -414,11 +414,21 @@ struct App {
     /// on every New Game; the play loop reads `book` to pick an
     /// opening line and consults [`Self::book_cursor`] to follow it.
     opponent: OpponentProfile,
-    /// Live opening-book cursor for the current game. `Some` while
-    /// the bot is still following the picked line; dropped on the
-    /// first deviation, exhaustion, or any takeback that uncovers a
-    /// pre-book state.
+    /// Holds the allowed-openings list and seed for this game. The
+    /// cursor is stateless — peek(history) re-derives the matching
+    /// set each call — so this stays `Some` for the entire game
+    /// whenever a book was configured. It's only `None` when the
+    /// profile started with [`BookSelection::None`] or the game
+    /// started from a custom FEN where the book doesn't apply.
     book_cursor: Option<BookCursor>,
+    /// `true` once we've printed the "out of book" line during the
+    /// current streak of out-of-book bot turns. Reset on new game
+    /// AND on takeback, so the announcement re-prints if the user
+    /// takes back and either deviates a second time or returns to
+    /// in-book history and then deviates again. Without this dedup
+    /// we'd repeat the message on every bot turn out of book; without
+    /// the takeback reset, takeback couldn't restore book play.
+    book_out_announced: bool,
     /// True until the user clicks Start in the New Game dialog for
     /// the first time. While true the dialog hides its Cancel button
     /// — there's no game in progress to cancel back to, so the only
@@ -485,6 +495,7 @@ impl App {
             hint_result: None,
             opponent: OpponentProfile::new_random(),
             book_cursor: None,
+            book_out_announced: false,
             first_launch: true,
             pending_promotion: None,
         }
@@ -513,6 +524,7 @@ impl App {
         self.opponent.noise = noise;
         self.opponent.eval_mask = eval_mask;
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
+        self.book_out_announced = false;
         log_new_game_intro(&self.opponent);
         self.close_hint();
         let _ = self.worker_tx.send(WorkerJob::NewGame);
@@ -728,6 +740,11 @@ impl App {
                 self.undo_one();
             }
         }
+        // Re-arm the "out of book" announcement: the user may now
+        // be back in book territory (the cursor will re-derive that
+        // on its next peek), and either way, if they deviate again
+        // they should see the line print again.
+        self.book_out_announced = false;
         self.maybe_queue_engine_search();
     }
 
@@ -780,14 +797,21 @@ impl App {
             } else {
                 eprintln!("book: engine plays {}", san_str);
             }
+            // A successful book pick clears the "we've announced
+            // out-of-book" flag — the user may have taken back to an
+            // in-book position, and if they later deviate again we
+            // want the announcement to print fresh.
+            self.book_out_announced = false;
             self.apply_move(book_pick.mv);
             return;
         }
-        // No book match — announce the transition once and drop the
-        // cursor so future bot turns skip the lookup silently.
-        if self.book_cursor.is_some() {
+        // No book match on this position. Announce once per
+        // out-of-book streak — *don't* drop the cursor itself,
+        // because a takeback might bring us back into book territory
+        // and we need peek to keep working on the next bot turn.
+        if self.book_cursor.is_some() && !self.book_out_announced {
             eprintln!("out of book — engine now plays from search.");
-            self.book_cursor = None;
+            self.book_out_announced = true;
         }
         let params = SearchParams {
             max_depth: self.depth,

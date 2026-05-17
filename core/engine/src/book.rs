@@ -149,45 +149,25 @@ impl BookCursor {
 }
 
 // =========================================================================
-// Curated default list
+// Default allowed-openings list
 // =========================================================================
 
-/// Hand-picked default subset of openings. Each entry must match an
-/// existing TSV row exactly; mismatches surface at first call to
-/// [`curated_default_ids`] (and are caught at test time by
-/// `every_curated_entry_resolves` below). The names below are taken
-/// verbatim from the Lichess CC0 bundle in `data/openings/*.tsv`.
+/// Every opening id in the bundled TSV. The default
+/// [`crate::opponent::BookSelection::Allowed`] uses this — i.e., the
+/// bot is allowed to play any theoretical opening. The user can narrow
+/// the list later via the CLI `openings deny PAT` command (and a
+/// future GUI surface for the same — see HANDOFF-ux) to practice
+/// specific openings or avoid theories they don't want to face.
 ///
-/// Roughly balanced across White's two main first moves (1.e4 and
-/// 1.d4) plus a Black defence representing each side; depth chosen to
-/// take the bot 4–8 plies into a recognisable theoretical position
-/// without committing to deep main-line theory the student probably
-/// hasn't studied.
-const CURATED: &[(&str, &str)] = &[
-    ("C50", "Italian Game"),
-    ("C60", "Ruy Lopez"),
-    ("D06", "Queen's Gambit"),
-    ("D10", "Slav Defense"),
-    ("B10", "Caro-Kann Defense"),
-    ("C00", "French Defense"),
-    ("B20", "Sicilian Defense"),
-    ("E61", "King's Indian Defense"),
-];
+/// Per-ply matching keeps this affordable even at ~3,900 entries:
+/// each peek does one move-comparison per opening per ply of history,
+/// so a 5-move history walks ~20k Move comparisons — negligible
+/// compared to the surrounding search.
+static ALL_IDS: OnceLock<Vec<OpeningId>> = OnceLock::new();
 
-static CURATED_IDS: OnceLock<Vec<OpeningId>> = OnceLock::new();
-
-/// Resolve the curated default list to ids on first call. Skips any
-/// (eco, name) pair that no longer exists in the bundled TSV (would
-/// only happen if the TSV is updated and a curated entry's name
-/// shifts). Test `every_curated_entry_resolves` keeps this honest.
-pub fn curated_default_ids() -> Vec<OpeningId> {
-    CURATED_IDS
-        .get_or_init(|| {
-            CURATED
-                .iter()
-                .filter_map(|(eco, name)| openings::find_id_exact(eco, name))
-                .collect()
-        })
+pub fn all_ids() -> Vec<OpeningId> {
+    ALL_IDS
+        .get_or_init(|| openings::entries().iter().map(|e| e.id).collect())
         .clone()
 }
 
@@ -241,21 +221,19 @@ mod tests {
         BookCursor::new(&profile, &Position::startpos()).expect("cursor")
     }
 
-    // ---- curated default sanity ------------------------------------
+    // ---- default-allowed-list sanity -------------------------------
 
     #[test]
-    fn curated_default_resolves_to_nonempty_list() {
-        assert!(!curated_default_ids().is_empty());
+    fn all_ids_returns_nonempty_list() {
+        assert!(!all_ids().is_empty());
     }
 
     #[test]
-    fn every_curated_entry_resolves() {
-        for (eco, name) in CURATED {
-            assert!(
-                openings::find_id_exact(eco, name).is_some(),
-                "curated entry ({eco}, {name:?}) no longer resolves in the TSV",
-            );
-        }
+    fn all_ids_covers_every_tsv_entry() {
+        // Sanity: the returned id set's size should match the bundled
+        // openings table. If the openings module ever filters its
+        // entries differently this test guards against silent drift.
+        assert_eq!(all_ids().len(), openings::entries().len());
     }
 
     // ---- BookCursor::new gating ------------------------------------
@@ -282,7 +260,7 @@ mod tests {
     #[test]
     fn new_returns_some_with_curated_default() {
         let profile = OpponentProfile {
-            book: BookSelection::Allowed(curated_default_ids()),
+            book: BookSelection::Allowed(all_ids()),
             ..OpponentProfile::with_seed(42)
         };
         let cursor =
@@ -297,11 +275,28 @@ mod tests {
 
     #[test]
     fn peek_returns_none_when_history_diverges_from_every_opening() {
-        // 1.a4 isn't the first move of any curated opening, so peek
-        // after this history must fall through to search.
-        let history = san_to_moves(&["a4"]);
-        let cursor = cursor_with(curated_default_ids(), 0xCAFE);
-        assert!(cursor.peek(&history).is_none());
+        // With the full TSV in play, *every* legal first move is
+        // theoretical (even 1.a4 = Ware Opening). To guarantee
+        // divergence we replay the longest curated line and then add
+        // one extra move — no opening's stored line is longer than
+        // the longest one, so the extended history cannot prefix-match.
+        let longest = openings::entries()
+            .iter()
+            .max_by_key(|e| e.line.len())
+            .expect("openings db is non-empty");
+        let mut history = longest.line.clone();
+        // Append a legal move past the line's end.
+        let mut pos = replay(&history);
+        let extra = crate::movegen::legal_moves_vec(&mut pos)
+            .into_iter()
+            .next()
+            .expect("position after a 36-ply line still has legal moves");
+        history.push(extra);
+        let cursor = cursor_with(all_ids(), 0xCAFE);
+        assert!(
+            cursor.peek(&history).is_none(),
+            "history longer than the longest curated line cannot prefix-match any entry",
+        );
     }
 
     #[test]
@@ -366,7 +361,7 @@ mod tests {
     fn peek_with_empty_history_can_pick_any_first_move() {
         // The list ordering shouldn't affect which one gets picked
         // (sort + seed pin it).
-        let ids = curated_default_ids();
+        let ids = all_ids();
         let cursor_a = cursor_with(ids.clone(), 0xCAFE);
         let mut shuffled = ids.clone();
         shuffled.reverse();
@@ -380,7 +375,7 @@ mod tests {
 
     #[test]
     fn peek_is_deterministic_for_same_seed_and_history() {
-        let cursor = cursor_with(curated_default_ids(), 0xBEEF);
+        let cursor = cursor_with(all_ids(), 0xBEEF);
         let history = san_to_moves(&["e4"]);
         let a = cursor.peek(&history).expect("a");
         let b = cursor.peek(&history).expect("b");
@@ -394,7 +389,7 @@ mod tests {
         // represented), two seeds should be reasonably likely to land
         // on different first moves. Try a small spread; this is
         // statistical but the seed range is large.
-        let ids = curated_default_ids();
+        let ids = all_ids();
         let mut seen = std::collections::HashSet::new();
         for seed in 0u64..16 {
             let cursor = cursor_with(ids.clone(), seed);

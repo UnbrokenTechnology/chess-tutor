@@ -148,11 +148,13 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
     // pre-committed opening at game start: until the human plays,
     // an engine-playing-Black has no idea what opening will emerge,
     // and even an engine-playing-White might branch into several
-    // curated continuations depending on Black's response. The cursor
-    // gets dropped (set to None) when the bot first finds no matching
-    // book line — that's the cue to print "out of book" once, after
-    // which future bot turns silently skip the lookup.
-    let mut book_cursor = BookCursor::new(&cfg.opponent, &pos);
+    // theoretical continuations depending on Black's response.
+    //
+    // The cursor stays alive for the whole game; a separate flag
+    // dedupes the "out of book" announcement and gets reset on undo
+    // so the line re-prints if the user undoes and deviates again.
+    let book_cursor = BookCursor::new(&cfg.opponent, &pos);
+    let mut book_out_announced = false;
     if !cfg.opponent.eval_mask.is_empty() {
         let disabled: Vec<_> = cfg.opponent.eval_mask.disabled_iter().map(|c| c.slug()).collect();
         writeln!(out, "eval-mask: bot blind to {}", disabled.join(", "))?;
@@ -231,6 +233,9 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                 } else {
                     writeln!(out, "book: engine plays {san_text}")?;
                 }
+                // Re-arm the announcement — we might have re-entered
+                // book via undo and could deviate again later.
+                book_out_announced = false;
                 apply_move_and_scan(
                     &mut out,
                     &mut pos,
@@ -241,13 +246,13 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                 )?;
                 continue;
             }
-            // No book match at this position. If we still had a cursor
-            // (book was active for this game), announce the transition
-            // once and drop the cursor so future bot turns skip the
-            // walk silently.
-            if book_cursor.is_some() {
+            // No book match at this position. Announce once per
+            // out-of-book streak — *don't* drop the cursor itself,
+            // because an undo might bring us back into book territory
+            // and we need peek to keep working on the next bot turn.
+            if book_cursor.is_some() && !book_out_announced {
                 writeln!(out, "out of book — engine now plays from search.")?;
-                book_cursor = None;
+                book_out_announced = true;
             }
             play_engine_turn(
                 &mut out,
@@ -387,7 +392,10 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                     pending_trap = entry.pending_before;
                     // Book cursor doesn't need restore: it's stateless
                     // and rederives from the (now-rolled-back) history
-                    // on the next bot turn.
+                    // on the next bot turn. Re-arm the out-of-book
+                    // announcement so it re-prints if the user later
+                    // deviates again from this point.
+                    book_out_announced = false;
                     writeln!(out, "undid {}", entry.san)?;
                 }
                 None => writeln!(out, "nothing to undo.")?,
@@ -891,11 +899,11 @@ fn run_openings_command(
         "allow" => allow_openings(out, allowed, subarg),
         "deny" => deny_openings(out, allowed, subarg),
         "reset" => {
-            *allowed = BookSelection::Allowed(chess_tutor_engine::book::curated_default_ids());
+            *allowed = BookSelection::Allowed(chess_tutor_engine::book::all_ids());
             let count = allowed_count(allowed);
             writeln!(
                 out,
-                "openings: reset to curated default ({count} entries; effective next game).",
+                "openings: reset to all theoretical openings ({count} entries; effective next game).",
             )
         }
         "selected" => print_selected(out, pos),

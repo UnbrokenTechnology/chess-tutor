@@ -59,7 +59,7 @@ impl OpponentProfile {
     /// of code that must not touch the book.
     pub fn with_seed(seed: u64) -> Self {
         Self {
-            book: BookSelection::Allowed(crate::book::curated_default_ids()),
+            book: BookSelection::Allowed(crate::book::all_ids()),
             noise: NoiseProfile::default(),
             eval_mask: EvalMask::default(),
             seed,
