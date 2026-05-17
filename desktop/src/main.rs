@@ -1639,13 +1639,30 @@ fn draw_noise_controls(ui: &mut egui::Ui, noise: &mut NoiseProfile) {
             );
             ui.end_row();
 
-            ui.label("Blunder severity (cp):")
+            ui.label("Blunder min loss (cp):")
                 .on_hover_text(
-                    "Preferred minimum score gap (centipawns) a blunder should achieve. \
-                     In quiet positions where no line clears the gate, the bot falls back \
-                     to the worst engine-considered move so the position still degrades.",
+                    "Minimum loss (centipawns vs the engine's #1 move) for an \
+                     alternative to count as a blunder. 100 = ~one pawn-down move \
+                     the student can plausibly punish.",
                 );
-            ui.add(egui::Slider::new(&mut noise.blunder_severity_cp, 0..=500));
+            // Slider max tracks the upper threshold so the user can't accidentally
+            // set min > max with the controls.
+            let cur_max = noise.blunder_max_loss_cp.max(0);
+            ui.add(egui::Slider::new(&mut noise.blunder_min_loss_cp, 0..=cur_max.max(1)));
+            ui.end_row();
+
+            ui.label("Blunder max loss (cp):")
+                .on_hover_text(
+                    "Maximum loss (centipawns vs #1) for an alternative to count \
+                     as a blunder. Caps how catastrophic blunders can be — 400 = \
+                     about an exchange sacrifice, 900 = queen hangs. When no \
+                     alternative falls in the [min, max] band, the picker takes \
+                     the closest-loss line on each side of the band but excludes \
+                     distant outliers, so the bot won't hang a piece if a less-bad \
+                     alternative exists.",
+                );
+            let cur_min = noise.blunder_min_loss_cp.max(0);
+            ui.add(egui::Slider::new(&mut noise.blunder_max_loss_cp, cur_min..=2000));
             ui.end_row();
 
             ui.label("Wild move chance:")

@@ -104,23 +104,35 @@ pub struct NoiseProfile {
     /// `temperature_cp = 200` the same line weights `e^-0.25 ≈ 0.78`.
     pub temperature_cp: i32,
     /// Probability per move of deliberately dropping a "blunder" —
-    /// picking uniformly from lines that are at least
-    /// [`Self::blunder_severity_cp`] worse than #1. `0.0` (default)
-    /// disables the branch. Setting this > 0 widens the requested
-    /// MultiPV to [`BLUNDER_POOL_MIN`] so the engine surfaces enough
-    /// worse-than-best alternatives to sample from.
+    /// picking uniformly from lines whose score loss vs #1 falls in
+    /// the band `[blunder_min_loss_cp, blunder_max_loss_cp]`. `0.0`
+    /// (default) disables the branch. Setting this > 0 widens the
+    /// requested MultiPV to [`BLUNDER_POOL_MIN`] so the engine
+    /// surfaces enough worse-than-best alternatives to sample from.
     pub blunder_chance: f32,
-    /// Preferred minimum score gap (centipawns, from the bot's POV)
-    /// that a line should trail #1 by to be eligible as a blunder pick.
-    /// Default `100` cp — a clear pawn-down move the student can
-    /// plausibly recognise and punish.
+    /// Minimum loss (centipawns vs #1) for a line to count as "in
+    /// band" for the blunder picker. Default `100` cp — a clear
+    /// pawn-down move the student can plausibly recognise and punish.
+    pub blunder_min_loss_cp: i32,
+    /// Maximum loss (centipawns vs #1) for a line to count as "in
+    /// band". Default `400` cp — caps blunders at roughly an exchange
+    /// sacrifice, which prevents the cheesy "bot hangs its queen for
+    /// no reason" outcome that broke immersion at higher blunder
+    /// rates. Raise to allow more catastrophic blunders (~900 for
+    /// queen hangs, [`i32::MAX`] for unbounded).
     ///
-    /// This is a *preference*, not a hard floor: if a roll fires but
-    /// no line meets the gap (quiet positions where the top-6 are all
-    /// roughly equal), the picker falls back to the worst engine-
-    /// considered move rather than the engine's best. See
-    /// [`crate::noise`] module docs for why.
-    pub blunder_severity_cp: i32,
+    /// The two thresholds define a **preference band**, not a hard
+    /// filter. If a roll fires but no line falls inside the band
+    /// (every alternative is either too good or too bad), the picker
+    /// pools the line(s) closest to the band from below (loss <
+    /// min, i.e. moves that aren't blundery enough) with the line(s)
+    /// closest from above (loss > max, i.e. moves that are too
+    /// catastrophic) and picks uniformly from that pool. Lines
+    /// further from the band on either side are excluded — that's
+    /// the load-bearing property that lets a bot do "small blunders
+    /// only" without throwing away a piece when the only sub-band
+    /// alternative is a piece sacrifice.
+    pub blunder_max_loss_cp: i32,
     /// Smallest mate the bot is **guaranteed** to play through —
     /// blunders are suppressed when `lines[0]` is a mate-in-N for
     /// `N <= guaranteed_mate_in`. Default `1`: mate-in-1 is never
@@ -153,7 +165,8 @@ impl Default for NoiseProfile {
             candidate_pool: 1,
             temperature_cp: 0,
             blunder_chance: 0.0,
-            blunder_severity_cp: 100,
+            blunder_min_loss_cp: 100,
+            blunder_max_loss_cp: 400,
             guaranteed_mate_in: 1,
             wild_chance: 0.0,
         }

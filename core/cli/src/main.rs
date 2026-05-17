@@ -333,11 +333,19 @@ enum Command {
         /// widens to surface enough worse-than-best alternatives.
         #[arg(long = "blunder-chance", value_name = "P", default_value_t = 0.0)]
         blunder_chance: f32,
-        /// Minimum score gap (centipawns) a candidate must trail #1 by
-        /// to qualify as a blunder. Default 100 — a clear pawn-down
-        /// move the student can plausibly punish.
-        #[arg(long = "blunder-severity", value_name = "CP", default_value_t = 100)]
-        blunder_severity: i32,
+        /// Minimum loss (centipawns vs #1) for an alternative line to
+        /// count as "in band" for the blunder picker. Default 100 — a
+        /// clear pawn-down move the student can plausibly punish.
+        #[arg(long = "blunder-min-loss", value_name = "CP", default_value_t = 100)]
+        blunder_min_loss: i32,
+        /// Maximum loss (centipawns vs #1) for an alternative line to
+        /// count as "in band". Default 400 — caps blunders at roughly
+        /// an exchange sacrifice; raise to allow more catastrophic
+        /// blunders (~900 for queen hangs). When the band is empty
+        /// the picker falls back to the closest-loss lines on each
+        /// side of the band but excludes distant outliers.
+        #[arg(long = "blunder-max-loss", value_name = "CP", default_value_t = 400)]
+        blunder_max_loss: i32,
         /// Smallest mate the bot is guaranteed to convert — blunders
         /// are suppressed when `lines[0]` is a mate-in-N for
         /// `N <= guaranteed_mate_in`. Default 1 (mate-in-1 is never
@@ -602,7 +610,8 @@ fn main() -> Result<()> {
             noise_pool,
             noise_temp,
             blunder_chance,
-            blunder_severity,
+            blunder_min_loss,
+            blunder_max_loss,
             guaranteed_mate_in,
             wild_chance,
         } => {
@@ -634,11 +643,17 @@ fn main() -> Result<()> {
             if noise_pool == 0 {
                 anyhow::bail!("--noise-pool must be at least 1");
             }
+            if blunder_min_loss < 0 || blunder_max_loss < blunder_min_loss {
+                anyhow::bail!(
+                    "--blunder-min-loss / --blunder-max-loss must be 0 <= min <= max (got min={blunder_min_loss}, max={blunder_max_loss})",
+                );
+            }
             opponent.noise = chess_tutor_engine::opponent::NoiseProfile {
                 candidate_pool: noise_pool,
                 temperature_cp: noise_temp,
                 blunder_chance,
-                blunder_severity_cp: blunder_severity,
+                blunder_min_loss_cp: blunder_min_loss,
+                blunder_max_loss_cp: blunder_max_loss,
                 guaranteed_mate_in,
                 wild_chance,
             };

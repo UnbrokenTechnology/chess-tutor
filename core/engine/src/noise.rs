@@ -6,17 +6,23 @@
 //! sampler has three independent branches, evaluated in this order:
 //!
 //! 1. **Blunder branch** (when [`NoiseProfile::blunder_chance`] > 0):
-//!    drop a deliberately worse engine-considered line — pick uniformly
-//!    from candidates that trail #1 by at least
-//!    [`NoiseProfile::blunder_severity_cp`]. If no line clears the
-//!    severity gate (e.g. quiet position where the top-6 are all
-//!    within 50 cp of each other), fall back to `lines.last()` — the
-//!    worst engine-considered move. This is deliberate: a weakened
-//!    bot whose blunder roll fires should produce a worse move *even
-//!    if subtle*, so its position gradually degrades and the student
-//!    can build a win, rather than mysteriously snapping back to
-//!    perfect play in tactically-quiet positions. Mate-guarded by
-//!    [`NoiseProfile::guaranteed_mate_in`].
+//!    drop a deliberately worse engine-considered line. The picker
+//!    prefers lines whose score loss vs #1 falls inside the
+//!    `[blunder_min_loss_cp, blunder_max_loss_cp]` band — uniform
+//!    pick from those when at least one qualifies.
+//!
+//!    When no line falls in the band (every alternative is either
+//!    "not blundery enough" or "too catastrophic"), the picker
+//!    pools the line(s) with the largest loss strictly below the
+//!    band's lower edge with the line(s) with the smallest loss
+//!    strictly above the band's upper edge, and picks uniformly
+//!    from the combined pool. **Lines further from the band on
+//!    either side are excluded** — that's the load-bearing
+//!    property that lets a bot do "small blunders only" without
+//!    throwing away a queen when the only sub-band alternative is
+//!    a piece sacrifice. See [`blunder_pool`].
+//!
+//!    Mate-guarded by [`NoiseProfile::guaranteed_mate_in`].
 //!
 //! 2. **Wild branch** (when [`NoiseProfile::wild_chance`] > 0): with
 //!    that per-move probability, pick uniformly from **all legal
@@ -101,29 +107,28 @@ pub fn pick(
 
     let mut rng = mix(seed, ply);
 
-    // Blunder branch: pick from engine-considered lines worse than #1.
-    // Skipped when there's nothing to choose from (single line) or the
-    // bot has a forced mate the user asked us to convert.
+    // Blunder branch: pick from engine-considered lines whose loss
+    // vs #1 falls in the configured band. Skipped when there's
+    // nothing to choose from (single line) or the bot has a forced
+    // mate the user asked us to convert.
     if noise.blunder_chance > 0.0 && !mate_guard && lines.len() > 1 {
         let (roll, next) = roll_unit(rng);
         rng = next;
         if roll < noise.blunder_chance as f64 {
-            let qualifying: Vec<usize> = lines
-                .iter()
-                .enumerate()
-                .skip(1)
-                .filter(|(_, l)| score_delta_cp(top_score, l.score) >= noise.blunder_severity_cp)
-                .map(|(i, _)| i)
-                .collect();
-            let idx = if qualifying.is_empty() {
-                // No line cleared the severity gate — fall back to the
-                // worst engine-considered move. See module-level docs
-                // for why this is preferable to falling through to #1
-                // (gradual position decline > mysteriously perfect
-                // moves in quiet positions).
+            let pool = blunder_pool(
+                lines,
+                top_score,
+                noise.blunder_min_loss_cp,
+                noise.blunder_max_loss_cp,
+            );
+            // pool can only be empty if lines.len() == 1, which the
+            // outer guard already excluded. Defensive fallback to
+            // worst-available so we never panic if the invariant
+            // changes.
+            let idx = if pool.is_empty() {
                 lines.len() - 1
             } else {
-                qualifying[(rng as usize) % qualifying.len()]
+                pool[(rng as usize) % pool.len()]
             };
             return NoisePick::Blunder(idx);
         }
@@ -180,10 +185,68 @@ fn roll_unit(rng: u64) -> (f64, u64) {
 
 /// Score gap (in centipawns) of `other` behind `top`, clamped at 0.
 /// Mate scores are huge — non-mate alternatives to a winning mate
-/// will exceed any realistic `blunder_severity_cp`, so the blunder
+/// will exceed any realistic blunder loss band, so the blunder
 /// branch's mate-guard runs separately.
 fn score_delta_cp(top: Value, other: Value) -> i32 {
     (top.0 - other.0).max(0)
+}
+
+/// Build the blunder candidate pool for `lines` given the
+/// `[min_loss, max_loss]` preference band:
+///
+/// - **In-band lines** (loss in `[min_loss, max_loss]`): preferred,
+///   returned as-is and the caller picks uniformly from them.
+/// - **No in-band lines**: pool together the lines with the largest
+///   loss strictly below `min_loss` (the most-blundery of the
+///   "not-blundery-enough" group) and the lines with the smallest
+///   loss strictly above `max_loss` (the least-catastrophic of the
+///   "too-catastrophic" group). Both sets are kept (with ties
+///   included) so the caller can pick uniformly across them.
+///
+/// The two-sided fallback is the load-bearing property: if the
+/// upper band were a hard ceiling, the picker would have nothing
+/// to do in positions where every non-best move is a piece sacrifice.
+/// By admitting the *least* sacrificial of those moves into the
+/// pool, the bot can still register a "blunder roll" while never
+/// throwing away a piece if a less-bad option exists.
+fn blunder_pool(
+    lines: &[SearchLine],
+    top_score: Value,
+    min_loss: i32,
+    max_loss: i32,
+) -> Vec<usize> {
+    let mut in_band: Vec<usize> = Vec::new();
+    let mut best_below_loss: Option<i32> = None; // largest loss strictly < min_loss
+    let mut best_above_loss: Option<i32> = None; // smallest loss strictly > max_loss
+    for (i, line) in lines.iter().enumerate().skip(1) {
+        let loss = score_delta_cp(top_score, line.score);
+        if loss >= min_loss && loss <= max_loss {
+            in_band.push(i);
+        } else if loss < min_loss {
+            best_below_loss = Some(match best_below_loss {
+                Some(prev) => prev.max(loss),
+                None => loss,
+            });
+        } else {
+            best_above_loss = Some(match best_above_loss {
+                Some(prev) => prev.min(loss),
+                None => loss,
+            });
+        }
+    }
+    if !in_band.is_empty() {
+        return in_band;
+    }
+    // Empty band — gather the tie-classes closest to the band on each
+    // side. Lines further from the band on either side are excluded.
+    let mut pool: Vec<usize> = Vec::new();
+    for (i, line) in lines.iter().enumerate().skip(1) {
+        let loss = score_delta_cp(top_score, line.score);
+        if Some(loss) == best_below_loss || Some(loss) == best_above_loss {
+            pool.push(i);
+        }
+    }
+    pool
 }
 
 /// True when `top` is a mate-in-N score with `N <= guaranteed_mate_in`.
@@ -371,37 +434,40 @@ mod tests {
     }
 
     #[test]
-    fn blunder_with_no_qualifying_candidate_picks_worst_available() {
-        // No line clears the 100 cp severity gate. Per the module-level
-        // docs, the blunder branch falls back to `lines.last()` — the
-        // worst engine-considered move — rather than playing #1. This
-        // is the "gradual decline" property: a weakened bot whose
-        // blunder roll fires should still produce a worse move in
-        // quiet positions, even if the mistake is too subtle for the
-        // student to spot, so the position deteriorates over time.
+    fn blunder_with_no_in_band_lines_picks_closest_below() {
+        // No line falls in the band [100, INF]. The fallback pool is
+        // the line(s) with the largest loss strictly below the band's
+        // lower edge — here that's idx 3 (loss=90). The bot picks
+        // there rather than playing #1, preserving the "gradual
+        // decline" property in quiet positions where no real blunder
+        // is available.
         let noise = NoiseProfile {
             candidate_pool: 1,
             blunder_chance: 1.0,
-            blunder_severity_cp: 100,
+            blunder_min_loss_cp: 100,
+            blunder_max_loss_cp: i32::MAX,
             ..Default::default()
         };
         let lines = vec![line(0), line(-10), line(-50), line(-90)];
-        let worst = lines.len() - 1;
         for ply in 0..20 {
             assert_eq!(
                 pick(&noise, 0xABCD, ply, &lines, &[]),
-                NoisePick::Blunder(worst),
-                "blunder should fall back to worst-available, not #1",
+                NoisePick::Blunder(3),
+                "fallback should pick the largest sub-band loss (idx 3, -90)",
             );
         }
     }
 
     #[test]
-    fn blunder_picks_only_qualifying_lines() {
+    fn blunder_picks_only_in_band_lines_when_some_qualify() {
+        // Band [100, INF] with losses 50, 99, 100, 300: in-band set
+        // is {idx 3 (loss=100), idx 4 (loss=300)}. The picker must
+        // never pick #1 or the sub-band lines (50, 99).
         let noise = NoiseProfile {
             candidate_pool: 1,
             blunder_chance: 1.0,
-            blunder_severity_cp: 100,
+            blunder_min_loss_cp: 100,
+            blunder_max_loss_cp: i32::MAX,
             guaranteed_mate_in: 0,
             ..Default::default()
         };
@@ -410,7 +476,7 @@ mod tests {
             match pick(&noise, 0x1234, ply, &lines, &[]) {
                 NoisePick::Blunder(idx) => assert!(
                     idx == 3 || idx == 4,
-                    "blunder picked outside qualifying set: {idx}",
+                    "blunder picked outside in-band set: {idx}",
                 ),
                 NoisePick::Line(idx) => panic!(
                     "blunder branch should fire (chance=1.0), got Line({idx})",
@@ -421,11 +487,124 @@ mod tests {
     }
 
     #[test]
+    fn blunder_band_excludes_too_catastrophic() {
+        // The whole point of the upper band: with max=400, an alt
+        // line at loss=1000 (queen-hang territory) must never be
+        // picked when a 200-cp option exists. Band = [100, 400];
+        // in-band set = {idx 2 (loss=200)}; the loss=1000 line is
+        // excluded.
+        let noise = NoiseProfile {
+            candidate_pool: 1,
+            blunder_chance: 1.0,
+            blunder_min_loss_cp: 100,
+            blunder_max_loss_cp: 400,
+            guaranteed_mate_in: 0,
+            ..Default::default()
+        };
+        let lines = vec![line(0), line(-50), line(-200), line(-1000)];
+        for ply in 0..50 {
+            assert_eq!(
+                pick(&noise, 0xCAFE, ply, &lines, &[]),
+                NoisePick::Blunder(2),
+                "should only pick the in-band move (idx 2, -200)",
+            );
+        }
+    }
+
+    #[test]
+    fn blunder_band_fallback_pools_closest_on_each_side() {
+        // Band [50, 100] with losses 10, 30, 110, 240: in-band is
+        // empty. Closest-below (largest loss < 50) is idx 2 (loss=30).
+        // Closest-above (smallest loss > 100) is idx 3 (loss=110).
+        // The 240-cp line is excluded because 110 is closer to the
+        // band from above. Pool = {idx 2, idx 3}; pick must be one
+        // of those.
+        let noise = NoiseProfile {
+            candidate_pool: 1,
+            blunder_chance: 1.0,
+            blunder_min_loss_cp: 50,
+            blunder_max_loss_cp: 100,
+            guaranteed_mate_in: 0,
+            ..Default::default()
+        };
+        let lines = vec![line(0), line(-10), line(-30), line(-110), line(-240)];
+        let mut seen_below = 0;
+        let mut seen_above = 0;
+        for ply in 0..200 {
+            match pick(&noise, 0xBEEF, ply, &lines, &[]) {
+                NoisePick::Blunder(2) => seen_below += 1,
+                NoisePick::Blunder(3) => seen_above += 1,
+                NoisePick::Blunder(idx) => panic!(
+                    "fallback picked outside the closest-on-each-side pool: {idx}",
+                ),
+                other => panic!("non-blunder pick: {other:?}"),
+            }
+        }
+        assert!(seen_below > 0, "closest-below tier never picked");
+        assert!(seen_above > 0, "closest-above tier never picked");
+    }
+
+    #[test]
+    fn blunder_band_fallback_with_only_above_band_lines() {
+        // No in-band, no below-band — every line is catastrophic
+        // (e.g. forced position where any deviation loses heavily).
+        // The pool collapses to the smallest above-band loss; the bot
+        // takes the least-bad of the bad options.
+        let noise = NoiseProfile {
+            candidate_pool: 1,
+            blunder_chance: 1.0,
+            blunder_min_loss_cp: 100,
+            blunder_max_loss_cp: 300,
+            guaranteed_mate_in: 0,
+            ..Default::default()
+        };
+        // Losses: 500, 800, 1200 — all > max=300.
+        let lines = vec![line(0), line(-500), line(-800), line(-1200)];
+        for ply in 0..30 {
+            assert_eq!(
+                pick(&noise, 0xFACE, ply, &lines, &[]),
+                NoisePick::Blunder(1),
+                "should pick the least-catastrophic above-band line (idx 1, -500)",
+            );
+        }
+    }
+
+    #[test]
+    fn blunder_band_fallback_includes_tied_losses() {
+        // Two lines at the same closest-below loss should both be
+        // in the fallback pool — ties are kept rather than the picker
+        // arbitrarily favouring one.
+        let noise = NoiseProfile {
+            candidate_pool: 1,
+            blunder_chance: 1.0,
+            blunder_min_loss_cp: 200,
+            blunder_max_loss_cp: 400,
+            guaranteed_mate_in: 0,
+            ..Default::default()
+        };
+        // Losses: 50, 100, 100 — in-band empty; closest-below = 100
+        // (tied at idx 2 and idx 3). Pool = {2, 3}.
+        let lines = vec![line(0), line(-50), line(-100), line(-100)];
+        let mut seen = [0usize; 4];
+        for ply in 0..200 {
+            match pick(&noise, 0xDEAD, ply, &lines, &[]) {
+                NoisePick::Blunder(idx) => {
+                    assert!(idx == 2 || idx == 3, "out-of-pool pick: {idx}");
+                    seen[idx] += 1;
+                }
+                other => panic!("non-blunder pick: {other:?}"),
+            }
+        }
+        assert!(seen[2] > 0 && seen[3] > 0, "tied losses must both be reachable: {seen:?}");
+    }
+
+    #[test]
     fn blunder_suppressed_when_mate_guarded() {
         let noise = NoiseProfile {
             candidate_pool: 1,
             blunder_chance: 1.0,
-            blunder_severity_cp: 100,
+            blunder_min_loss_cp: 100,
+            blunder_max_loss_cp: i32::MAX,
             guaranteed_mate_in: 3,
             ..Default::default()
         };
@@ -441,7 +620,8 @@ mod tests {
         let noise = NoiseProfile {
             candidate_pool: 1,
             blunder_chance: 1.0,
-            blunder_severity_cp: 100,
+            blunder_min_loss_cp: 100,
+            blunder_max_loss_cp: i32::MAX,
             guaranteed_mate_in: 3,
             ..Default::default()
         };
@@ -462,7 +642,8 @@ mod tests {
         let noise = NoiseProfile {
             candidate_pool: 1,
             blunder_chance: 1.0,
-            blunder_severity_cp: 100,
+            blunder_min_loss_cp: 100,
+            blunder_max_loss_cp: i32::MAX,
             guaranteed_mate_in: 0,
             ..Default::default()
         };
@@ -483,7 +664,8 @@ mod tests {
         let noise = NoiseProfile {
             candidate_pool: 1,
             blunder_chance: 1.0,
-            blunder_severity_cp: 100,
+            blunder_min_loss_cp: 100,
+            blunder_max_loss_cp: i32::MAX,
             guaranteed_mate_in: 5,
             ..Default::default()
         };
@@ -508,7 +690,8 @@ mod tests {
             candidate_pool: 4,
             temperature_cp: 200,
             blunder_chance: 0.3,
-            blunder_severity_cp: 80,
+            blunder_min_loss_cp: 80,
+            blunder_max_loss_cp: i32::MAX,
             guaranteed_mate_in: 1,
             wild_chance: 0.1,
         };

@@ -1075,12 +1075,18 @@ fn format_noise_summary(n: &NoiseProfile) -> String {
     if n.is_off() {
         return "off (bot always plays #1)".to_string();
     }
+    let max_label = if n.blunder_max_loss_cp >= i32::MAX / 2 {
+        "∞".to_string()
+    } else {
+        format!("{}cp", n.blunder_max_loss_cp)
+    };
     format!(
-        "pool={} temp={} cp · blunder={:.0}% (severity {}cp) · wild={:.0}% · guaranteed mate-in {}",
+        "pool={} temp={} cp · blunder={:.0}% (loss band {}cp–{}) · wild={:.0}% · guaranteed mate-in {}",
         n.candidate_pool,
         n.temperature_cp,
         n.blunder_chance * 100.0,
-        n.blunder_severity_cp,
+        n.blunder_min_loss_cp,
+        max_label,
         n.wild_chance * 100.0,
         n.guaranteed_mate_in,
     )
@@ -1134,12 +1140,27 @@ fn run_noise_command(
             }
             _ => writeln!(out, "usage: noise wild <0.0-1.0>"),
         },
-        "severity" => match subarg.parse::<i32>() {
-            Ok(cp) if cp >= 0 => {
-                noise.blunder_severity_cp = cp;
-                writeln!(out, "noise: blunder severity set to {cp} cp.")
+        "min-loss" | "min_loss" => match subarg.parse::<i32>() {
+            Ok(cp) if cp >= 0 && cp <= noise.blunder_max_loss_cp => {
+                noise.blunder_min_loss_cp = cp;
+                writeln!(out, "noise: blunder min-loss set to {cp} cp.")
             }
-            _ => writeln!(out, "usage: noise severity <non-negative centipawns>"),
+            _ => writeln!(
+                out,
+                "usage: noise min-loss <0..= current max-loss ({} cp)>",
+                noise.blunder_max_loss_cp,
+            ),
+        },
+        "max-loss" | "max_loss" => match subarg.parse::<i32>() {
+            Ok(cp) if cp >= noise.blunder_min_loss_cp => {
+                noise.blunder_max_loss_cp = cp;
+                writeln!(out, "noise: blunder max-loss set to {cp} cp.")
+            }
+            _ => writeln!(
+                out,
+                "usage: noise max-loss <≥ current min-loss ({} cp)>",
+                noise.blunder_min_loss_cp,
+            ),
         },
         "guarantee" => match subarg.parse::<u32>() {
             Ok(n) => {
@@ -1154,7 +1175,7 @@ fn run_noise_command(
         }
         other => writeln!(
             out,
-            "unknown noise subcommand {other:?} — try: show | pool N | temp CP | blunder F | severity CP | wild F | guarantee N | reset",
+            "unknown noise subcommand {other:?} — try: show | pool N | temp CP | blunder F | min-loss CP | max-loss CP | wild F | guarantee N | reset",
         ),
     }
 }
