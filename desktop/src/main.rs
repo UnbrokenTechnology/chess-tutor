@@ -126,12 +126,19 @@ enum NoisePickInfo {
         delta_from_top_cp: i32,
     },
     /// Blunder branch fired — picked a deliberately worse line.
-    /// `pick_idx` is always `>= 1`; either a qualifying line or the
-    /// worst-available fallback when no line cleared the severity gap.
+    /// `pick_idx` is always `>= 1`; either an in-band line or one
+    /// from the closest-on-each-side fallback pool.
     Blunder {
         pick_idx: usize,
         num_lines: usize,
         delta_from_top_cp: i32,
+    },
+    /// Blunder roll fired but no plausible alternative was available
+    /// within the tolerance cap — bot played best instead. Logged so
+    /// the user can see when the configured rate is being
+    /// under-delivered.
+    BlunderSkipped {
+        closest_above_loss_cp: i32,
     },
     /// Wild branch fired — bot played `mv`; the engine's preferred
     /// move was `engine_top`. The two may coincidentally match.
@@ -197,6 +204,18 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                             pick_idx: idx,
                             num_lines: lines.len(),
                             delta_from_top_cp: l.score.0 - lines[0].score.0,
+                        });
+                        (mv, line, info)
+                    }
+                    NoisePick::BlunderSkipped { closest_above_loss_cp } => {
+                        // Roll fired but no plausible alternative
+                        // was available. Play #1, report the skip
+                        // so the user sees their configured rate is
+                        // being slightly under-delivered.
+                        let line = lines.first().cloned();
+                        let mv = line.as_ref().and_then(|l| l.pv.first().copied());
+                        let info = Some(NoisePickInfo::BlunderSkipped {
+                            closest_above_loss_cp,
                         });
                         (mv, line, info)
                     }
@@ -895,6 +914,18 @@ impl App {
                             eprintln!(
                                 "noise: blunder picked #{} of {} ({:+} cp from #1)",
                                 pick_idx + 1, num_lines, delta_from_top_cp,
+                            );
+                        }
+                        NoisePickInfo::BlunderSkipped { closest_above_loss_cp } => {
+                            let cap = (self.opponent.noise.blunder_max_loss_cp as f32
+                                * chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE)
+                                as i32;
+                            eprintln!(
+                                "noise: blunder roll fired but closest plausible alternative \
+                                 was -{closest_above_loss_cp} cp (exceeds {}× max-loss = {} cp \
+                                 cap); bot plays best.",
+                                chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE,
+                                cap,
                             );
                         }
                         NoisePickInfo::Wild { engine_top, engine_top_score } => {

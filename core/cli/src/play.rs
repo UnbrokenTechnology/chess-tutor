@@ -630,6 +630,26 @@ fn play_engine_turn(
             );
             (mv, format_score(line.score), tag)
         }
+        NoisePick::BlunderSkipped { closest_above_loss_cp } => {
+            // Blunder roll fired but no plausible alternative — log
+            // and play best.
+            let line = &lines[0];
+            let Some(&mv) = line.pv.first() else {
+                writeln!(out, "(search returned empty pv)")?;
+                return Ok(());
+            };
+            let cap = (cfg.opponent.noise.blunder_max_loss_cp as f32
+                * chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE)
+                as i32;
+            writeln!(
+                out,
+                "noise: blunder roll fired but closest alternative was -{closest_above_loss_cp} cp \
+                 (exceeds {}× max-loss = {} cp cap); bot plays best.",
+                chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE,
+                cap,
+            )?;
+            (mv, format_score(line.score), String::new())
+        }
         NoisePick::Wild(mv) => {
             // Wild bypassed the engine's ranking. There's no score for
             // the wild move (we didn't search it), so the score column

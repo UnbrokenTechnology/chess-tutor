@@ -75,14 +75,35 @@ pub enum NoisePick {
     /// means the softmax branch sampled this slot.
     Line(usize),
     /// Blunder branch fired: take `lines[idx].pv[0]`. `idx` is always
-    /// `>= 1` (blunder never picks #1) — either a qualifying line
-    /// that cleared the severity gate, or `lines.len() - 1` as the
-    /// worst-available fallback when no line qualified.
+    /// `>= 1` (blunder never picks #1) — either an in-band line or
+    /// one in the closest-on-each-side fallback pool.
     Blunder(usize),
+    /// Blunder roll fired but the available alternatives were all
+    /// catastrophically worse than the configured band — see
+    /// [`BLUNDER_FALLBACK_TOLERANCE`]. The caller should play
+    /// `lines[0].pv[0]` (best) and SHOULD log this so the user knows
+    /// the configured rate is being slightly under-delivered.
+    /// `closest_above_loss_cp` is the smallest loss that was rejected;
+    /// caller composes the log around it.
+    BlunderSkipped { closest_above_loss_cp: i32 },
     /// Wild branch fired: play this legal move directly, bypassing
     /// the engine ranking entirely.
     Wild(Move),
 }
+
+/// Above-band fallback tolerance multiplier. The closest-loss line
+/// above `blunder_max_loss_cp` is admitted to the fallback pool only
+/// when its loss is at most `max_loss × this`. Beyond that, the
+/// position is deemed "no calibrated blunder available" and the
+/// blunder roll is skipped (caller plays best). 2.0× means a bot
+/// configured for [50, 100] cp blunders will accept up to 200 cp of
+/// fallback slack; a bot configured for [100, 400] cp blunders will
+/// accept up to 800 cp. The point of the cap is to prevent the bot
+/// from gifting catastrophic blunders (e.g. hanging a queen for no
+/// reason because the only non-#1 line happened to lose 2000 cp) in
+/// positions where the engine's best is much stronger than every
+/// alternative.
+pub const BLUNDER_FALLBACK_TOLERANCE: f32 = 2.0;
 
 /// Decide what move the bot actually plays. See module docs for the
 /// branch order and semantics.
@@ -120,16 +141,25 @@ pub fn pick(
                 top_score,
                 noise.blunder_min_loss_cp,
                 noise.blunder_max_loss_cp,
+                BLUNDER_FALLBACK_TOLERANCE,
             );
-            // pool can only be empty if lines.len() == 1, which the
-            // outer guard already excluded. Defensive fallback to
-            // worst-available so we never panic if the invariant
-            // changes.
-            let idx = if pool.is_empty() {
-                lines.len() - 1
-            } else {
-                pool[(rng as usize) % pool.len()]
-            };
+            if pool.indices.is_empty() {
+                // Pool empty after the tolerance cap. Two sub-cases:
+                // - excluded_above_loss = Some: there *was* an above-
+                //   tier candidate but it was rejected (catastrophic).
+                //   Tell the caller so it can log "skipped because the
+                //   only available blunder was -X cp."
+                // - excluded_above_loss = None: no above tier at all
+                //   AND no below tier — only possible if lines.len()
+                //   was 1, which the outer guard already excluded.
+                //   Defensive fall-through to BlunderSkipped with 0,
+                //   though this branch shouldn't be reachable.
+                let rejected = pool.excluded_above_loss.unwrap_or(0);
+                return NoisePick::BlunderSkipped {
+                    closest_above_loss_cp: rejected,
+                };
+            }
+            let idx = pool.indices[(rng as usize) % pool.indices.len()];
             return NoisePick::Blunder(idx);
         }
     }
@@ -191,6 +221,17 @@ fn score_delta_cp(top: Value, other: Value) -> i32 {
     (top.0 - other.0).max(0)
 }
 
+/// Result of [`blunder_pool`]. `indices` are the lines the picker
+/// should sample from; `excluded_above_loss` is the smallest above-
+/// band loss when the fallback-tolerance cap rejected the above tier.
+/// The caller uses `excluded_above_loss` to render a useful "blunder
+/// skipped" log when `indices` ends up empty (no plausible below side
+/// either).
+pub struct BlunderPool {
+    pub indices: Vec<usize>,
+    pub excluded_above_loss: Option<i32>,
+}
+
 /// Build the blunder candidate pool for `lines` given the
 /// `[min_loss, max_loss]` preference band:
 ///
@@ -203,18 +244,28 @@ fn score_delta_cp(top: Value, other: Value) -> i32 {
 ///   "too-catastrophic" group). Both sets are kept (with ties
 ///   included) so the caller can pick uniformly across them.
 ///
-/// The two-sided fallback is the load-bearing property: if the
-/// upper band were a hard ceiling, the picker would have nothing
-/// to do in positions where every non-best move is a piece sacrifice.
-/// By admitting the *least* sacrificial of those moves into the
-/// pool, the bot can still register a "blunder roll" while never
-/// throwing away a piece if a less-bad option exists.
-fn blunder_pool(
+/// **Above-band tolerance cap.** The above tier is admitted only if
+/// its loss is `<= max_loss × fallback_tolerance`. Without that cap,
+/// a position where every non-#1 line was catastrophically bad (e.g.
+/// the engine sees a forcing tactic and every alternative loses
+/// 20+ pawns) would have the picker happily take the 20-pawn drop —
+/// blowing the configured "small blunders only" intent. When the
+/// above tier is rejected, [`BlunderPool::excluded_above_loss`]
+/// carries the rejected loss so the caller can log the skip.
+///
+/// The two-sided fallback is the load-bearing property: if the upper
+/// band were a hard ceiling, the picker would have nothing to do in
+/// positions where every non-best move is a piece sacrifice. By
+/// admitting the *least* sacrificial of those moves (within the
+/// tolerance cap), the bot can still register a "blunder roll" while
+/// never throwing away a piece if a less-bad option exists.
+pub fn blunder_pool(
     lines: &[SearchLine],
     top_score: Value,
     min_loss: i32,
     max_loss: i32,
-) -> Vec<usize> {
+    fallback_tolerance: f32,
+) -> BlunderPool {
     let mut in_band: Vec<usize> = Vec::new();
     let mut best_below_loss: Option<i32> = None; // largest loss strictly < min_loss
     let mut best_above_loss: Option<i32> = None; // smallest loss strictly > max_loss
@@ -235,18 +286,29 @@ fn blunder_pool(
         }
     }
     if !in_band.is_empty() {
-        return in_band;
+        return BlunderPool {
+            indices: in_band,
+            excluded_above_loss: None,
+        };
     }
-    // Empty band — gather the tie-classes closest to the band on each
-    // side. Lines further from the band on either side are excluded.
+    // Empty band — apply the above-tolerance cap.
+    let above_cap = (max_loss as f32 * fallback_tolerance) as i32;
+    let above_loss_admitted = best_above_loss.filter(|&loss| loss <= above_cap);
+    let excluded_above_loss = match (best_above_loss, above_loss_admitted) {
+        (Some(loss), None) => Some(loss), // existed but was capped out
+        _ => None,
+    };
     let mut pool: Vec<usize> = Vec::new();
     for (i, line) in lines.iter().enumerate().skip(1) {
         let loss = score_delta_cp(top_score, line.score);
-        if Some(loss) == best_below_loss || Some(loss) == best_above_loss {
+        if Some(loss) == best_below_loss || Some(loss) == above_loss_admitted {
             pool.push(i);
         }
     }
-    pool
+    BlunderPool {
+        indices: pool,
+        excluded_above_loss,
+    }
 }
 
 /// True when `top` is a mate-in-N score with `N <= guaranteed_mate_in`.
@@ -481,6 +543,9 @@ mod tests {
                 NoisePick::Line(idx) => panic!(
                     "blunder branch should fire (chance=1.0), got Line({idx})",
                 ),
+                NoisePick::BlunderSkipped { .. } => panic!(
+                    "in-band set is non-empty; should never skip",
+                ),
                 NoisePick::Wild(_) => panic!("wild fired without wild_chance > 0"),
             }
         }
@@ -542,6 +607,88 @@ mod tests {
         }
         assert!(seen_below > 0, "closest-below tier never picked");
         assert!(seen_above > 0, "closest-above tier never picked");
+    }
+
+    #[test]
+    fn blunder_skipped_when_only_alternative_is_catastrophic() {
+        // The motivating case for BLUNDER_FALLBACK_TOLERANCE: in a
+        // forcing position the engine's #1 may be much stronger than
+        // every alternative (e.g. found a tactic, every other move
+        // loses 20+ pawns). The old code happily picked the 20-pawn
+        // drop because "the closest above-band line wins by default."
+        // The new behaviour skips the blunder entirely so the bot
+        // plays its best move and the configured rate is slightly
+        // under-delivered rather than producing absurd play.
+        let noise = NoiseProfile {
+            candidate_pool: 1,
+            blunder_chance: 1.0,
+            blunder_min_loss_cp: 50,
+            blunder_max_loss_cp: 100,
+            guaranteed_mate_in: 0,
+            ..Default::default()
+        };
+        // Tolerance 2.0× → above cap is 200 cp. All alts (2156, etc.)
+        // exceed that → no fallback admitted → skip.
+        let lines = vec![line(0), line(-2156), line(-2300), line(-3000)];
+        for ply in 0..30 {
+            match pick(&noise, 0xCAFE, ply, &lines, &[]) {
+                NoisePick::BlunderSkipped { closest_above_loss_cp } => {
+                    assert_eq!(
+                        closest_above_loss_cp, 2156,
+                        "skipped pick should report the closest rejected loss",
+                    );
+                }
+                other => panic!(
+                    "with no plausible alternative and no below tier the picker must \
+                     skip; got {other:?}",
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn blunder_fallback_admits_above_within_tolerance() {
+        // Above-tier loss 180 cp; cap = 2.0 × 100 = 200. Admitted.
+        let noise = NoiseProfile {
+            candidate_pool: 1,
+            blunder_chance: 1.0,
+            blunder_min_loss_cp: 50,
+            blunder_max_loss_cp: 100,
+            guaranteed_mate_in: 0,
+            ..Default::default()
+        };
+        let lines = vec![line(0), line(-180), line(-500)];
+        for ply in 0..30 {
+            match pick(&noise, 0xCAFE, ply, &lines, &[]) {
+                NoisePick::Blunder(1) => {} // expected
+                other => panic!("admitted above tier should be picked: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn blunder_fallback_below_works_even_when_above_capped() {
+        // Tight band [50, 100]. Alts: 30 (below), 1500 (above, way
+        // over cap). Cap rejects 1500; pool = {idx 1 (loss=30)}.
+        // Subtle decline path still works.
+        let noise = NoiseProfile {
+            candidate_pool: 1,
+            blunder_chance: 1.0,
+            blunder_min_loss_cp: 50,
+            blunder_max_loss_cp: 100,
+            guaranteed_mate_in: 0,
+            ..Default::default()
+        };
+        let lines = vec![line(0), line(-30), line(-1500)];
+        for ply in 0..30 {
+            match pick(&noise, 0xCAFE, ply, &lines, &[]) {
+                NoisePick::Blunder(1) => {} // expected
+                other => panic!(
+                    "below-tier should still be admitted even when above is capped: \
+                     {other:?}",
+                ),
+            }
+        }
     }
 
     #[test]
@@ -678,6 +825,10 @@ mod tests {
             match pick(&noise, 0xBABE, ply, &lines, &[]) {
                 NoisePick::Line(idx) | NoisePick::Blunder(idx) => {
                     assert!(idx < lines.len())
+                }
+                NoisePick::BlunderSkipped { .. } => {
+                    // Valid outcome: mate-zone above tier got capped
+                    // out by the fallback tolerance.
                 }
                 NoisePick::Wild(_) => panic!("wild fired without wild_chance > 0"),
             }
