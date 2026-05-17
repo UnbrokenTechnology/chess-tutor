@@ -17,7 +17,17 @@ use eframe::egui;
 const ENGINE_TURN_NODE_CAP: u64 = 5_000_000;
 const RETROSPECTIVE_MULTI_PV: usize = 3;
 const HINT_MULTI_PV: usize = 3;
+/// Engine-play depth — what the bot uses to pick its own moves.
 const DEFAULT_DEPTH: u32 = 10;
+/// Analytical depth for retrospective / hint / analyze paths. Kept
+/// deeper than [`DEFAULT_DEPTH`] so the student's feedback is a
+/// stronger reference than the bot they're playing — at d=10 we
+/// observed verdict flips on common opening positions (e.g. 1.e4 e5
+/// 2.Nf3 reads "inaccuracy" at d=10 but "best" at d=12). Independent
+/// of bot-play depth so a weakened bot can still give strong
+/// teaching feedback. UI exposure deferred — for now the New Game
+/// dialog only tunes engine depth.
+const ANALYTICAL_DEPTH: u32 = 12;
 const EVAL_BAR_SATURATION_CP: f32 = 1000.0;
 /// Safety caps for analytical searches that auto-fire (retrospective,
 /// hint panel). Without these, pathological positions — notably
@@ -548,7 +558,10 @@ impl App {
         self.hint_result = None;
         let _ = self.worker_tx.send(WorkerJob::Analyze {
             pos: Box::new(self.position.clone()),
-            depth: self.depth,
+            // Analytical paths use ANALYTICAL_DEPTH, independent of
+            // self.depth (the bot's play depth). See the constant
+            // for rationale.
+            depth: ANALYTICAL_DEPTH,
             multi_pv: HINT_MULTI_PV,
             game_history: game_history_for_search(&self.position_keys),
             for_key: self.position.key(),
@@ -692,7 +705,9 @@ impl App {
         let _ = self.worker_tx.send(WorkerJob::Retrospective {
             pre_move_pos: Box::new(pre_move_pos),
             user_move: mv,
-            depth: self.depth,
+            // ANALYTICAL_DEPTH, not self.depth. The student's
+            // feedback wants depth even when the bot is weak.
+            depth: ANALYTICAL_DEPTH,
             game_history: pre_move_history,
             gen: self.gen,
             target_index,
@@ -993,10 +1008,24 @@ impl App {
         self.viewing_index.is_none()
     }
 
-    /// The most recent EngineInfo on the live timeline, used to
-    /// drive the eval bar regardless of where the user is browsing.
-    fn latest_engine_info(&self) -> Option<&EngineInfo> {
-        self.history
+    /// The EngineInfo to display on the eval bar for the position the
+    /// user is currently viewing.
+    ///
+    /// `engine_info` is only populated for moves the engine played, so
+    /// when the user is browsing back to a user-move position we scan
+    /// backward for the most recent engine evaluation that was
+    /// available at that point in the game. That's an approximation —
+    /// the true post-user-move eval would require a fresh search per
+    /// click — but it's close enough to let the user see the trend
+    /// (eval bar drops at the move where it actually dropped, not
+    /// always shows the live eval).
+    ///
+    /// When viewing live (`viewing_index = None`), behaves identically
+    /// to the previous `latest_engine_info` — most recent across the
+    /// full history.
+    fn viewed_engine_info(&self) -> Option<&EngineInfo> {
+        let upper = self.viewing_index.map_or(self.history.len(), |i| i + 1);
+        self.history[..upper]
             .iter()
             .rev()
             .find_map(|e| e.engine_info.as_ref())
@@ -1128,7 +1157,7 @@ impl App {
         let black_color = egui::Color32::from_rgb(0x30, 0x30, 0x30);
         let border = egui::Color32::from_rgb(0x80, 0x80, 0x80);
 
-        let score = self.latest_engine_info().map(|i| i.score_white_pov);
+        let score = self.viewed_engine_info().map(|i| i.score_white_pov);
         let (white_ratio, label) = match score {
             Some(v) if v.abs() >= Value::MATE_IN_MAX_PLY => {
                 if v.0 > 0 {

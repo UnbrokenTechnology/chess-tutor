@@ -10,7 +10,7 @@
 //! [`format_retrospective`] for the prose alongside.
 //!
 //! ```text
-//!   [retrospective] You played Qxf7?? — Blunder (Δ -8.60).
+//!   [retrospective] You played Qxf7?? — Blunder (-8.20 vs +0.15 best, Δ -8.35).
 //!                   Engine preferred Nf3 (+0.15).
 //!                   Best line: Qxf7+ Kxf7 — you lose 8 points (queen for pawn).
 //!                   Also: king -1.20, mobility -0.40.
@@ -154,16 +154,23 @@ fn render_report(
 ) -> io::Result<()> {
     let user_san = san::format(pre_move_pos, user.mv);
 
-    // Headline shows two deltas (root-STM POV):
-    // - `user_swing` = user.score - pre_score: did the user's move
-    //   improve, hurt, or hold the position?
-    // - `best_swing` = best.score - pre_score: how much the engine's
-    //   preferred move would have improved it.
-    // Both `user.pre_score` and `best.pre_score` reference the same
-    // shared pre-move evaluation; reading per-side keeps the math
-    // self-documenting.
-    let user_swing_str = format_delta_pawns(user.score.0 - user.pre_score.0);
-    let best_swing_str = format_delta_pawns(best.score.0 - best.pre_score.0);
+    // Headline shows the **absolute** post-move scores plus the gap
+    // between them (root-STM POV). The earlier format showed the two
+    // *swings* (user.score - pre_score, best.score - pre_score) which
+    // read ambiguously: "Δ +0.00 vs Δ +0.68" looks like absolute
+    // scores to a chess player but actually means "your move didn't
+    // change the eval; best would have raised it by 0.68." Switching
+    // to absolutes matches the mental model the eval bar uses.
+    //
+    // - `user_score_str` — the post-user-move position eval.
+    // - `best_score_str` — the post-best-move position eval (same
+    //   pre-move root, alternative continuation).
+    // - `gap_str` — `user.score - best.score`, always ≤ 0 for non-
+    //   Best verdicts (a negative number reads as "you're behind
+    //   where you could be by this much").
+    let user_score_str = format_score_pawns(user.score);
+    let best_score_str = format_score_pawns(best.score);
+    let gap_str = format_delta_pawns(user.score.0 - best.score.0);
 
     let verdict_label_str = verdict_label(verdict);
 
@@ -181,21 +188,18 @@ fn render_report(
 
     // Line 1: headline.
     //
-    // Best: one delta — the user *is* the best, no "vs … best" half
-    //   to add. *"You played Nf3 — Best (Δ +0.30)."*
+    // Best: single absolute score — the user *is* the best, no "vs …
+    //   best" half to add. *"You played Nf3 — Best (+0.30)."*
     // BestAvailable: keep the "Position was already lost" framing —
-    //   the absolute score tells the story; relative swing around a
-    //   catastrophic baseline would just add noise.
-    // Other verdicts: two deltas. The first reads as "your move did
-    //   X to your position"; the second as "the engine's preferred
-    //   move would have done Y." Differentiates "missed something
-    //   stronger" (positive swing, smaller than best's swing) from
-    //   "actually worsened the position" (negative swing).
+    //   the absolute score tells the story.
+    // Other verdicts: user score vs best score, plus the gap. The
+    //   gap is `user - best` (always ≤ 0 for non-Best) so it reads
+    //   as "you're {Δ} behind where you could be."
     match verdict {
         MoveVerdict::Best => {
             writeln!(
                 out,
-                "[retrospective] You played {user_san}{annotation} — {verdict_label_str} (Δ {user_swing_str})."
+                "[retrospective] You played {user_san}{annotation} — {verdict_label_str} ({user_score_str})."
             )?;
             if user_is_sharp {
                 writeln!(
@@ -216,8 +220,7 @@ fn render_report(
             writeln!(
                 out,
                 "[retrospective] You played {user_san} — {verdict_label_str}. \
-                 Position was already lost ({}).",
-                format_score_pawns(best.score),
+                 Position was already lost ({best_score_str})."
             )?;
             return Ok(());
         }
@@ -227,15 +230,15 @@ fn render_report(
         | MoveVerdict::Blunder => {
             writeln!(
                 out,
-                "[retrospective] You played {user_san}{annotation} — {verdict_label_str} (Δ {user_swing_str} vs Δ {best_swing_str} best)."
+                "[retrospective] You played {user_san}{annotation} — {verdict_label_str} ({user_score_str} vs {best_score_str} best, Δ {gap_str})."
             )?;
         }
     }
 
-    // Line 2: engine's preferred move.
+    // Line 2: engine's preferred move (drops the score, since it's
+    // now on line 1).
     if best.mv != user.mv {
         let best_san = san::format(pre_move_pos, best.mv);
-        let best_score_str = format_score_pawns(best.score);
         let best_is_sharp = matches!(best.surprise(root_stm), Some(SurpriseKind::LooksBadButGood));
         writeln!(
             out,

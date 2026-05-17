@@ -23,6 +23,16 @@ use chess_tutor_narration::{format_retrospective, NarrationOptions};
 /// move) so the pause is tolerable on every human move.
 const RETROSPECTIVE_MULTI_PV: usize = 3;
 
+/// Default analytical depth — kept deliberately *deeper* than the
+/// typical engine-play depth so the retrospective is a stronger
+/// reference than the bot the student is playing against. At depth
+/// 10 we observed opening-move verdicts that flipped at depth 12
+/// (e.g. 1.e4 e5 2.Nf3 reads as an inaccuracy at d=10 but emerges
+/// as best at d=12). The CLI `--retrospective-depth` flag overrides
+/// when the user wants a different trade-off, and the desktop hard-
+/// codes this value (UI exposure deferred).
+pub const RETROSPECTIVE_DEPTH: u32 = 12;
+
 /// Safety caps so a pathological position (notably MultiPV around a
 /// found mate — see search.rs) can't pin the auto-firing
 /// retrospective for minutes. The wall-clock cap is the user-visible

@@ -252,9 +252,18 @@ enum Command {
         /// Which side the engine plays.
         #[arg(long, value_enum, default_value_t = EngineColor::Black)]
         engine_color: EngineColor,
-        /// Max search depth for the engine (plies).
+        /// Max search depth for the engine when picking its own
+        /// moves (plies).
         #[arg(long, default_value_t = 10)]
         depth: u32,
+        /// Max search depth for the auto-retrospective analysing the
+        /// user's just-played move. Defaults deeper than `--depth`
+        /// because at d=10 we observed verdict flips on common
+        /// opening positions (1.e4 e5 2.Nf3 reads "inaccuracy" at
+        /// d=10, "best" at d=12). Independent of `--depth` so a
+        /// weakened bot can still give strong feedback.
+        #[arg(long, default_value_t = retrospective::RETROSPECTIVE_DEPTH)]
+        retrospective_depth: u32,
         /// Engine time cap per move (milliseconds). Omit for pure
         /// depth-capped search.
         #[arg(long)]
@@ -595,6 +604,7 @@ fn main() -> Result<()> {
             fen,
             engine_color,
             depth,
+            retrospective_depth,
             time_ms,
             ascii,
             flip,
@@ -661,6 +671,7 @@ fn main() -> Result<()> {
                 start_fen: fen,
                 engine_color,
                 depth,
+                retrospective_depth,
                 time_ms,
                 ascii,
                 flip,

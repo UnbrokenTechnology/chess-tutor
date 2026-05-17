@@ -42,7 +42,18 @@ const ENGINE_TURN_NODE_CAP: u64 = 5_000_000;
 pub struct PlayConfig {
     pub start_fen: Option<String>,
     pub engine_color: EngineColor,
+    /// Depth the engine searches to when picking *its* moves. The
+    /// retrospective uses [`PlayConfig::retrospective_depth`] —
+    /// kept separate so the bot can be weak (low depth) while the
+    /// student's feedback comes from a stronger analytical pass.
     pub depth: u32,
+    /// Depth the auto-retrospective searches to when analysing the
+    /// user's just-played move. Defaults to
+    /// [`crate::retrospective::RETROSPECTIVE_DEPTH`] (currently 12)
+    /// because at depth 10 we observed verdict flips on common
+    /// opening positions (e.g. 1.e4 e5 2.Nf3 reads "inaccuracy" at
+    /// d=10 but "best" at d=12).
+    pub retrospective_depth: u32,
     pub time_ms: Option<u64>,
     pub ascii: bool,
     pub flip: bool,
@@ -429,7 +440,13 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                     )?;
                     if let Some((mut pre_pos, game_hist)) = pre_move_snapshot {
                         let cfg_r = RetrospectiveConfig {
-                            max_depth: cfg.depth,
+                            // Retrospective uses its own depth knob,
+                            // independent of the engine-play depth
+                            // (`cfg.depth`). The analytical pass should
+                            // be deeper than the bot is for the
+                            // student's feedback to be a strong
+                            // reference — see `RETROSPECTIVE_DEPTH`.
+                            max_depth: cfg.retrospective_depth,
                             max_time_ms: cfg.time_ms,
                             explain_best,
                             // Retrospective inherits whatever the
