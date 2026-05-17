@@ -97,6 +97,15 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
         None => Position::startpos(),
     };
     let mut engine = Engine::default();
+    // Dedicated engine for analytical paths (`search` / `analyze` REPL
+    // commands + auto-retrospective). Cleared via `new_game()` before
+    // every use so the answer for a given position is bit-identical
+    // regardless of session history — closes the same takeback
+    // verdict-flip bug the desktop hit. The old `engine.clone()`
+    // pattern silently captured the play engine's accumulated TT and
+    // produced different verdicts for the same move depending on what
+    // had been searched before.
+    let mut analysis_engine = Engine::default();
     let mut history: Vec<HistoryEntry> = Vec::new();
     // Every reached position's Zobrist key, starting with the initial
     // position and appending one entry per played move. `position_keys
@@ -274,13 +283,13 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                 print!("{}", eval_report::render(&trace));
             }
             "search" => match parse_search_command(arg) {
-                // Analytical commands clone the play engine so they
-                // inherit its accumulated TT/history (warm cache from
-                // prior plies) but don't mutate it. This makes
-                // repeated `search` / `analyze` calls deterministic
-                // for the same position regardless of session order.
+                // Analytical commands use a dedicated engine that's
+                // cleared before each call — repeated `search`/`analyze`
+                // for the same position give bit-identical output
+                // regardless of session order or what the play engine
+                // has been doing.
                 Ok(multi_pv) => {
-                    let mut analysis_engine = engine.clone();
+                    analysis_engine.new_game();
                     run_search_report(
                         &mut out,
                         &mut pos,
@@ -297,7 +306,7 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                     multi_pv,
                     top_percent,
                 }) => {
-                    let mut analysis_engine = engine.clone();
+                    analysis_engine.new_game();
                     run_analyze_report(
                         &mut out,
                         &mut pos,
@@ -400,10 +409,14 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                             // moves are stable but retrospectives drift.
                             threads: cfg.threads,
                         };
-                        // Retrospective is analytical, not a real
-                        // move — clone so its TT writes don't bleed
-                        // into the engine's actual play state.
-                        let mut analysis_engine = engine.clone();
+                        // Use the dedicated analysis engine (cleared
+                        // before every use). See its declaration near
+                        // the top of `run` for the full rationale —
+                        // closes the takeback verdict-flip bug where
+                        // the same move would get different verdicts
+                        // depending on what the play engine had been
+                        // doing previously.
+                        analysis_engine.new_game();
                         retrospective::run_and_render(
                             &mut out,
                             &mut pre_pos,

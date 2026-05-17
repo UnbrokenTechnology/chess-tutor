@@ -132,10 +132,31 @@ enum NoisePickInfo {
 }
 
 fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Context) {
+    // Two engines live in the worker:
+    //
+    // - `engine` — the play engine. Searches for the bot's move and
+    //   accumulates TT / history learning across moves the way SF
+    //   does. Persisting state across moves is what makes the bot
+    //   stronger over the course of a game.
+    //
+    // - `analysis_engine` — dedicated to retrospective / hint /
+    //   analyze. Its state is cleared via `new_game()` before every
+    //   job so the analytical answer for a given position is
+    //   bit-identical regardless of session history. **This is
+    //   load-bearing for the teaching contract**: same position, same
+    //   verdict — across takebacks, across days, across reinstalls.
+    //   The prior pattern was `engine.clone()` for each analytical
+    //   call, which captured whatever state the play engine had
+    //   accumulated and silently produced different verdicts for the
+    //   same move depending on what the user had done previously.
     let mut engine = Engine::default();
+    let mut analysis_engine = Engine::default();
     while let Ok(job) = rx.recv() {
         match job {
-            WorkerJob::NewGame => engine.new_game(),
+            WorkerJob::NewGame => {
+                engine.new_game();
+                analysis_engine.new_game();
+            }
             WorkerJob::Search { mut pos, params, gen, noise, seed, ply } => {
                 // Wild branch needs the legal-move list — generated
                 // here so the worker stays self-contained.
@@ -190,11 +211,12 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                 gen,
                 target_index,
             } => {
-                // Clone the play engine so retrospective searches don't
-                // pollute the play engine's TT entries — the analytical
-                // search would overwrite slots the next play search will
-                // want to reuse.
-                let mut analysis_engine = engine.clone();
+                // Clear the analysis engine's TT / history before every
+                // retrospective so the result depends only on the
+                // position + params, not on session history. (See the
+                // worker_loop preamble for the full reasoning — this
+                // closes the takeback verdict-flip bug.)
+                analysis_engine.new_game();
                 let params = SearchParams {
                     max_depth: depth,
                     max_nodes: Some(ANALYSIS_NODE_CAP),
@@ -240,9 +262,10 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                 game_history,
                 for_key,
             } => {
-                // Cloned engine so the analysis search's TT writes
-                // don't bleed into the play engine.
-                let mut analysis_engine = engine.clone();
+                // Same reset-before-use pattern as Retrospective —
+                // hint / analyze answer should be deterministic for
+                // the position the user is asking about.
+                analysis_engine.new_game();
                 let params = SearchParams {
                     max_depth: depth,
                     max_nodes: Some(ANALYSIS_NODE_CAP),
