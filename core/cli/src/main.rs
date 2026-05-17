@@ -13,6 +13,7 @@ mod bench;
 mod bench_fens;
 mod board;
 mod eval_report;
+mod noise_bench;
 mod play;
 mod retrospective;
 mod uci;
@@ -212,6 +213,36 @@ enum Command {
         #[arg(long)]
         positions: Option<String>,
     },
+    /// Measure Lazy-SMP score variance across runs. For each position,
+    /// runs `analyze_position` N times with a fresh engine state and
+    /// reports how much the same move's score wobbles. Used to
+    /// calibrate the [`MoveVerdict`] noise buffer.
+    NoiseBench {
+        /// Transposition-table size in MB.
+        #[arg(long, default_value_t = 16)]
+        tt_mb: usize,
+        /// Search depth per run. Defaults to the retrospective's
+        /// `DEFAULT_DEPTH` (10) so the measurement reflects what users
+        /// actually see.
+        #[arg(long, default_value_t = 10)]
+        depth: u32,
+        /// Multi-PV breadth per run. Defaults to the retrospective's
+        /// `RETROSPECTIVE_MULTI_PV` (3).
+        #[arg(long, default_value_t = 3)]
+        multi_pv: usize,
+        /// Number of threads. Defaults to 8 — typical Lazy-SMP load on
+        /// the desktop's `available_parallelism()` default.
+        #[arg(long, default_value_t = 8)]
+        threads: usize,
+        /// Number of runs per position. Variance estimate improves
+        /// with N; 5 is a reasonable starting point.
+        #[arg(long, default_value_t = 5)]
+        runs: usize,
+        /// `default` for the built-in 45-position SF11 set, or a path
+        /// to a FEN file (same format as `chess-tutor bench`).
+        #[arg(long, default_value = "default")]
+        fen_file: String,
+    },
     /// Interactive REPL. Human enters SAN or UCI; engine replies on
     /// its turn.
     Play {
@@ -258,23 +289,14 @@ enum Command {
         /// search loops or depth-N iterations that never return.
         #[arg(long)]
         search_progress: bool,
-        /// Number of search threads for engine moves (Lazy SMP).
-        /// Default 1 keeps engine moves bit-deterministic across
-        /// runs; raise it to use more cores. REPL `search` /
-        /// `analyze` commands are always single-threaded.
+        /// Number of search threads (Lazy SMP) for **every** search:
+        /// engine moves AND the auto-retrospective. Default 1 keeps
+        /// every search bit-deterministic across runs and takebacks
+        /// — the teaching contract is "same position, same verdict".
+        /// Raise it for benchmarking. REPL `search` / `analyze`
+        /// commands are always single-threaded.
         #[arg(long, default_value_t = 1)]
         threads: usize,
-        /// Force every analytical search (auto-retrospective) to
-        /// single-threaded so the same game produces bit-identical
-        /// narration across runs. Without this flag the
-        /// retrospective uses all available cores by default — the
-        /// teaching output (eval term deltas, tactic detection,
-        /// verdict thresholds) is robust to the small per-move-score
-        /// variance Lazy SMP introduces; near-equal alternate-move
-        /// scores may swap rank between runs but the narrative
-        /// stays the same.
-        #[arg(long)]
-        deterministic: bool,
         /// Seed for the opponent's pseudo-randomness (opening line
         /// pick in Phase B, move sampling in later phases). Default:
         /// random per run, logged at game start. Pass a fixed value
@@ -544,6 +566,23 @@ fn main() -> Result<()> {
                 positions,
             })?;
         }
+        Command::NoiseBench {
+            tt_mb,
+            depth,
+            multi_pv,
+            threads,
+            runs,
+            fen_file,
+        } => {
+            noise_bench::run(noise_bench::NoiseBenchArgs {
+                tt_mb,
+                depth,
+                multi_pv,
+                threads,
+                runs,
+                fen_file,
+            })?;
+        }
         Command::Play {
             fen,
             engine_color,
@@ -557,7 +596,6 @@ fn main() -> Result<()> {
             reset_engine_per_move,
             search_progress,
             threads,
-            deterministic,
             seed,
             no_book,
             disable_eval,
@@ -618,7 +656,6 @@ fn main() -> Result<()> {
                 reset_engine_per_move,
                 search_progress,
                 threads: threads.max(1),
-                deterministic,
             })?;
         }
     }

@@ -2,6 +2,22 @@
 
 Forward-looking engine perf and strength context. **Read this only when returning to perf or strength work.** For current UX-focused iteration see [`HANDOFF-ux.md`](HANDOFF-ux.md); for the project overview and build commands see [`HANDOFF.md`](HANDOFF.md).
 
+## Threading policy — single-thread default (2026-05-16)
+
+**All shipped surfaces (desktop + CLI) default to `threads = 1`.** The Lazy SMP code stays in tree but the multi-thread path is opt-in only (`chess-tutor play --threads N`, `chess-tutor bench <tt> <threads> <depth>`, `chess-tutor noise-bench --threads N`). Engine moves, retrospective, hint panel, and analyze all run single-threaded by default.
+
+Three reasons:
+
+1. **Determinism (the load-bearing one).** Lazy SMP introduces enough per-run score variance that the same move at the same position gets different verdicts across runs and after takebacks — a major teaching disconnect. UX-position noise bench (`chess-tutor noise-bench --fen-file noise_bench_ux_positions.txt --runs 8`) measured p50 = 51 cp / p95 = 121 cp / max = 143 cp same-move score range at 8 threads on typical user-facing positions (openings + quiet middlegames + simple endgames). On the SF11 tactical bench the variance is worse — p95 = 469 cp, with mate-puzzle positions sometimes finding the mate and sometimes returning a non-mate eval at the same depth, swing of ~29000 cp. Widening verdict bands can absorb opening noise but can't fix missed-mate flapping. Single-thread = 0 cp variance, every position, every run.
+
+2. **iOS deployment target.** Single-core utilisation is much friendlier to the iPhone thermal/battery envelope than spinning N cores. Memory savings too — each `WorkerState` carries ~8 MB of cont-history; at 4 threads that's ~32 MB resident.
+
+3. **Cost is small.** At the desktop's default depth = 10, single-thread retrospective is ~120 ms worst case (vs ~60 ms multi-thread) — well inside "feels instant". Engine moves at depth 10 are ~40 ms single-thread. Deeper depths cost more (the user's "1-2 s" memory was depth 20 testing for mobile worst-case modelling).
+
+**Atomics aren't the speed cost they look like in VTune.** Our TT uses `Ordering::Relaxed`, which on x86 and ARM64 compiles to identical machine code as plain loads/stores — zero overhead vs non-atomic. The phantom "atomic_load is a hotspot" attribution in VTune is documented in `tt.rs:88-97`: it was actually function-call overhead from a non-inlined wrapper, fixed by `#[inline(always)]`. Removing the `AtomicU64` types today would produce bit-identical machine code. The multi-thread scaffolding has a real *memory* cost (per-thread `WorkerState`) but not a per-instruction speed cost.
+
+**`chess-tutor noise-bench`** measures Lazy SMP variance for calibration; useful any time we change search parameters or want to re-confirm the single-thread choice. Source: [`core/cli/src/noise_bench.rs`](core/cli/src/noise_bench.rs).
+
 ## Engine perf — current state (2026-05-14)
 
 Seven major changes landed today:

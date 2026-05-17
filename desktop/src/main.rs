@@ -203,15 +203,18 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                     game_history,
                     force_include: vec![user_move],
                     verbose_progress: false,
-                    // Retrospective uses every available core. The
-                    // GUI is a single-user surface — no competing
-                    // analytical search — and the teaching output
-                    // (eval term deltas, tactic detection, verdict
-                    // classification) is robust to the small
-                    // per-move-score variance Lazy SMP introduces.
-                    threads: std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(1),
+                    // Retrospective is single-threaded for full
+                    // determinism. Lazy SMP introduces enough per-run
+                    // score variance to flip the same move between
+                    // verdicts (e.g. e4 reading as "Best" one run and
+                    // "Good" the next, then "Best" again after a
+                    // takeback) — a major teaching-tool disconnect
+                    // for a student trying to learn what "best" means.
+                    // Single-thread gives bit-identical retrospectives
+                    // across runs and across takebacks. Cost at the
+                    // desktop's default depth=10 is ~60ms vs
+                    // multi-thread — well within "feels instant".
+                    threads: 1,
                     // Retrospective is analytical — always unbiased
                     // eval, regardless of any mid-game bot mask.
                     eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
@@ -248,14 +251,12 @@ fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Con
                     game_history,
                     force_include: Vec::new(),
                     verbose_progress: false,
-                    // Hint panel: same logic as retrospective — use
-                    // all cores. Teaching-output stability comes from
-                    // wide verdict thresholds and deterministic eval
-                    // term computation, not from single-threaded
-                    // search.
-                    threads: std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(1),
+                    // Hint / analyze: single-threaded for the same
+                    // determinism reason as the retrospective. The user
+                    // is exploring "what would the engine think about
+                    // X" — same question twice should give the same
+                    // answer.
+                    threads: 1,
                     // Hint panel is analytical — unbiased eval.
                     eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 };
@@ -768,12 +769,13 @@ impl App {
             game_history: game_history_for_search(&self.position_keys),
             force_include: Vec::new(),
             verbose_progress: false,
-            // Engine moves: use every available core. The GUI is
-            // single-user, so we never compete with a concurrent
-            // analytical search.
-            threads: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1),
+            // Engine moves: single-threaded. We're targeting iOS where
+            // single-core utilisation is much friendlier to the
+            // thermal/battery envelope, and at depth 10 startpos the
+            // single-thread search finishes in ~40 ms — perceptually
+            // instant. Multi-thread is kept available through the CLI
+            // `--threads N` flag for bench / dev work.
+            threads: 1,
             // Play engine move — apply the opponent's mid-game eval
             // mask so the bot plays as if blind to the masked
             // categories.

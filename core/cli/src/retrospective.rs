@@ -39,14 +39,14 @@ pub struct RetrospectiveConfig {
     /// headline. Useful when the student wants to understand *why*
     /// their move was the best, not just *that* it was.
     pub explain_best: bool,
-    /// Number of search threads. Defaults to multi-thread because
-    /// the teaching value (positional analysis, tactic detection,
-    /// verdict classification) is robust to the small per-move-score
-    /// variance Lazy SMP introduces — moves within a few cp of each
-    /// other may swap rank between runs, but the underlying eval term
-    /// deltas, tactic discoveries, and verdict thresholds don't move.
-    /// Pass `1` (via `--deterministic` on the CLI) when bit-for-bit
-    /// reproducibility is required, e.g. regression testing.
+    /// Number of search threads. The CLI's `--threads N` flag (default
+    /// 1) flows in here. Single-thread is the deliberate default for
+    /// the teaching tool: Lazy SMP introduces enough per-run score
+    /// variance to flip the same move between verdicts (Best one run,
+    /// Good the next, Best again after a takeback) — directly
+    /// undermining the "play the same move, get the same verdict"
+    /// contract the retrospective exists to provide. Raise this only
+    /// for benchmarking.
     pub threads: usize,
 }
 
