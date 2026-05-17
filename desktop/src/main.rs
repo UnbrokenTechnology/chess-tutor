@@ -368,11 +368,6 @@ struct HistoryEntry {
     retrospective_text: Option<String>,
     /// Filled for moves the engine made. Carries score / depth / time.
     engine_info: Option<EngineInfo>,
-    /// Snapshot of the opening-book cursor as it was *before* this
-    /// move advanced (or dropped) it. On takeback we restore this so
-    /// the cursor walks backward with the game — including
-    /// resurrecting a cursor the move dropped.
-    book_cursor_before: Option<BookCursor>,
 }
 
 struct App {
@@ -517,8 +512,8 @@ impl App {
         self.opponent = OpponentProfile::new_random();
         self.opponent.noise = noise;
         self.opponent.eval_mask = eval_mask;
-        self.book_cursor = BookCursor::pick(&self.opponent, &self.position);
-        log_new_game_intro(&self.opponent, &self.book_cursor);
+        self.book_cursor = BookCursor::new(&self.opponent, &self.position);
+        log_new_game_intro(&self.opponent);
         self.close_hint();
         let _ = self.worker_tx.send(WorkerJob::NewGame);
         self.maybe_queue_engine_search();
@@ -696,7 +691,6 @@ impl App {
     fn apply_move(&mut self, mv: Move) {
         let san_str = san::format(&self.position, mv);
         let moved_by = self.position.side_to_move();
-        let book_cursor_before = self.book_cursor.clone();
         let state = self.position.do_move(mv);
         self.position_keys.push(self.position.key());
         self.history.push(HistoryEntry {
@@ -707,15 +701,10 @@ impl App {
             position_after: self.position.clone(),
             retrospective_text: None,
             engine_info: None,
-            book_cursor_before,
         });
-        // Advance / drop the book cursor in the same step that records
-        // the move, so the cursor stays consistent with history.
-        let dropped = self.book_cursor.as_mut().is_some_and(|c| !c.observe(mv));
-        if dropped {
-            self.book_cursor = None;
-            eprintln!("out of book — engine now plays from search.");
-        }
+        // No book-cursor advance: BookCursor is stateless and
+        // re-derives from history at each peek. Takeback is similarly
+        // free of book bookkeeping.
         self.deselect();
     }
 
@@ -746,7 +735,8 @@ impl App {
         if let Some(entry) = self.history.pop() {
             self.position.undo_move(entry.mv, entry.state);
             self.position_keys.pop();
-            self.book_cursor = entry.book_cursor_before;
+            // No book-cursor restore needed — the stateless cursor
+            // re-derives from history on the next peek.
             self.deselect();
         }
     }
@@ -771,15 +761,33 @@ impl App {
         if legal_moves_vec(&mut scratch).is_empty() {
             return;
         }
-        // Book first: if the cursor has a queued move, play it
+        // Book first: walk allowed openings for any whose stored
+        // move-prefix still matches the moves played so far; if any
+        // match, play the deterministically-picked next move
         // synchronously and skip the worker round-trip entirely. The
         // engine_info field stays None for these moves (no search ran);
         // the move list panel will need to recognise book moves as a
         // separate case once we surface them in the UI.
-        if let Some(book_mv) = self.book_cursor.as_ref().and_then(|c| c.peek()) {
-            eprintln!("book: engine plays {}", san::format(&self.position, book_mv));
-            self.apply_move(book_mv);
+        let history_moves: Vec<Move> = self.history.iter().map(|e| e.mv).collect();
+        let book_pick = self
+            .book_cursor
+            .as_ref()
+            .and_then(|c| c.peek(&history_moves));
+        if let Some(book_pick) = book_pick {
+            let san_str = san::format(&self.position, book_pick.mv);
+            if let Some(entry) = chess_tutor_engine::openings::entry(book_pick.opening_id) {
+                eprintln!("book: engine plays {} ({} {})", san_str, entry.eco, entry.name);
+            } else {
+                eprintln!("book: engine plays {}", san_str);
+            }
+            self.apply_move(book_pick.mv);
             return;
+        }
+        // No book match — announce the transition once and drop the
+        // cursor so future bot turns skip the lookup silently.
+        if self.book_cursor.is_some() {
+            eprintln!("out of book — engine now plays from search.");
+            self.book_cursor = None;
         }
         let params = SearchParams {
             max_depth: self.depth,
@@ -1691,15 +1699,15 @@ fn eval_mask_checkbox(ui: &mut egui::Ui, mask: &mut EvalMask, cat: EvalCategory)
 /// user knows what they're up against. Sent to stderr — not the GUI —
 /// because the desktop hasn't grown a status surface for this yet;
 /// the launcher shell window is the de facto session log for now.
-fn log_new_game_intro(opponent: &OpponentProfile, cursor: &Option<BookCursor>) {
+fn log_new_game_intro(opponent: &OpponentProfile) {
     eprintln!(
         "opponent seed: {} (record this to replay the game)",
         opponent.seed,
     );
-    if let Some(c) = cursor {
-        let entry = c.opening();
-        eprintln!("book: {} {}", entry.eco, entry.name);
-    }
+    // No "book: X Y" intro line — with per-ply lookup the engine
+    // hasn't committed to any specific opening at game start. The
+    // opening that emerges is announced inline on each book move
+    // (`book: engine plays X (ECO Name)`).
 }
 
 /// Walk a PV applying moves to a clone of `root` and producing a SAN

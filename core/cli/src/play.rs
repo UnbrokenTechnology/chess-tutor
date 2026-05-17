@@ -84,11 +84,6 @@ struct HistoryEntry {
     /// applied. On `undo`, we restore this so the trap cursor walks
     /// backward with the game.
     pending_before: Option<PendingTrap>,
-    /// Snapshot of the opening-book cursor as it was *before* this
-    /// move advanced (or dropped) it. On `undo`, we restore this so
-    /// the cursor walks backward with the game — including
-    /// resurrecting a cursor the move dropped.
-    book_cursor_before: Option<BookCursor>,
 }
 
 pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
@@ -145,14 +140,19 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
         "opponent seed: {} (pass --seed {} to replay this game)",
         cfg.opponent.seed, cfg.opponent.seed,
     )?;
-    // Pick an opening line for this game, if the profile allows one
-    // and we're starting from startpos. Cursor is mutated as the
-    // game progresses; dropped on first deviation.
-    let mut book_cursor = BookCursor::pick(&cfg.opponent, &pos);
-    if let Some(cursor) = &book_cursor {
-        let entry = cursor.opening();
-        writeln!(out, "book: {} {}", entry.eco, entry.name)?;
-    }
+    // Initialise the book for this game (if the profile allows one
+    // and we're starting from startpos). The cursor is stateless w.r.t.
+    // game progression — each bot-move call to `peek(history)` walks
+    // the allowed openings fresh, finds those whose move-prefix still
+    // matches, and picks one. We deliberately don't announce a
+    // pre-committed opening at game start: until the human plays,
+    // an engine-playing-Black has no idea what opening will emerge,
+    // and even an engine-playing-White might branch into several
+    // curated continuations depending on Black's response. The cursor
+    // gets dropped (set to None) when the bot first finds no matching
+    // book line — that's the cue to print "out of book" once, after
+    // which future bot turns silently skip the lookup.
+    let mut book_cursor = BookCursor::new(&cfg.opponent, &pos);
     if !cfg.opponent.eval_mask.is_empty() {
         let disabled: Vec<_> = cfg.opponent.eval_mask.disabled_iter().map(|c| c.slug()).collect();
         writeln!(out, "eval-mask: bot blind to {}", disabled.join(", "))?;
@@ -215,24 +215,39 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
         }
 
         if is_engine_turn(mover, cfg.engine_color) {
-            // Book first: if the cursor still has a move queued, play
-            // it directly without invoking the search. This is the
-            // only place the book overrides search results — see the
-            // BookCursor docs for the strict invariant that
-            // analytical paths must not consult the book.
-            if let Some(book_mv) = book_cursor.as_ref().and_then(|c| c.peek()) {
-                let san_text = san::format(&pos, book_mv);
-                writeln!(out, "book: engine plays {san_text}")?;
+            // Book first: walk allowed openings for any whose stored
+            // move-prefix matches the game so far; if any match, play
+            // the deterministically-picked next move. This is the only
+            // place the book overrides search results — see the
+            // BookCursor docs for the strict invariant that analytical
+            // paths must not consult the book.
+            let history_moves: Vec<Move> = history.iter().map(|e| e.mv).collect();
+            let book_pick = book_cursor.as_ref().and_then(|c| c.peek(&history_moves));
+            if let Some(book_pick) = book_pick {
+                let san_text = san::format(&pos, book_pick.mv);
+                let opening = chess_tutor_engine::openings::entry(book_pick.opening_id);
+                if let Some(entry) = opening {
+                    writeln!(out, "book: engine plays {san_text} ({} {})", entry.eco, entry.name)?;
+                } else {
+                    writeln!(out, "book: engine plays {san_text}")?;
+                }
                 apply_move_and_scan(
                     &mut out,
                     &mut pos,
-                    book_mv,
+                    book_pick.mv,
                     &mut history,
                     &mut position_keys,
                     &mut pending_trap,
-                    &mut book_cursor,
                 )?;
                 continue;
+            }
+            // No book match at this position. If we still had a cursor
+            // (book was active for this game), announce the transition
+            // once and drop the cursor so future bot turns skip the
+            // walk silently.
+            if book_cursor.is_some() {
+                writeln!(out, "out of book — engine now plays from search.")?;
+                book_cursor = None;
             }
             play_engine_turn(
                 &mut out,
@@ -243,7 +258,6 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                 &mut history,
                 &mut position_keys,
                 &mut pending_trap,
-                &mut book_cursor,
             )?;
             continue;
         }
@@ -351,7 +365,17 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                 )?,
                 Err(e) => writeln!(out, "{}", e)?,
             },
-            "openings" => run_openings_command(&mut out, arg, &mut allowed_book, &book_cursor)?,
+            "openings" => {
+                let history_moves: Vec<Move> = history.iter().map(|e| e.mv).collect();
+                run_openings_command(
+                    &mut out,
+                    arg,
+                    &mut allowed_book,
+                    &book_cursor,
+                    &history_moves,
+                    &pos,
+                )?
+            }
             "eval-mask" => run_eval_mask_command(&mut out, arg, &mut cfg.opponent.eval_mask)?,
             "noise" => run_noise_command(&mut out, arg, &mut cfg.opponent.noise)?,
             "fen" => writeln!(out, "{}", pos.to_fen())?,
@@ -361,7 +385,9 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                     pos.undo_move(entry.mv, entry.state);
                     position_keys.pop();
                     pending_trap = entry.pending_before;
-                    book_cursor = entry.book_cursor_before;
+                    // Book cursor doesn't need restore: it's stateless
+                    // and rederives from the (now-rolled-back) history
+                    // on the next bot turn.
                     writeln!(out, "undid {}", entry.san)?;
                 }
                 None => writeln!(out, "nothing to undo.")?,
@@ -392,7 +418,6 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                         &mut history,
                         &mut position_keys,
                         &mut pending_trap,
-                        &mut book_cursor,
                     )?;
                     if let Some((mut pre_pos, game_hist)) = pre_move_snapshot {
                         let cfg_r = RetrospectiveConfig {
@@ -505,7 +530,6 @@ fn play_engine_turn(
     history: &mut Vec<HistoryEntry>,
     position_keys: &mut Vec<u64>,
     pending_trap: &mut Option<PendingTrap>,
-    book_cursor: &mut Option<BookCursor>,
 ) -> io::Result<()> {
     if cfg.reset_engine_per_move {
         engine.new_game();
@@ -613,7 +637,7 @@ fn play_engine_turn(
         nodes,
         nps_m,
     )?;
-    apply_move_and_scan(out, pos, mv, history, position_keys, pending_trap, book_cursor)?;
+    apply_move_and_scan(out, pos, mv, history, position_keys, pending_trap)?;
     Ok(())
 }
 
@@ -854,13 +878,15 @@ fn run_openings_command(
     arg: &str,
     allowed: &mut BookSelection,
     cursor: &Option<BookCursor>,
+    history_moves: &[Move],
+    pos: &Position,
 ) -> io::Result<()> {
     let (subverb, subarg) = match arg.split_once(char::is_whitespace) {
         Some((v, a)) => (v.trim(), a.trim()),
         None => (arg.trim(), ""),
     };
     match subverb {
-        "" => print_openings_status(out, allowed, cursor),
+        "" => print_openings_status(out, allowed, cursor, history_moves),
         "list" => print_allowed_list(out, allowed),
         "allow" => allow_openings(out, allowed, subarg),
         "deny" => deny_openings(out, allowed, subarg),
@@ -872,7 +898,7 @@ fn run_openings_command(
                 "openings: reset to curated default ({count} entries; effective next game).",
             )
         }
-        "selected" => print_selected(out, cursor),
+        "selected" => print_selected(out, pos),
         other => writeln!(
             out,
             "unknown openings subcommand {other:?} — try: list | allow PAT | deny PAT | reset | selected",
@@ -891,10 +917,18 @@ fn print_openings_status(
     out: &mut io::StdoutLock<'_>,
     allowed: &BookSelection,
     cursor: &Option<BookCursor>,
+    history_moves: &[Move],
 ) -> io::Result<()> {
     let count = allowed_count(allowed);
+    // "In book" now means: some curated opening still has a next move
+    // matching the current position — i.e., the bot's next book peek
+    // would succeed.
+    let in_book = cursor
+        .as_ref()
+        .and_then(|c| c.peek(history_moves))
+        .is_some();
     writeln!(out, "openings: {count} allowed in book; {} this game.",
-        if cursor.is_some() { "in book" } else { "out of book" })?;
+        if in_book { "in book" } else { "out of book" })?;
     writeln!(out, "  try: openings list | allow PAT | deny PAT | reset | selected")
 }
 
@@ -1129,18 +1163,14 @@ fn print_eval_mask(out: &mut io::StdoutLock<'_>, mask: &EvalMask) -> io::Result<
     Ok(())
 }
 
-fn print_selected(out: &mut io::StdoutLock<'_>, cursor: &Option<BookCursor>) -> io::Result<()> {
-    match cursor {
-        None => writeln!(out, "openings: out of book this game."),
-        Some(c) => {
-            let entry = c.opening();
-            writeln!(out, "openings: in book — {} {}", entry.eco, entry.name)?;
-            // The cursor's next move is shown via the play loop's
-            // "book: engine plays X" line when the bot moves, so we
-            // don't duplicate it here — keeping the output deterministic
-            // regardless of whose turn it is.
-            Ok(())
-        }
+fn print_selected(out: &mut io::StdoutLock<'_>, pos: &Position) -> io::Result<()> {
+    // Position-based lookup via the EPD index — this is the opening
+    // name for the *current* board, transposition-tolerant and
+    // independent of the move order that reached it. Returns None at
+    // startpos and at positions no opening reaches.
+    match chess_tutor_engine::openings::identify(pos) {
+        Some(id) => writeln!(out, "openings: current position is {} {}", id.eco, id.name),
+        None => writeln!(out, "openings: current position is not in the openings database."),
     }
 }
 
@@ -1181,7 +1211,6 @@ fn apply_move(
     history: &mut Vec<HistoryEntry>,
     position_keys: &mut Vec<u64>,
     pending_before: Option<PendingTrap>,
-    book_cursor_before: Option<BookCursor>,
 ) {
     let san = san::format(pos, mv);
     let state = pos.do_move(mv);
@@ -1190,16 +1219,16 @@ fn apply_move(
         state,
         san,
         pending_before,
-        book_cursor_before,
     });
     position_keys.push(pos.key());
 }
 
-/// [`apply_move`] plus full trap bookkeeping: advance the pending
-/// cursor when a trap is live, look for a newly-fired trap on the
-/// post-move position, and advance / drop the opening-book cursor.
-/// All three pieces of state are snapshotted into the new
-/// [`HistoryEntry`] so `undo` rolls them back together.
+/// [`apply_move`] plus trap bookkeeping: advance the pending cursor
+/// when a trap is live and look for a newly-fired trap on the
+/// post-move position. The trap snapshot is folded into the new
+/// [`HistoryEntry`] so `undo` rolls it back. The opening-book cursor
+/// is no longer threaded here — it's stateless and the play loop
+/// re-derives it from history at each bot turn.
 fn apply_move_and_scan(
     out: &mut io::StdoutLock<'_>,
     pos: &mut Position,
@@ -1207,12 +1236,10 @@ fn apply_move_and_scan(
     history: &mut Vec<HistoryEntry>,
     position_keys: &mut Vec<u64>,
     pending_trap: &mut Option<PendingTrap>,
-    book_cursor: &mut Option<BookCursor>,
 ) -> io::Result<()> {
-    // Snapshot pending-trap and book-cursor BEFORE we advance them, so
-    // `undo` restores the world exactly as it was before this move.
+    // Snapshot pending-trap BEFORE we advance it, so `undo` restores
+    // the world exactly as it was before this move.
     let pending_snapshot = pending_trap.clone();
-    let book_snapshot = book_cursor.clone();
 
     // If a trap is already mid-refutation, advance the cursor using
     // the pre-move position (san::parse needs legal-move context).
@@ -1232,14 +1259,7 @@ fn apply_move_and_scan(
     let from = mv.from();
     let to = mv.to();
 
-    apply_move(
-        pos,
-        mv,
-        history,
-        position_keys,
-        pending_snapshot,
-        book_snapshot,
-    );
+    apply_move(pos, mv, history, position_keys, pending_snapshot);
 
     // Only scan for newly-fired traps when nothing is already pending.
     // Overlapping traps are theoretically possible but vanishingly
@@ -1252,17 +1272,6 @@ fn apply_move_and_scan(
             announce_trap_hit(out, &hit)?;
             *pending_trap = Some(PendingTrap::new(entry, hit));
         }
-    }
-
-    // Book bookkeeping: any move (engine book play, engine search,
-    // human reply) gets observed. A diverging move drops the cursor;
-    // a matching move advances it. Exhausted lines (cursor alive but
-    // peek() returned None) also drop here, because observe sees no
-    // expected ply to match against.
-    let dropped = book_cursor.as_mut().is_some_and(|c| !c.observe(mv));
-    if dropped {
-        *book_cursor = None;
-        writeln!(out, "out of book — engine now plays from search.")?;
     }
 
     Ok(())
@@ -1503,14 +1512,14 @@ mod tests {
         // First cycle: two visits to the startpos. Still not a draw.
         for m in cycle {
             let mv = crate::uci::parse(&mut pos, m).unwrap();
-            apply_move(&mut pos, mv, &mut history, &mut keys, None, None);
+            apply_move(&mut pos, mv, &mut history, &mut keys, None);
         }
         assert!(!threefold_reached(&keys), "second visit must not draw");
 
         // Second cycle: three visits to the startpos. Draw.
         for m in cycle {
             let mv = crate::uci::parse(&mut pos, m).unwrap();
-            apply_move(&mut pos, mv, &mut history, &mut keys, None, None);
+            apply_move(&mut pos, mv, &mut history, &mut keys, None);
         }
         assert!(threefold_reached(&keys), "third visit is threefold");
     }
