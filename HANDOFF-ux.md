@@ -72,6 +72,25 @@ Additional:
 - **Bot strength / customization framework.** Long-term: configurable openings, blunder profile, tactical eyesight per bot.
 - **FFI crate (`core/ffi/`).** First concrete step toward Apple/Android. Outstanding decisions: UniFFI vs. raw C ABI, in-process vs. out-of-process, how to expose `MoveAnalysis` across the boundary.
 
+## Platform-portable UI refactor (in progress)
+
+Goal: collapse the GUI/CLI duplication and put `chess-tutor-desktop` on the same footing as future Apple/Android renderers — each platform shell becomes a thin unidirectional renderer of view descriptors, with all session state + game logic in shared Rust. CLI's `play.rs` (1,718 lines) and `desktop/src/main.rs` (previously 1,927 lines) duplicate game state today; the refactor pays off twice over.
+
+Step 1 (in-place modularization of `desktop/src/`, ~zero risk) has landed. Remaining steps:
+
+1. **View descriptors.** Introduce `BoardView` / `EvalBarView` / `MoveListView` / `RetrospectivePanelView` / `HintPanelView` / `TopBarView` / `NewGameDialogView`. Each `draw::*` function takes the descriptor instead of poking `App` fields directly. Descriptors carry **semantic flags** (`last_move: bool`, `selected: bool`, `check_tint: bool`), not concrete colours — each platform picks its own palette. Open question: whether to publish a `Theme` constant the renderers can opt into, or leave palette fully per-platform.
+2. **Extract `core/ui` crate.** `session.rs` + `worker.rs` + view descriptors move out of `desktop/`. The only egui dependency in the worker is `Context::request_repaint`; abstract it as an `Arc<dyn Fn() + Send + Sync>` constructor param ("wake the UI"). Desktop closes over `ctx`; CLI passes no-op; iOS/Android post to their native run loop via FFI.
+3. **Migrate CLI's `play.rs`** onto the same `Session`. Most of `play.rs` is headless and ports directly; REPL command parsing (`search`, `analyze`, `openings`, `noise`, `eval-mask`) stays CLI-side. Larger lift than step 2 — defer until 2 lands.
+4. **Mobile shells** (`apple/`, `android/`) consume `core/ui` via `core/ffi`. Each platform is a renderer + event dispatcher, ~hundreds of lines, not thousands.
+
+### Locked-in design decisions
+
+- **Events name intents, not inputs.** `Cancel`, `RequestNewGame`, `Takeback`, `JumpToLive`, `SelectSquare(sq)`, `ConfirmNewGame{...}` — never `EscapePressed` / `NewGameClicked` / `BoardClicked`. The shared layer is consumed by GUI, CLI, and (eventually) mobile; input-mechanism names are lies in at least one of those. See [memory feedback_ui_events_intent_not_input.md](../.claude/projects/C--Users-steve-Repos-work-chess-tutor-2/memory/feedback_ui_events_intent_not_input.md).
+- **Cancel resolution lives in the session, not the renderer.** Priority order: promotion picker > dialog > deselect. Renderer just emits `Cancel`.
+- **Dialog form: payload-on-confirm.** `ConfirmNewGame { color, fen, depth, noise, eval_mask }` rather than per-field events. Validation (FEN parse, depth bounds) is the session's job. Add a `UpdateNewGameDraft` route only if a platform's framework forces session-owned form state.
+- **`piece_glyph` ships as a helper, not in the view.** Descriptors carry `Piece`; renderers pick Unicode / sprite / SVG. The shared layer can offer `piece_glyph(Piece) -> char` for CLI/prototype use.
+- **Worker remains in the shared layer.** Only the repaint callback is platform-flavoured.
+
 ## Live-play tuning
 
 Every retrospective narrator has unit tests for shape, but the wording and thresholds were picked *a priori*. Continued real-game playthrough is how they get tuned. CLI `play` and the desktop GUI retrospective panel are both wired for this. When playing, the most useful failure-mode categories to report:
