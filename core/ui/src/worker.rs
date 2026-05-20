@@ -1,10 +1,10 @@
 //! Background search worker.
 //!
 //! Receives [`WorkerJob`]s from the session, drives the engine, and
-//! sends [`WorkerResult`]s back. The only egui dependency is
-//! [`egui::Context::request_repaint`] used to wake the GUI when a
-//! result arrives — every other concern is pure Rust and will move
-//! into `core/ui` in a later step.
+//! sends [`WorkerResult`]s back. After each send the worker calls
+//! the renderer-supplied [`crate::session::RepaintFn`] to nudge the
+//! UI's event loop — egui's `request_repaint` for desktop, a native
+//! run-loop post for mobile, etc.
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -17,7 +17,8 @@ use chess_tutor_engine::opponent::NoiseProfile;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Move, Value};
 use chess_tutor_narration::{format_retrospective, NarrationOptions};
-use eframe::egui;
+
+use crate::session::RepaintFn;
 
 const RETROSPECTIVE_MULTI_PV: usize = 3;
 /// Safety caps for analytical searches that auto-fire (retrospective,
@@ -120,7 +121,7 @@ pub(crate) enum NoisePickInfo {
     },
 }
 
-pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx: egui::Context) {
+pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, repaint: RepaintFn) {
     // Two engines live in the worker:
     //
     // - `engine` — the play engine. Searches for the bot's move and
@@ -202,7 +203,7 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx
                     }
                 };
                 let _ = tx.send(WorkerResult::Search { gen, mv, line, noise_pick, elapsed });
-                ctx.request_repaint();
+                repaint();
             }
             WorkerJob::Retrospective {
                 mut pre_move_pos,
@@ -254,7 +255,7 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx
                     target_index,
                     text,
                 });
-                ctx.request_repaint();
+                repaint();
             }
             WorkerJob::Analyze {
                 mut pos,
@@ -286,7 +287,7 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, ctx
                 };
                 let analyses = analyze_position(&mut analysis_engine, &mut pos, params);
                 let _ = tx.send(WorkerResult::Analyze { for_key, analyses });
-                ctx.request_repaint();
+                repaint();
             }
         }
     }

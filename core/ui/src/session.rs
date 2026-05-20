@@ -1,15 +1,13 @@
-//! GUI-agnostic session state and game logic.
+//! Platform-agnostic session state and game logic.
 //!
 //! Owns the live position, history, viewing index, opponent profile,
-//! hint state, and the channel pair used to talk to the worker. The
-//! rendering modules (`draw::*`) only add `impl App` blocks that paint
-//! the current state — they do not maintain state of their own.
-//!
-//! Step 1 of the chess-tutor-ui split keeps this all under the desktop
-//! crate; step 3 moves it (along with [`crate::worker`]) into a
-//! `core/ui` crate so the CLI and mobile shells can consume it.
+//! hint state, and the channel pair used to talk to the worker.
+//! Renderers consume [`crate::view`] descriptors built by the
+//! `build_*_view` methods and feed user intents back via
+//! [`Session::dispatch`].
 
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -20,7 +18,6 @@ use chess_tutor_engine::opponent::{EvalMask, NoiseProfile, OpponentProfile};
 use chess_tutor_engine::position::{Position, StateInfo};
 use chess_tutor_engine::san;
 use chess_tutor_engine::types::{Color, File, Move, MoveKind, Piece, PieceType, Rank, Square, Value};
-use eframe::egui;
 
 use crate::event::Event;
 use crate::view::{
@@ -30,6 +27,12 @@ use crate::view::{
     SidePanelBody, SidePanelView, TopBarView,
 };
 use crate::worker::{worker_loop, NoisePickInfo, WorkerJob, WorkerResult};
+
+/// Renderer-supplied "wake up" callback. The worker thread calls this
+/// after sending a result to nudge the renderer's event loop:
+/// `egui::Context::request_repaint` for desktop, a native run-loop
+/// post for iOS / Android, a no-op for headless CLI consumers.
+pub type RepaintFn = Arc<dyn Fn() + Send + Sync>;
 
 pub(crate) const ENGINE_TURN_NODE_CAP: u64 = 5_000_000;
 pub(crate) const HINT_MULTI_PV: usize = 3;
@@ -52,24 +55,24 @@ pub(crate) struct EngineInfo {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ColorChoice {
+pub enum ColorChoice {
     White,
     Black,
     Random,
     Both,
 }
 
-pub(crate) struct NewGameForm {
-    pub(crate) color: ColorChoice,
-    pub(crate) fen: String,
-    pub(crate) depth: u32,
+pub struct NewGameForm {
+    pub color: ColorChoice,
+    pub fen: String,
+    pub depth: u32,
     /// Bot move-sampling knobs. Persists across New Game clicks so the
     /// user can tune incrementally between games without losing prior
     /// settings.
-    pub(crate) noise: NoiseProfile,
+    pub noise: NoiseProfile,
     /// Eval categories the bot is blind to. Same persistence rule.
-    pub(crate) eval_mask: EvalMask,
-    pub(crate) error: Option<String>,
+    pub eval_mask: EvalMask,
+    pub error: Option<String>,
 }
 
 impl NewGameForm {
@@ -77,24 +80,24 @@ impl NewGameForm {
     /// the user is currently playing against — encourages incremental
     /// tweaking rather than rebuilding settings from scratch every
     /// time they click New Game.
-    fn from_current(app: &App) -> Self {
+    fn from_current(session: &Session) -> Self {
         Self {
-            color: match app.engine_plays {
+            color: match session.engine_plays {
                 Some(Color::Black) => ColorChoice::White,
                 Some(Color::White) => ColorChoice::Black,
                 None => ColorChoice::Both,
             },
             fen: String::new(),
-            depth: app.depth,
-            noise: app.opponent.noise.clone(),
-            eval_mask: app.opponent.eval_mask,
+            depth: session.depth,
+            noise: session.opponent.noise.clone(),
+            eval_mask: session.opponent.eval_mask,
             error: None,
         }
     }
 
     /// Defaults for the first-launch dialog — same shape as
     /// [`Self::from_current`] would produce for a freshly constructed
-    /// [`App`], but without needing one to exist yet.
+    /// [`Session`], but without needing one to exist yet.
     fn initial() -> Self {
         Self {
             color: ColorChoice::White,
@@ -120,7 +123,7 @@ pub(crate) struct HistoryEntry {
     pub(crate) engine_info: Option<EngineInfo>,
 }
 
-pub(crate) struct App {
+pub struct Session {
     pub(crate) position: Position,
     pub(crate) position_keys: Vec<u64>,
     pub(crate) history: Vec<HistoryEntry>,
@@ -212,11 +215,11 @@ pub(crate) struct HintResult {
     pub(crate) analyses: Vec<chess_tutor_engine::analysis::MoveAnalysis>,
 }
 
-impl App {
-    pub(crate) fn new(ctx: egui::Context) -> Self {
+impl Session {
+    pub fn new(repaint: RepaintFn) -> Self {
         let (job_tx, job_rx) = mpsc::channel::<WorkerJob>();
         let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
-        thread::spawn(move || worker_loop(job_rx, result_tx, ctx));
+        thread::spawn(move || worker_loop(job_rx, result_tx, repaint));
 
         // First-launch behaviour: open the New Game dialog
         // immediately so the user picks difficulty / colour before
@@ -602,7 +605,7 @@ impl App {
         });
     }
 
-    pub(crate) fn poll_worker(&mut self) {
+    pub fn poll_worker(&mut self) {
         while let Ok(result) = self.worker_rx.try_recv() {
             self.handle_worker_result(result);
         }
@@ -811,7 +814,7 @@ impl App {
     /// the renderers stateless about *what* an interaction means — the
     /// session resolves all priority rules (cancel ordering, snap-to-
     /// live mapping, etc.).
-    pub(crate) fn dispatch(&mut self, event: Event) {
+    pub fn dispatch(&mut self, event: Event) {
         match event {
             Event::SelectSquare(sq) => self.handle_click(sq),
             Event::ConfirmPromotion(mv) => {
@@ -864,7 +867,7 @@ impl App {
 
     // ---- View builders -------------------------------------------------
 
-    pub(crate) fn build_top_bar_view(&self) -> TopBarView {
+    pub fn build_top_bar_view(&self) -> TopBarView {
         let hint_can_open = self.is_viewing_live()
             && !self.engine_thinking
             && self.is_users_turn()
@@ -880,7 +883,7 @@ impl App {
         }
     }
 
-    pub(crate) fn build_eval_bar_view(&self) -> EvalBarView {
+    pub fn build_eval_bar_view(&self) -> EvalBarView {
         let score = self.viewed_engine_info().map(|i| i.score_white_pov);
         let (white_ratio, label) = match score {
             Some(v) if v.abs() >= Value::MATE_IN_MAX_PLY => {
@@ -900,7 +903,7 @@ impl App {
         EvalBarView { white_ratio, label }
     }
 
-    pub(crate) fn build_board_view(&self) -> BoardView {
+    pub fn build_board_view(&self) -> BoardView {
         let viewed_pos = self.viewed_position().clone();
         let viewed_mv = self.viewed_entry().map(|e| e.mv);
         let king_in_check = viewed_pos
@@ -988,7 +991,7 @@ impl App {
         }
     }
 
-    pub(crate) fn build_side_panel_view(&self) -> SidePanelView {
+    pub fn build_side_panel_view(&self) -> SidePanelView {
         let body = if self.hint_open {
             SidePanelBody::Hint(self.build_hint_panel_view())
         } else {
@@ -1101,7 +1104,7 @@ impl App {
         }
     }
 
-    pub(crate) fn build_new_game_dialog_view(&mut self) -> Option<NewGameDialogView<'_>> {
+    pub fn build_new_game_dialog_view(&mut self) -> Option<NewGameDialogView<'_>> {
         let first_launch = self.first_launch;
         let form = self.new_game_form.as_mut()?;
         Some(NewGameDialogView { form, first_launch })
@@ -1109,7 +1112,7 @@ impl App {
 }
 
 /// Saturation point for the eval bar's score→ratio mapping. Used by
-/// [`App::build_eval_bar_view`]; lives at module scope so the only
+/// [`Session::build_eval_bar_view`]; lives at module scope so the only
 /// constant referenced by view-building stays adjacent to the
 /// session.
 const EVAL_BAR_SATURATION_CP: f32 = 1000.0;

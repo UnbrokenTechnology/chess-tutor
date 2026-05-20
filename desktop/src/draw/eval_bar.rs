@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::view::EvalBarView;
+use chess_tutor_ui::view::EvalBarView;
 
 pub(crate) fn draw(ui: &mut egui::Ui, view: &EvalBarView) {
     ui.add_space(8.0);

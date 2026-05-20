@@ -1,13 +1,10 @@
+use std::sync::Arc;
+
+use chess_tutor_ui::event::Event;
+use chess_tutor_ui::Session;
 use eframe::egui;
 
 mod draw;
-mod event;
-mod session;
-mod view;
-mod worker;
-
-use event::Event;
-use session::App;
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
@@ -20,13 +17,30 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Chess Tutor",
         native_options,
-        Box::new(|cc| Ok(Box::new(App::new(cc.egui_ctx.clone())))),
+        Box::new(|cc| {
+            // The session spawns a worker thread that needs a "wake
+            // the UI" callback. egui::Context::request_repaint is the
+            // egui-native idiom; we capture the Context in a closure
+            // so the shared layer never sees egui types directly.
+            let ctx = cc.egui_ctx.clone();
+            let repaint = Arc::new(move || ctx.request_repaint());
+            Ok(Box::new(App {
+                session: Session::new(repaint),
+            }))
+        }),
     )
+}
+
+/// Desktop-side `eframe::App`. Thin wrapper around the platform-
+/// agnostic [`Session`]; the only desktop-flavoured concerns are
+/// egui panels and the `eframe::App` trait impl.
+struct App {
+    session: Session,
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_worker();
+        self.session.poll_worker();
 
         // Renderers push intents into this buffer; the session drains
         // it after rendering finishes so mutations don't fight egui's
@@ -34,30 +48,30 @@ impl eframe::App for App {
         let mut events: Vec<Event> = Vec::new();
 
         egui::TopBottomPanel::top("topbar").show(ctx, |ui| {
-            draw::top_bar::draw(ui, &self.build_top_bar_view(), &mut events);
+            draw::top_bar::draw(ui, &self.session.build_top_bar_view(), &mut events);
         });
         egui::SidePanel::left("evalbar")
             .resizable(false)
             .exact_width(56.0)
             .show(ctx, |ui| {
-                draw::eval_bar::draw(ui, &self.build_eval_bar_view());
+                draw::eval_bar::draw(ui, &self.session.build_eval_bar_view());
             });
         egui::SidePanel::right("sidebar")
             .resizable(false)
             .default_width(320.0)
             .show(ctx, |ui| {
-                draw::side_panel::draw(ui, &self.build_side_panel_view(), &mut events);
+                draw::side_panel::draw(ui, &self.session.build_side_panel_view(), &mut events);
             });
         egui::CentralPanel::default().show(ctx, |ui| {
-            draw::board::draw(ui, &self.build_board_view(), &mut events);
+            draw::board::draw(ui, &self.session.build_board_view(), &mut events);
         });
 
-        if let Some(dialog) = self.build_new_game_dialog_view() {
+        if let Some(dialog) = self.session.build_new_game_dialog_view() {
             draw::dialog::draw(ctx, dialog, &mut events);
         }
 
         for event in events {
-            self.dispatch(event);
+            self.session.dispatch(event);
         }
     }
 }

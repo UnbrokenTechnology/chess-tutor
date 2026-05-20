@@ -1,0 +1,12 @@
+[package]
+name = "chess-tutor-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "chess_tutor_ui"
+
+[dependencies]
+chess-tutor-engine = { path = "../engine" }
+chess-tutor-narration = { path = "../narration" }

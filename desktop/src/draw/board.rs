@@ -1,8 +1,8 @@
 use chess_tutor_engine::types::{Color, Piece, PieceType};
 use eframe::egui;
 
-use crate::event::Event;
-use crate::view::{BoardView, MoveDotKind};
+use chess_tutor_ui::event::Event;
+use chess_tutor_ui::view::{BoardView, MoveDotKind};
 
 pub(crate) fn draw(ui: &mut egui::Ui, view: &BoardView, events: &mut Vec<Event>) {
     let avail = ui.available_size();

@@ -1,9 +1,9 @@
 use chess_tutor_engine::opponent::{EvalCategory, EvalMask, NoiseProfile};
 use eframe::egui;
 
-use crate::event::Event;
-use crate::session::ColorChoice;
-use crate::view::NewGameDialogView;
+use chess_tutor_ui::event::Event;
+use chess_tutor_ui::session::ColorChoice;
+use chess_tutor_ui::view::NewGameDialogView;
 
 pub(crate) fn draw(
     ctx: &egui::Context,

@@ -1,7 +1,7 @@
 use eframe::egui;
 
-use crate::event::Event;
-use crate::view::TopBarView;
+use chess_tutor_ui::event::Event;
+use chess_tutor_ui::view::TopBarView;
 
 pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>) {
     ui.horizontal(|ui| {

@@ -1,7 +1,7 @@
 use eframe::egui;
 
-use crate::event::Event;
-use crate::view::{
+use chess_tutor_ui::event::Event;
+use chess_tutor_ui::view::{
     HintPanelState, HintPanelView, MoveListView, RetrospectiveBody, RetrospectiveKind,
     RetrospectivePanelView, SidePanelBody, SidePanelView,
 };
