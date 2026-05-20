@@ -1,11 +1,12 @@
-//! egui-side rendering. Each submodule adds an `impl App` block that
-//! paints one slice of the UI from session state. No drawing module
-//! mutates non-rendering session state directly; user input is fed
-//! back through `App` methods on `session.rs` (`handle_click`,
-//! `takeback`, `toggle_hint`, `try_start_from_form`, ...).
+//! egui-side rendering. Each submodule exposes a `draw` function
+//! that paints one slice of the UI from a view descriptor and emits
+//! intent events into a shared buffer. No drawing module mutates
+//! session state directly; the main loop drains events into
+//! [`crate::session::App::dispatch`].
 //!
-//! Step 2 of the chess-tutor-ui split will replace these direct field
-//! reads with view-descriptor structs.
+//! Step 3 of the chess-tutor-ui split moves `session.rs`, `worker.rs`,
+//! and `view.rs` into a `core/ui` crate. These draw modules stay
+//! desktop-flavoured (egui types live here).
 
 pub(crate) mod board;
 pub(crate) mod dialog;

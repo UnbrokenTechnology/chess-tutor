@@ -1,50 +1,47 @@
 use eframe::egui;
 
-use crate::session::App;
+use crate::event::Event;
+use crate::view::TopBarView;
 
-impl App {
-    pub(crate) fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button("New Game").clicked() {
-                self.open_new_game_dialog();
-            }
-            let can_takeback = !self.history.is_empty();
-            if ui
-                .add_enabled(can_takeback, egui::Button::new("Takeback"))
-                .clicked()
-            {
-                self.takeback();
-            }
-            if ui.button("Flip Board").clicked() {
-                self.flipped = !self.flipped;
-            }
-            // Hint is only meaningful while at the live position and
-            // it's the user's turn to choose a move. Block the button
-            // outside those conditions.
-            let hint_enabled = self.is_viewing_live()
-                && !self.engine_thinking
-                && self.is_users_turn()
-                && self.game_outcome().is_none();
-            let hint_label = if self.hint_open { "Hide Hint" } else { "Hint" };
-            if ui
-                .add_enabled(hint_enabled || self.hint_open, egui::Button::new(hint_label))
-                .clicked()
-            {
-                self.toggle_hint();
-            }
-            if !self.is_viewing_live() && ui.button("▶ Live").clicked() {
-                self.viewing_index = None;
-            }
-            ui.separator();
-            ui.label("Depth:");
-            ui.add(egui::DragValue::new(&mut self.depth).range(1..=20));
-            ui.separator();
-            if self.engine_thinking {
-                ui.spinner();
-                ui.label("engine thinking…");
-            } else if let Some(end) = self.game_outcome() {
-                ui.colored_label(egui::Color32::from_rgb(0xb8, 0x55, 0x00), end);
-            }
-        });
-    }
+pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>) {
+    ui.horizontal(|ui| {
+        if ui.button("New Game").clicked() {
+            events.push(Event::RequestNewGame);
+        }
+        if ui
+            .add_enabled(view.can_takeback, egui::Button::new("Takeback"))
+            .clicked()
+        {
+            events.push(Event::Takeback);
+        }
+        if ui.button("Flip Board").clicked() {
+            events.push(Event::FlipBoard);
+        }
+        let hint_label = if view.hint_open { "Hide Hint" } else { "Hint" };
+        if ui
+            .add_enabled(view.hint_button_enabled, egui::Button::new(hint_label))
+            .clicked()
+        {
+            events.push(Event::ToggleHint);
+        }
+        if !view.viewing_live && ui.button("▶ Live").clicked() {
+            events.push(Event::JumpToLive);
+        }
+        ui.separator();
+        ui.label("Depth:");
+        let mut depth = view.depth;
+        if ui
+            .add(egui::DragValue::new(&mut depth).range(1..=20))
+            .changed()
+        {
+            events.push(Event::ChangeDepth(depth));
+        }
+        ui.separator();
+        if view.engine_thinking {
+            ui.spinner();
+            ui.label("engine thinking…");
+        } else if let Some(end) = view.game_outcome {
+            ui.colored_label(egui::Color32::from_rgb(0xb8, 0x55, 0x00), end);
+        }
+    });
 }

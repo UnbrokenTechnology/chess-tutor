@@ -19,9 +19,16 @@ use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::opponent::{EvalMask, NoiseProfile, OpponentProfile};
 use chess_tutor_engine::position::{Position, StateInfo};
 use chess_tutor_engine::san;
-use chess_tutor_engine::types::{Color, Move, MoveKind, PieceType, Square, Value};
+use chess_tutor_engine::types::{Color, File, Move, MoveKind, Piece, PieceType, Rank, Square, Value};
 use eframe::egui;
 
+use crate::event::Event;
+use crate::view::{
+    BoardCell, BoardView, EvalBarView, HintEntryView, HintPanelState, HintPanelView,
+    MoveDotKind, MoveListCell, MoveListRow, MoveListView, NewGameDialogView, PromotionEntry,
+    PromotionPickerView, RetrospectiveBody, RetrospectiveKind, RetrospectivePanelView,
+    SidePanelBody, SidePanelView, TopBarView,
+};
 use crate::worker::{worker_loop, NoisePickInfo, WorkerJob, WorkerResult};
 
 pub(crate) const ENGINE_TURN_NODE_CAP: u64 = 5_000_000;
@@ -797,7 +804,315 @@ impl App {
             None => true,
         }
     }
+
+    // ---- Event dispatch ------------------------------------------------
+
+    /// Apply a renderer-emitted intent. Centralising this here keeps
+    /// the renderers stateless about *what* an interaction means — the
+    /// session resolves all priority rules (cancel ordering, snap-to-
+    /// live mapping, etc.).
+    pub(crate) fn dispatch(&mut self, event: Event) {
+        match event {
+            Event::SelectSquare(sq) => self.handle_click(sq),
+            Event::ConfirmPromotion(mv) => {
+                self.pending_promotion = None;
+                self.apply_user_move(mv);
+                self.maybe_queue_engine_search();
+            }
+            Event::RequestNewGame => self.open_new_game_dialog(),
+            Event::Takeback => self.takeback(),
+            Event::FlipBoard => self.flipped = !self.flipped,
+            Event::ToggleHint => self.toggle_hint(),
+            Event::JumpToLive => self.viewing_index = None,
+            Event::ChangeDepth(d) => self.depth = d,
+            Event::ViewHistoryIndex(target) => {
+                // Clicking the last move in the list means "back to
+                // live", not "freeze on the live-equivalent index" —
+                // otherwise the user can't distinguish viewing-live
+                // from viewing-at-history-end.
+                self.viewing_index = match target {
+                    Some(i) if i + 1 == self.history.len() => None,
+                    other => other,
+                };
+            }
+            Event::Cancel => self.handle_cancel(),
+            Event::ConfirmNewGame => self.try_start_from_form(),
+            Event::ResetBotForm => {
+                if let Some(f) = self.new_game_form.as_mut() {
+                    f.noise = NoiseProfile::default();
+                    f.eval_mask = EvalMask::EMPTY;
+                }
+            }
+        }
+    }
+
+    /// Resolve [`Event::Cancel`]: promotion picker > open dialog >
+    /// deselect. First-launch dialog is non-cancellable (no game to
+    /// fall back to), so it's skipped in the dialog branch.
+    fn handle_cancel(&mut self) {
+        if self.pending_promotion.is_some() {
+            // deselect() clears pending + selection together.
+            self.deselect();
+            return;
+        }
+        if self.new_game_form.is_some() && !self.first_launch {
+            self.new_game_form = None;
+            return;
+        }
+        self.deselect();
+    }
+
+    // ---- View builders -------------------------------------------------
+
+    pub(crate) fn build_top_bar_view(&self) -> TopBarView {
+        let hint_can_open = self.is_viewing_live()
+            && !self.engine_thinking
+            && self.is_users_turn()
+            && self.game_outcome().is_none();
+        TopBarView {
+            can_takeback: !self.history.is_empty(),
+            hint_open: self.hint_open,
+            hint_button_enabled: hint_can_open || self.hint_open,
+            viewing_live: self.is_viewing_live(),
+            depth: self.depth,
+            engine_thinking: self.engine_thinking,
+            game_outcome: self.game_outcome(),
+        }
+    }
+
+    pub(crate) fn build_eval_bar_view(&self) -> EvalBarView {
+        let score = self.viewed_engine_info().map(|i| i.score_white_pov);
+        let (white_ratio, label) = match score {
+            Some(v) if v.abs() >= Value::MATE_IN_MAX_PLY => {
+                if v.0 > 0 {
+                    (1.0, format!("M{}", (Value::MATE.0 - v.0).max(1)))
+                } else {
+                    (0.0, format!("-M{}", (Value::MATE.0 + v.0).max(1)))
+                }
+            }
+            Some(v) => {
+                let ratio = (v.0 as f32 / EVAL_BAR_SATURATION_CP).clamp(-1.0, 1.0);
+                let pawns = v.0 as f32 / Value::PAWN_MG.0 as f32;
+                (0.5 + 0.5 * ratio, format!("{:+.2}", pawns))
+            }
+            None => (0.5, String::from("—")),
+        };
+        EvalBarView { white_ratio, label }
+    }
+
+    pub(crate) fn build_board_view(&self) -> BoardView {
+        let viewed_pos = self.viewed_position().clone();
+        let viewed_mv = self.viewed_entry().map(|e| e.mv);
+        let king_in_check = viewed_pos
+            .in_check()
+            .then(|| viewed_pos.king_square(viewed_pos.side_to_move()));
+        let live = self.is_viewing_live();
+
+        let mut rows: [[BoardCell; 8]; 8] = std::array::from_fn(|_| {
+            std::array::from_fn(|_| BoardCell {
+                square: Square::new(File::A, Rank::R1),
+                is_light: false,
+                piece: None,
+                last_move: false,
+                selected: false,
+                check_tint: false,
+                move_dot: None,
+            })
+        });
+
+        for display_row in 0..8u8 {
+            for display_col in 0..8u8 {
+                let (file_idx, rank_idx) = if self.flipped {
+                    (7 - display_col, display_row)
+                } else {
+                    (display_col, 7 - display_row)
+                };
+                let is_light = (rank_idx + file_idx) % 2 != 0;
+                let sq = Square::new(
+                    File::from_index(file_idx).unwrap(),
+                    Rank::from_index(rank_idx).unwrap(),
+                );
+                let last_move = viewed_mv
+                    .map(|mv| mv.from() == sq || mv.to() == sq)
+                    .unwrap_or(false);
+                let selected = live && Some(sq) == self.selected;
+                let check_tint = Some(sq) == king_in_check;
+                let piece = viewed_pos.piece_on(sq);
+                let move_dot = if live {
+                    self.legal_from_selected
+                        .iter()
+                        .find(|m| m.to() == sq)
+                        .copied()
+                        .map(|m| {
+                            if self.position.is_capture(m) {
+                                MoveDotKind::Capture
+                            } else {
+                                MoveDotKind::Move
+                            }
+                        })
+                } else {
+                    None
+                };
+                rows[display_row as usize][display_col as usize] = BoardCell {
+                    square: sq,
+                    is_light,
+                    piece,
+                    last_move,
+                    selected,
+                    check_tint,
+                    move_dot,
+                };
+            }
+        }
+
+        let pending_promotion = self.pending_promotion.as_ref().map(|p| {
+            let promoter_color = self.position.side_to_move();
+            let entries: [PromotionEntry; 4] = std::array::from_fn(|i| {
+                let mv = p.candidates[i];
+                let pt = mv.promoted_to();
+                let sq = picker_square_at(p.to, i);
+                let (display_col, display_row) = square_to_display_coords(sq, self.flipped);
+                PromotionEntry {
+                    display_col,
+                    display_row,
+                    piece: Piece::new(promoter_color, pt),
+                    move_: mv,
+                }
+            });
+            PromotionPickerView { entries }
+        });
+
+        BoardView {
+            rows,
+            pending_promotion,
+        }
+    }
+
+    pub(crate) fn build_side_panel_view(&self) -> SidePanelView {
+        let body = if self.hint_open {
+            SidePanelBody::Hint(self.build_hint_panel_view())
+        } else {
+            SidePanelBody::Retrospective(self.build_retrospective_view())
+        };
+        SidePanelView {
+            moves: self.build_move_list_view(),
+            body,
+            stick_to_bottom: self.is_viewing_live(),
+        }
+    }
+
+    fn build_move_list_view(&self) -> MoveListView {
+        let viewing = self.viewing_index;
+        let history_len = self.history.len();
+        let rows = (0..history_len.div_ceil(2))
+            .map(|pair| {
+                let i_white = pair * 2;
+                let i_black = i_white + 1;
+                let white = MoveListCell {
+                    history_index: i_white,
+                    san: self.history[i_white].san.clone(),
+                    selected: viewing == Some(i_white),
+                };
+                let black = self.history.get(i_black).map(|e| MoveListCell {
+                    history_index: i_black,
+                    san: e.san.clone(),
+                    selected: viewing == Some(i_black),
+                });
+                MoveListRow {
+                    move_pair_idx: pair + 1,
+                    white,
+                    black,
+                }
+            })
+            .collect();
+        MoveListView { rows }
+    }
+
+    fn build_retrospective_view(&self) -> RetrospectivePanelView {
+        let game_outcome = self.game_outcome();
+        let Some(entry) = self.panel_entry() else {
+            return RetrospectivePanelView {
+                game_outcome,
+                body: RetrospectiveBody::NoMoves,
+            };
+        };
+        let viewing_back_san = (!self.is_viewing_live()).then(|| entry.san.clone());
+        let kind = if self.is_user_move(entry) {
+            match &entry.retrospective_text {
+                Some(text) if !text.is_empty() => RetrospectiveKind::UserMoveText(text.clone()),
+                Some(_) => RetrospectiveKind::UserMoveEmpty,
+                None => RetrospectiveKind::UserMoveAnalyzing,
+            }
+        } else if let Some(info) = &entry.engine_info {
+            RetrospectiveKind::EngineMove {
+                san: entry.san.clone(),
+                eval_pawns: info.score_white_pov.0 as f32 / Value::PAWN_MG.0 as f32,
+                depth: info.depth,
+                elapsed_ms: info.elapsed.as_millis(),
+            }
+        } else {
+            RetrospectiveKind::EngineInfoMissing
+        };
+        RetrospectivePanelView {
+            game_outcome,
+            body: RetrospectiveBody::Entry {
+                viewing_back_san,
+                kind,
+            },
+        }
+    }
+
+    fn build_hint_panel_view(&self) -> HintPanelView {
+        if self.hint_thinking && self.hint_result.is_none() {
+            return HintPanelView {
+                state: HintPanelState::Loading,
+            };
+        }
+        let Some(result) = &self.hint_result else {
+            return HintPanelView {
+                state: HintPanelState::NoResult,
+            };
+        };
+        if result.analyses.is_empty() {
+            return HintPanelView {
+                state: HintPanelState::NoMoves,
+            };
+        }
+        let root_stm = result.pos.side_to_move();
+        let entries: Vec<HintEntryView> = result
+            .analyses
+            .iter()
+            .map(|ma| {
+                let san = san::format(&result.pos, ma.mv);
+                let score_str = format_score_root_pov(ma.score, root_stm);
+                let pv_san = pv_to_san(&result.pos, &ma.pv);
+                let settle_marker = ma.settled_ply.filter(|&i| i < pv_san.len());
+                HintEntryView {
+                    san,
+                    score_str,
+                    depth: ma.depth,
+                    pv_san,
+                    settle_marker,
+                }
+            })
+            .collect();
+        HintPanelView {
+            state: HintPanelState::Ready(entries),
+        }
+    }
+
+    pub(crate) fn build_new_game_dialog_view(&mut self) -> Option<NewGameDialogView<'_>> {
+        let first_launch = self.first_launch;
+        let form = self.new_game_form.as_mut()?;
+        Some(NewGameDialogView { form, first_launch })
+    }
 }
+
+/// Saturation point for the eval bar's score→ratio mapping. Used by
+/// [`App::build_eval_bar_view`]; lives at module scope so the only
+/// constant referenced by view-building stays adjacent to the
+/// session.
+const EVAL_BAR_SATURATION_CP: f32 = 1000.0;
 
 pub(crate) fn game_history_for_search(position_keys: &[u64]) -> Vec<u64> {
     if position_keys.is_empty() {
@@ -862,4 +1177,57 @@ fn log_new_game_intro(opponent: &OpponentProfile) {
     // hasn't committed to any specific opening at game start. The
     // opening that emerges is announced inline on each book move
     // (`book: engine plays X (ECO Name)`).
+}
+
+/// Display (column, row) for `sq` given board orientation.
+fn square_to_display_coords(sq: Square, flipped: bool) -> (u8, u8) {
+    let file_idx = sq.file().index() as u8;
+    let rank_idx = sq.rank().index() as u8;
+    if flipped {
+        (7 - file_idx, rank_idx)
+    } else {
+        (file_idx, 7 - rank_idx)
+    }
+}
+
+/// The `i`-th square in the promotion picker stack: index 0 = the
+/// promotion target itself, then walking back along the file toward
+/// the centre of the board. Always returns a valid square because
+/// promotions land on rank 1 or rank 8, leaving four ranks of
+/// headroom in the relevant direction.
+fn picker_square_at(target: Square, i: usize) -> Square {
+    let file = target.file();
+    let target_rank = target.rank().index() as i8;
+    let direction: i8 = if target_rank == 7 { -1 } else { 1 };
+    let rank_idx = (target_rank + direction * i as i8) as u8;
+    Square::new(file, Rank::from_index(rank_idx).unwrap())
+}
+
+/// Format a score for display in the hint panel. Root-stm POV is
+/// the natural reading there ("if you play this, you'll be at
+/// +0.30").
+fn format_score_root_pov(score: Value, _root_stm: Color) -> String {
+    if score.abs() >= Value::MATE_IN_MAX_PLY {
+        if score.0 > 0 {
+            format!("M{}", (Value::MATE.0 - score.0).max(1))
+        } else {
+            format!("-M{}", (Value::MATE.0 + score.0).max(1))
+        }
+    } else {
+        let pawns = score.0 as f32 / Value::PAWN_MG.0 as f32;
+        format!("{:+.2}", pawns)
+    }
+}
+
+/// Walk a PV applying moves to a clone of `root` and producing a
+/// SAN per ply. Stops on any ply that doesn't apply cleanly
+/// (shouldn't happen with a real PV from the engine).
+fn pv_to_san(root: &Position, pv: &[Move]) -> Vec<String> {
+    let mut out = Vec::with_capacity(pv.len());
+    let mut pos = root.clone();
+    for mv in pv {
+        out.push(san::format(&pos, *mv));
+        pos.do_move(*mv);
+    }
+    out
 }
