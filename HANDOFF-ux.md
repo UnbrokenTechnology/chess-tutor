@@ -2,102 +2,191 @@
 
 Forward-looking UX context. The product surface is teaching feedback, not the engine. See [`HANDOFF.md`](HANDOFF.md) for the index, [`CLAUDE.md`](CLAUDE.md) for the mission and ground rules, and [`HANDOFF-perf.md`](HANDOFF-perf.md) for engine perf state (read only if perf becomes relevant to a UX task).
 
-## Current focus: teaching UI iteration
+## Current focus: visual learning elements
 
-The engine is now performant enough for the planned mobile use case: at depth 12–14 the GUI feels real-time, retrospective is sub-300 ms on hard positions and ~100 ms on typical middlegames, full d=20 bench is 43 s with 8 threads (was an unfinishable multi-hour run a week ago). Further engine perf work has diminishing returns relative to the teaching-UX work that is now the bottleneck on the actual product.
+The platform-portable UI refactor is complete; the next layer of teaching surface is **visual annotations** on the desktop board — arrows for pins / threats / refutation lines, highlighted squares for weak pawns / outposts / king-attack flanks, badges for trap moments in the move list. The architecture is in place; the missing pieces are (a) new facts the engine doesn't yet produce (pin/fork/skewer detection), (b) new view descriptors that carry annotation payloads, and (c) the egui drawing code that paints them.
 
-See [`core/engine/src/analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!` for the design brief on the move-analysis pipeline (Phase 2 cheap-pass / surprise detection, Phase 4 signal-mask, Phase 5 tactic library) and the `narration` crate for the prose layer. Continued real-game playthrough is how the wording and thresholds get tuned — every retrospective narrator has unit tests for shape but the prose itself was picked a priori.
+### What's already available to consume
+
+Renderers already have access to these structured facts via [`Session`](core/ui/src/session.rs). No new plumbing is needed to start drawing arrows from any of them — only new view descriptors + draw code.
+
+- **`Session::history()` → `&[HistoryEntry]`** — per-move records:
+  - `retrospective: Option<RetrospectiveResult>` — for user moves, carries `Vec<MoveAnalysis>` with PVs, scores, per-term deltas, ply-by-ply traces. Filled async by the worker.
+  - `engine_info: Option<EngineInfo>` — for engine moves, carries score / depth / nodes / nps / elapsed.
+  - `noise_pick: Option<NoisePickInfo>` — when noise drove the bot off best.
+  - `trap_events: Vec<TrapEvent>` — for moves played while a trap was mid-refutation.
+  - `trap_hit: Option<TrapHit>` — for the trigger move of a new trap.
+  - `pending_trap_before: Option<PendingTrap>` — internal undo-restore field; renderers can ignore.
+- **`Session::pending_trap() → Option<&PendingTrap>`** — live cursor when a trap is mid-refutation. Has `.entry` (the static TrapEntry with its full refutation tree) and `.hit` (the TrapHit snapshot taken at trigger).
+- **`Session::trap_threats() → Vec<TrapThreatened>`** — pre-move warnings for the current position. Each entry has `candidate_uci`, `candidate_san`, and the `TrapHit` you'd be handing the opponent. Refresh per frame is fine; the underlying scan is cheap.
+- **`Session::run_analysis(pos, SearchParams) → AnalysisOutcome`** — blocking analytical search for ad-hoc queries. Returns `analyses: Vec<MoveAnalysis>` + timing. Already used by the CLI's REPL `search` / `analyze`; the desktop could use it to drive a "what's the engine's plan for this position?" panel.
+
+### Already-spatial data the engine produces
+
+- **Move.from() / Move.to()** — every move trivially renders as a from→to arrow. Last-played move, engine-preferred move, hint suggestions all have this.
+- **PV moves** — `MoveAnalysis.pv: Vec<Move>` carries the principal variation. Drawing the first 1-2 plies as chained arrows is natural ("if you'd played e4, here's how the line goes: e4 → e5 → Nf3").
+- **TrapHit.main_line_san** — the punisher's scripted refutation as SAN strings. Parsing back to `Move`s and rendering as arrows is straightforward (need a pre-move position to disambiguate, which Session can provide).
+- **`Position::king_square(color)`** — for any king-safety annotation; the king's location is always known.
+- **Pinned-piece detection** — [`Position::slider_blockers(candidate_attackers, target)`](core/engine/src/position/blockers.rs) returns `(blockers, pinners)` as bitboards in one call. The convenience wrapper [`Position::blockers_for_king(us)`](core/engine/src/position/blockers.rs) returns just the pieces of `us` pinned to their own king. Stockfish's terminology: a *blocker* is a piece that, if removed, would expose `target` to a slider attack; a *pinner* is the attacker behind it. **This is the lowest-cost first pin renderer**: call `slider_blockers(enemy_pieces, king_sq)` for each side, emit arrows from pinner → blocker → king for each bit pair.
+
+### What's missing (needs engine work)
+
+These are general tactical patterns the engine doesn't yet annotate. They'd live in [`core/engine/src/analysis/`](core/engine/src/analysis/) as Phase 5 of the teaching pipeline (called out as deferred in [`analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!`):
+
+- **Forks** — one piece attacking two-or-more enemy pieces of higher value.
+- **Skewers** — like a pin but the more valuable piece is in front.
+- **Discovered attacks** — moving piece A unmasks piece B's attack on a target.
+- **Double attacks** — the moving piece itself creates two threats.
+- **Hanging pieces** — undefended targets after a sequence.
+
+Each would output a structured `TacticHit` (or similar) with the spatial data needed to draw it: from/to squares, kind tag, severity. Parallel to the trap library's `TrapHit` shape but for general patterns, not pre-scripted lines.
+
+**Order of operations to consider:** start by drawing what's already cheap (pins from bitboards, trap arrows from `TrapHit`, retrospective best-move arrow from `MoveAnalysis.pv[0]`). Add fork/skewer/etc. when the visual layer's rendering pipeline is already in place and we know exactly what shape of payload we want.
+
+### View descriptor design sketch
+
+`BoardView` today carries pre-oriented per-cell semantic flags only. Visual annotations want a separate layer — overlay arrows, highlighted squares, badges — drawn *on top* of the board. Suggested shape:
+
+```rust
+pub struct BoardView {
+    pub rows: [[BoardCell; 8]; 8],
+    pub pending_promotion: Option<PromotionPickerView>,
+    pub annotations: Vec<BoardAnnotation>,  // NEW
+}
+
+pub enum BoardAnnotation {
+    Arrow {
+        from: Square,
+        to: Square,
+        kind: AnnotationKind,
+    },
+    SquareHighlight {
+        square: Square,
+        kind: AnnotationKind,
+    },
+    // Future: PieceBadge { square, glyph } for "weak piece" markers etc.
+}
+
+pub enum AnnotationKind {
+    /// Engine-preferred move you didn't play. Subtle blue/green.
+    BestMove,
+    /// Pin: pinner → blocker, or blocker → king. Red/amber.
+    Pin,
+    /// Trap refutation main line. Bold red.
+    TrapRefutation,
+    /// Threat — your piece is attacked. Yellow.
+    Threat,
+    /// Custom kinds as we add tactics.
+    Generic(&'static str),  // tag the renderer can interpret
+}
+```
+
+Renderers (egui, CLI text fallback) each map `AnnotationKind` to their own visual language — egui paints actual arrows; CLI could print "→ engine preferred c4" text under the board (or just ignore annotations, treating them as a desktop-only feature for now).
+
+### Where annotations come from (the view-builder)
+
+`Session::build_board_view()` is the natural place. It already gathers `viewed_position` + last-move + selected + legal-moves; adding "and these annotations" is one more reader. The annotations come from:
+
+- The viewed history entry's `retrospective` (best-move arrow, engine-preferred-line arrow).
+- `pending_trap` + `trap_threats()` (trap arrows + threat-square highlights).
+- The viewed position itself (pin bitboards → pin arrows; check-tint → already in `BoardCell.check_tint`).
+- Future Phase-5 tactic library output, once it exists.
+
+Whether annotations are computed per-frame or cached on `HistoryEntry` is a question the renderer doesn't dictate — start with per-frame, profile if it becomes hot.
+
+### Recommended starting slice
+
+1. **`BoardView` grows the `annotations` field.** No behavioural change yet — empty vec everywhere.
+2. **Pin renderer:** `Session::build_board_view` reads `Position::blockers` / `Position::pinners`, emits `BoardAnnotation::Arrow { Pin }` from pinner → king through the pinned piece. Desktop's `draw::board` paints them as red arrows.
+3. **Trap-refutation arrows:** when `pending_trap.is_some()`, emit arrows for the next expected punisher move and the defender's main-line response (parsed from the static `TrapEntry`). One arrow per active layer of the tree.
+4. **Best-move arrow on retrospective panel:** the user just played M but the engine preferred M'; draw an arrow for M'. Lives on the panel-entry's `retrospective.analyses[0].pv[0]`.
+
+Each slice is testable independently — pin detection has unit-test candidates, trap arrows can be verified against the Damiano fixture, best-move arrows are visible-by-eye in a normal game.
+
+---
+
+## Architectural state (recap)
+
+For a fresh context: the refactor that ended just before this handoff was rewritten landed five commits. The shape now is:
+
+- **`chess-tutor-engine`** produces facts. `MoveAnalysis` (term deltas, surprise, verdict, settled-ply, PV, ply traces) for searches. `TrapEvent` / `TrapHit` / `TrapThreatened` for the trap library. Pure data; no platform coupling.
+- **`chess-tutor-ui` (`Session`)** owns game state — position, history, opponent profile, book cursor, trap cursor — plus a worker thread that runs searches. `RepaintFn` callback at construction lets the renderer wake its event loop; no other platform types in the API.
+- **Renderers** transform facts into platform-specific surfaces.
+  - `chess-tutor-narration` is **the text renderer** — same conceptual layer as `draw::board`. Used by desktop's `draw::side_panel` (default opts) and CLI's `play.rs` (with `--no-explain-best`). The core/ui crate does *not* depend on it.
+  - `desktop/src/draw/*` paints egui views.
+  - `core/cli/src/board.rs` paints ANSI views.
+
+`HistoryEntry` is the persistent record of "everything that happened on this move" — raw data, no formatting. Renderers format on read.
+
+The CLI no longer holds a private engine. Engine play, auto-retrospective, REPL `search`, REPL `analyze` all flow through Session's worker (the last three via `Session::run_analysis` blocking helper).
 
 ## Opponent profile / bot variability
 
-Goal: ship bot-tuning toggles so games aren't deterministic from move 1, and so the student can practice against specific openings or weakened opponents. All four pillars — A (skeleton), B (opening book), C (eval signal mask), D (move noise + blunder) — have landed. Read the [`opponent.rs`](core/engine/src/opponent.rs) module doc for the strict invariant: **analytical paths (retrospective, hint, `analyze`) must never consult the profile** — they need to judge the user's move against true best play.
+Goal: ship bot-tuning toggles so games aren't deterministic from move 1, and so the student can practice against specific openings or weakened opponents. All four pillars — A (skeleton), B (opening book), C (eval signal mask), D (move noise + blunder) — landed in May 2026. Read the [`opponent.rs`](core/engine/src/opponent.rs) module doc for the strict invariant: **analytical paths (retrospective, hint, `analyze`) must never consult the profile** — they need to judge the user's move against true best play.
 
 Phase D surface (delivered 2026-05-16):
-- 7 [`NoiseProfile`](core/engine/src/opponent.rs) knobs, all-off by default. Three branches, evaluated in this order — **blunder → wild → softmax**. Blunder is the calibrated mistake signal (always picks a worse-than-best move when it fires), so it gets first crack; wild is chaotic and fills whatever budget remains.
-  - **Blunder branch** (`blunder_chance: f32`, `blunder_min_loss_cp: i32` default 100, `blunder_max_loss_cp: i32` default 400): pick uniformly from engine-considered lines whose loss vs #1 falls in the band `[min, max]`. When no line falls in the band the picker pools the line(s) with the largest loss strictly below the band's lower edge with the line(s) with the smallest loss strictly above the upper edge, and picks from that pool — but lines further from the band on either side are excluded. The above-tier admission additionally has a **tolerance cap** (`BLUNDER_FALLBACK_TOLERANCE = 2.0×` max-loss): a closest-above line is admitted only if its loss is at most `max_loss × tolerance`. In positions where the only non-#1 alternatives are catastrophic (e.g. engine sees a forcing tactic, every other move loses 20+ pawns), the cap rejects them all and the blunder is **skipped** entirely — bot plays #1, and a stderr log notes that the configured rate is being slightly under-delivered. That's the load-bearing property: bots configured for "small blunders only" never throw away a queen when the only sub-band alternative is a piece sacrifice. Mate-guarded.
-  - **Wild branch** (`wild_chance: f32`): per-move probability of picking uniformly from **all legal moves**, bypassing the engine ranking entirely. The only branch that can pick a move the search didn't surface — i.e. genuinely beginner-level mistakes like leaving a piece in a pawn's path. Mate-guarded.
-  - **Softmax branch** (`candidate_pool: usize`, `temperature_cp: i32`): Boltzmann-weighted sampling over the top-K when both pool > 1 and temperature > 0.
-  - Plus `guaranteed_mate_in: u32` (default 1) — suppresses blunder + wild branches when the bot sees a mate up to and including that depth, so mate-in-1 is never thrown away.
-- [`noise::pick`](core/engine/src/noise.rs) — pure function `(profile, seed, ply, &lines, &legal_moves) -> NoisePick`. `NoisePick::Line(idx)` for normal/sampled/blunder picks; `NoisePick::Wild(mv)` when the wild branch fires. Deterministic given `(seed, ply)`; per-game seed is logged so a varied game can be replayed by passing `--seed N` back.
-- CLI flags: `--noise-pool N`, `--noise-temp CP`, `--blunder-chance F`, `--blunder-severity CP`, `--wild-chance F`, `--guaranteed-mate-in N`. REPL `noise [show | pool N | temp CP | blunder F | severity CP | wild F | guarantee N | reset]`. Noise-driven engine moves are annotated `[noise: #K of N (-XX cp)]` (sampled) or `[noise: wild — engine preferred X (+Y)]` (wild) so the student knows the bot is off the best line.
-- Desktop: reads `self.opponent.noise` when queuing the play search; sets `params.multi_pv = noise.effective_multi_pv()`. Worker computes legal moves, calls the picker, reports `NoisePickInfo::Sampled` or `NoisePickInfo::Wild` (logged to stderr for now; visible per-move tag in the move list is a follow-on). Wild moves get no `engine_info` badge in the move list (no search-line for that exact move).
-- Desktop New Game dialog: full settings UI with sliders for the six noise knobs + collapsible eval-mask checkboxes + "Reset bot to defaults" button. The dialog auto-opens at first launch (no Cancel — only path forward is to commit a configuration) so the first thing the user does is pick difficulty. Subsequent New Game clicks pre-populate from the current game, so tweaking between games is incremental rather than from-scratch.
-- Perf: off-profile is no-overhead — `is_off()` short-circuits and the engine keeps the single-PV fast path. When sampling is on, MultiPV costs roughly `K×` the single-PV time per move. Wild + softmax-only profiles keep the single-PV fast path because wild doesn't read the lines; only `blunder_chance > 0` widens MultiPV to at least [`BLUNDER_POOL_MIN`](core/engine/src/opponent.rs) (6).
+- 7 [`NoiseProfile`](core/engine/src/opponent.rs) knobs, all-off by default. Three branches, evaluated in this order — **blunder → wild → softmax**.
+  - **Blunder branch** (`blunder_chance`, `blunder_min_loss_cp`, `blunder_max_loss_cp`): pick uniformly from engine-considered lines whose loss vs #1 falls in `[min, max]`. When the band is empty, the picker takes the closest line on each side, with a `BLUNDER_FALLBACK_TOLERANCE = 2.0×` cap on the above-band side — blunders skip entirely rather than throw away a queen. Mate-guarded.
+  - **Wild branch** (`wild_chance`): per-move probability of picking uniformly from **all legal moves**, bypassing engine ranking. Only branch that can pick a move the search didn't surface. Mate-guarded.
+  - **Softmax branch** (`candidate_pool`, `temperature_cp`): Boltzmann-weighted sampling over the top-K.
+  - Plus `guaranteed_mate_in` (default 1) — suppresses blunder + wild when the bot sees a short mate.
+- [`noise::pick`](core/engine/src/noise.rs) — pure function `(profile, seed, ply, &lines, &legal_moves) -> NoisePick`. Deterministic given `(seed, ply)`; per-game seed is logged so a varied game can be replayed via `--seed N`.
+- CLI flags: `--noise-pool`, `--noise-temp`, `--blunder-chance`, `--blunder-min-loss`, `--blunder-max-loss`, `--wild-chance`, `--guaranteed-mate-in`. REPL: `noise [show | pool N | temp CP | blunder F | min-loss CP | max-loss CP | wild F | guarantee N | reset]`.
+- Desktop New Game dialog has the full settings UI. Auto-opens at first launch.
+- **Noise picks land on `HistoryEntry.noise_pick`.** Both renderers can read them; CLI tags inline (`[noise: softmax #3 of 6 (-42 cp)]`), desktop only logs to stderr today — a visible per-move badge in the move list is a small follow-on.
 
 Phase D follow-on, deferred:
-- **Visible per-move noise tag in the move list.** Worker reports `NoisePickInfo` but it's only logged to stderr. The GUI move list should show a small badge ("noise: wild" or "blunder #6") on the corresponding move so the student can see at a glance which bot moves were deliberately weakened.
-- **ELO presets**. `--bot-elo 1200` (CLI) and a "Preset" dropdown in the desktop dialog that fills in `(pool, temp, blunder, severity, guarantee, wild)` for you. Initial values were sketched in the design discussion: 100 ELO is wild-heavy, 1400 ELO is mostly softmax with a tiny blunder rate. Defer until the manual knobs feel clunky in real play (so we can tune the preset values from actual playthroughs).
-- **Opponent-side retrospective**. Retrospective currently only fires on USER moves. A separate "the bot just played a deliberate mistake — can you find the punishment?" line when `noise_pick.is_some()` and `delta_from_top_cp <= -blunder_min_loss_cp` would be a powerful teaching surface, but requires resolving the analytical-paths invariant (the analytical search would need to know what the bot's noise profile is *for the user's retrospective only*, not for the bot's own decision).
-- **More aggressive defaults**. Current defaults are all-off; once we have ELO presets and they're tuned from playthrough, the desktop dialog could default to a middle preset (~800 ELO) so a fresh install gives a more human-feeling opponent out of the box.
-- **Seed surface in the GUI.** Desktop logs the seed to stderr but doesn't show it in the UI; players who want to replay a varied game can't easily copy the seed back. Add a status line under the move list or in the New Game dialog with the active seed + a way to paste one in to replay.
+- **Visible per-move noise badge in the desktop move list.** Data already on `HistoryEntry.noise_pick`. ~5 lines of `draw::side_panel` work.
+- **ELO presets.** `--bot-elo 1200` (CLI) + a "Preset" dropdown in the desktop dialog filling in `(pool, temp, blunder, severity, guarantee, wild)`. Defer until the manual knobs feel clunky in real play (so presets get tuned from actual playthrough).
+- **Opponent-side retrospective.** A "the bot just played a deliberate mistake — can you find the punishment?" line when `noise_pick.is_some()` and the delta is large. Requires the analytical search to read the bot's profile for this *one* user-facing purpose — currently forbidden by the analytical-paths invariant; needs a carefully-scoped exception.
+- **More aggressive defaults.** Once ELO presets are tuned, default new-install to a ~800-ELO preset for a more human-feeling out-of-box opponent.
+- **Seed surface in the GUI.** Desktop logs the seed to stderr but doesn't show it in the UI; players who want to replay a varied game can't copy the seed back. Add a status line + paste-in field.
 
-Phase C surface (delivered):
-- 8 toggleable [`EvalCategory`](core/engine/src/opponent.rs) values: `pawn-structure`, `pieces`, `mobility`, `king-safety`, `threats`, `passed-pawns`, `space`, `initiative`. Material and imbalance are deliberately not exposed (disabling them produces gibberish play, not a teaching scenario).
-- CLI: `--disable-eval CATEGORY[,CATEGORY...]` startup flag + REPL `eval-mask list / disable CAT / enable CAT / reset` (toggles take effect on the next engine move).
-- Desktop: reads `self.opponent.eval_mask` when queuing the play search; no UI for editing yet — wants a settings panel mirroring the CLI surface.
-- Perf: TT=16 1T d=13 bench identical to pre-Phase-C (8 per-category branches fold under branch prediction on the empty-mask hot path).
+Phase C (eval mask, delivered): 8 toggleable `EvalCategory` values. CLI surface complete; desktop reads the mask but has no UI for editing (the New Game dialog has a collapsible checkbox panel — close enough; if more granular mid-game editing is wanted, add a settings panel mirroring the CLI's `eval-mask` command).
 
-Opening-book follow-on work, deferred:
-- **Desktop UI for allowed-openings selection (highest priority).** Default is now "every theoretical opening in the TSV" (~3,900 entries via [`all_ids`](core/engine/src/book.rs)). Users will want a settings panel to narrow that set — both *positive* selection ("I want to practice the Caro-Kann this session") and *negative* ("never play the Sicilian against me, I don't know the theory"). The CLI already has `openings list / allow PAT / deny PAT / reset / selected`; the GUI needs an equivalent surface, ideally as a filter list inside the New Game dialog so each game can pick its own subset without leaving the table. The underlying mechanism (`BookSelection::Allowed(Vec<OpeningId>)`) and the per-ply matching engine already support arbitrary subsets.
-- Teaching-note overlay — separate `book_notes.toml` keyed by `(eco, name)` with short prose blurbs the GUI surfaces alongside the book line. Empty to start; populate the marquee openings first.
-- Desktop UI for opening status — today the only desktop surface is a stderr log on each book move. Wants at minimum a "book: <opening> (ECO Name)" badge in the move list or under the board so the user sees the opening name at a glance.
-- "New game in book" REPL command — CLI `openings allow/deny` only takes effect on the next game; a `new-game` REPL verb would re-create the cursor in the current REPL session.
-- Transposition-aware book matching — current cursor uses move-prefix matching, so games that transpose into a curated line via a different move order won't be recognised. Low priority (most book moves are reached via the canonical order; teaching-tool users typically play standard sequences).
+Opening-book follow-on, deferred:
+- **Desktop UI for allowed-openings selection.** Default is "every theoretical opening in the TSV" (~3,900 entries via [`all_ids`](core/engine/src/book.rs)). CLI has `openings list / allow PAT / deny PAT / reset / selected`; desktop needs an equivalent inside the New Game dialog so each game can pick its own subset.
+- **Teaching-note overlay** — separate `book_notes.toml` keyed by `(eco, name)` with short prose blurbs the GUI surfaces alongside the book line.
+- **Desktop UI for opening status** — today the only desktop surface is a stderr log on book moves. Wants a "book: <opening>" badge in the move list or under the board.
+- **"New game in book" REPL command** — CLI `openings allow/deny` only takes effect on the next game; a `new-game` REPL verb would re-create the cursor in the current REPL session.
+- **Transposition-aware book matching** — current cursor uses move-prefix; transpositions miss. Low priority.
 
-Decisions locked in:
-- Book entries are discrete TSV rows, not branches — "Caro-Kann Variation X" is its own opening, separate from "Caro-Kann".
-- Per-ply matching is the only mode (no game-start pre-commit) — see commit `15bb2e8` for the rationale.
-- Default-allowed set is "every TSV entry" — see commit landing this note for the rationale (the 8-entry curated default was too narrow; users want variety AND the freedom to filter).
-- Seed is random per game, logged in the play prompt; pass `--seed <n>` to replay.
-- London System and other piece-placement-defined "systems" are out of scope for opponent profile; system detection is a separate quality issue against [`openings.rs`](core/engine/src/openings.rs).
+Locked-in book decisions:
+- Book entries are discrete TSV rows, not branches.
+- Per-ply matching is the only mode (commit `15bb2e8`).
+- Default-allowed set is "every TSV entry."
+- Seed is random per game, logged in the play prompt.
+- London System and other system-by-piece-placement openings are out of scope for the book; system detection is a separate quality issue against [`openings.rs`](core/engine/src/openings.rs).
 
 ## Teaching layer, deferred
 
 See [`core/engine/src/analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!` for full spec on:
 - **Phase 2 — cheap-pass + surprise detection** (depth-1 qsearch + SEE for every legal move).
 - **Phase 4 — signal-mask** (zero each `EvalTrace` term in turn, re-rank, surface "you'd prefer M' if you undervalued X").
-- **Phase 5 — tactic library** (general patterns: pin / fork / skewer / double attack / discovered attack / etc., parallel to `traps/`).
+- **Phase 5 — tactic library** (general patterns: pin / fork / skewer / double attack / discovered attack / etc., parallel to `traps/`). **This is the engine-side prerequisite for the richest visual annotations.** Specifically the spatial data (which squares, which arrows) needs to come out of this.
 
 Additional:
 
-- **Drill-down API for compound eval terms.** [`TermId`](core/engine/src/analysis/term_id.rs) collapses ~100+ raw SF11 signals into 47 chess-concept buckets. The narrator sometimes needs to explain *why* a compound term moved — e.g., "your KingDanger went up 80 cp because an enemy bishop now hits the long diagonal and your knight-defender just moved." Design sketch: opt-in `Option<&mut DetailedTrace>` analogous to today's `Some(&mut trace)` pattern, queried only by narrators explaining swings above some threshold (per-node cost paid only on rare detailed paths). First target: `KingDanger`'s 16-signal blend.
-- **Rubinstein trap** — user wants to work out its invariants first. Belongs in the trap library ([`core/engine/src/traps/`](core/engine/src/traps/) — see that module's `//!` for the four-gate validator schema).
+- **Drill-down API for compound eval terms.** [`TermId`](core/engine/src/analysis/term_id.rs) collapses ~100+ raw SF11 signals into 47 chess-concept buckets. The narrator sometimes needs to explain *why* a compound term moved — e.g., "your KingDanger went up 80 cp because an enemy bishop now hits the long diagonal and your knight-defender just moved." Design sketch: opt-in `Option<&mut DetailedTrace>` analogous to today's `Some(&mut trace)` pattern, queried only by narrators explaining swings above some threshold. First target: `KingDanger`'s 16-signal blend.
+- **Rubinstein trap** — user wants to work out its invariants first. Belongs in the trap library ([`core/engine/src/traps/`](core/engine/src/traps/) — see that module's `//!` for the four-gate validator schema). With trap state now in Session, the GUI gets trap surfacing for free as soon as new entries are added to the library.
 
 ## UX / platform, deferred
 
-- **Hint panel narration via narration crate refactor.** Hint panel currently shows `mv / score / PV`; richer narration should reuse the per-term narrators. Factor `narration::render_report`'s middle section into `render_per_term_narration(out, pre_move_pos, candidate, root_stm)`; expose `format_candidate_explanation(...)` without verdict / engine-preferred framing.
-- **Real piece sprites** (cburnett, CC-BY-SA from Lichess). 12 SVGs, `include_bytes!`, drop-in for `piece_glyph` callers.
-- **Promotion picker UI.** Currently auto-queens. Inline 4-piece overlay near the target square is standard.
-- **Visual annotations on retrospective.** GUI eventually draws arrows / highlights tied to specific narrator clauses. Requires changing narration output from flat `String` to a list of clauses with optional annotation payloads (square sets, arrows, kind tag).
-- **Bot strength / customization framework.** Long-term: configurable openings, blunder profile, tactical eyesight per bot.
-- **FFI crate (`core/ffi/`).** First concrete step toward Apple/Android. Outstanding decisions: UniFFI vs. raw C ABI, in-process vs. out-of-process, how to expose `MoveAnalysis` across the boundary.
-
-## Platform-portable UI refactor (in progress)
-
-Goal: collapse the GUI/CLI duplication and put `chess-tutor-desktop` on the same footing as future Apple/Android renderers — each platform shell becomes a thin unidirectional renderer of view descriptors, with all session state + game logic in shared Rust. CLI's `play.rs` (1,718 lines) and `desktop/src/main.rs` (previously 1,927 lines) duplicate game state today; the refactor pays off twice over.
-
-Steps 1–4 have landed:
-
-- **Steps 1–3** built the platform-portable split: `desktop/src/main.rs` shrunk from 1,927 lines to ~75; `core/ui` exports [`Session`](core/ui/src/session.rs), [`view`](core/ui/src/view.rs) descriptors, [`event::Event`](core/ui/src/event.rs), and a `RepaintFn` callback. desktop's `App` is a thin newtype wrapping `Session`.
-- **Step 4** put the CLI on the same `Session`. `core/cli/src/board.rs` now consumes a `BoardView` (same descriptor the egui shell paints) and `core/cli/src/play.rs` shrunk from 1,718 lines to ~870 by delegating position / history / opponent / book to `Session`. The CLI keeps its own retrospective rendering (deeper / configurable via `--retrospective-depth` and `--no-explain-best`) and its own analytical engine for `search` / `analyze` REPL commands.
-
-Session API surface added for the CLI: `Session::start_game(pos, EngineMode, depth, OpponentProfile)`, `wait_for_worker()` (blocking variant of `poll_worker`), `set_log_to_stderr(false)` and `set_auto_retrospective(false)` opt-outs, `play_user_move(Move)`, and accessors for `position` / `history` / `opponent` / `is_engine_thinking` / `game_outcome`. `engine_plays: Option<Color>` became `engine_plays: EngineMode` to support self-play (`--engine-color both`).
-
-Two minor CLI surface changes from the migration:
-- `undo` now rewinds the user-move + engine-reply pair (matching the desktop's takeback) instead of one ply at a time.
-- The `--time-ms`, `--reset-engine-per-move`, and `--search-progress` flags were dropped — time-budget violates the determinism contract anyway, and the diagnostics had no Session equivalent.
-
-Remaining step:
-
-1. **Mobile shells** (`apple/`, `android/`) consume `chess_tutor_ui` via `core/ffi`. Each platform is a renderer + event dispatcher, ~hundreds of lines, not thousands. The FFI crate itself is a separate prerequisite — outstanding decisions (UniFFI vs. raw C ABI, in-process vs. out-of-process, how to expose `MoveAnalysis` across the boundary) are tracked in the "FFI crate" entry above.
+- **Visual annotations on the board** — the current-focus work above. `BoardView.annotations` field + view-builder reads from existing facts (pinners/blockers bitboards, trap entries, retrospective PVs).
+- **Hint panel narration via narration crate refactor.** Hint panel currently shows `mv / score / PV` directly from `MoveAnalysis`. A richer narration should reuse the per-term narrators. Factor `narration::render_report`'s middle section into `render_per_term_narration(out, pre_move_pos, candidate, root_stm)`; expose `format_candidate_explanation(...)` without verdict / engine-preferred framing.
+- **Real piece sprites** (cburnett, CC-BY-SA from Lichess). 12 SVGs, `include_bytes!`, drop-in for the desktop's `piece_glyph` mapping in `draw::board`.
+- **Bot strength / customization framework.** Long-term: configurable openings, blunder profile, tactical eyesight per bot. Same data shape as the existing `OpponentProfile`; this is about presets + UI, not engine work.
+- **FFI crate (`core/ffi/`).** First concrete step toward Apple/Android. Outstanding decisions: UniFFI vs. raw C ABI, in-process vs. out-of-process, how to expose `MoveAnalysis` (and now `BoardAnnotation`) across the boundary.
+- **Mobile shells (`apple/`, `android/`).** Consume `chess_tutor_ui` via `core/ffi`. Each platform is a renderer + event dispatcher, ~hundreds of lines, not thousands. Gated on the FFI crate.
 
 ### Locked-in design decisions
 
-- **Events name intents, not inputs.** `Cancel`, `RequestNewGame`, `Takeback`, `JumpToLive`, `SelectSquare(sq)`, `ConfirmNewGame{...}` — never `EscapePressed` / `NewGameClicked` / `BoardClicked`. The shared layer is consumed by GUI, CLI, and (eventually) mobile; input-mechanism names are lies in at least one of those. See [memory feedback_ui_events_intent_not_input.md](../.claude/projects/C--Users-steve-Repos-work-chess-tutor-2/memory/feedback_ui_events_intent_not_input.md).
+- **Engine produces facts; renderers render.** Narration crate is one renderer (text); desktop's `draw::*` is another (egui); a future mobile shell is a third. `core/ui` carries the facts as raw data on `HistoryEntry` and via Session accessors — no formatting in the shared layer.
+- **Events name intents, not inputs.** `Cancel`, `RequestNewGame`, `Takeback`, `JumpToLive`, `SelectSquare(sq)`, `ConfirmNewGame{...}` — never `EscapePressed` / `NewGameClicked` / `BoardClicked`. See [memory feedback_ui_events_intent_not_input.md](../.claude/projects/C--Users-steve-Repos-work-chess-tutor-2/memory/feedback_ui_events_intent_not_input.md).
 - **Cancel resolution lives in the session, not the renderer.** Priority order: promotion picker > dialog > deselect. Renderer just emits `Cancel`.
-- **Dialog form: payload-on-confirm.** `ConfirmNewGame { color, fen, depth, noise, eval_mask }` rather than per-field events. Validation (FEN parse, depth bounds) is the session's job. Add a `UpdateNewGameDraft` route only if a platform's framework forces session-owned form state.
-- **`piece_glyph` ships as a helper, not in the view.** Descriptors carry `Piece`; renderers pick Unicode / sprite / SVG. The shared layer can offer `piece_glyph(Piece) -> char` for CLI/prototype use.
-- **Worker remains in the shared layer.** Only the repaint callback is platform-flavoured.
+- **Dialog form: payload-on-confirm.** `ConfirmNewGame { color, fen, depth, noise, eval_mask }` rather than per-field events. Validation (FEN parse, depth bounds) is the session's job. The desktop's egui dialog gets a `&mut NewGameForm` borrow for in-place widget editing — a concession to immediate-mode UI; a platform that can't borrow session state across frames would need a `UpdateNewGameDraft` route added.
+- **Worker remains in the shared layer.** Only the `RepaintFn` callback is platform-flavoured.
+- **CLI uses Session via blocking helpers** (`wait_for_worker`, `run_analysis`). Sync-feeling REPL on top of an async worker; the GUI keeps polling.
 
 ## Live-play tuning
 
@@ -108,3 +197,4 @@ Every retrospective narrator has unit tests for shape, but the wording and thres
 - **You made move M, engine preferred M', but you don't understand the *category* of mistake** → Phase 4 signal-mask gap.
 - **Hint panel told you nothing useful** → hint panel narration refactor.
 - **Wording felt off / patronising / vague** → cheapest fix; just tune the strings.
+- **(NEW)** **You could see *that* something was wrong but not *where* on the board** → visual annotation gap. This is the working motivation for the visual learning elements push.
