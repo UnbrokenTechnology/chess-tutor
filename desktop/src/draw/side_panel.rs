@@ -1,5 +1,6 @@
 use eframe::egui;
 
+use chess_tutor_narration::{format_retrospective, NarrationOptions};
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{
     HintPanelState, HintPanelView, MoveListView, RetrospectiveBody, RetrospectiveKind,
@@ -96,11 +97,22 @@ fn draw_retrospective(ui: &mut egui::Ui, view: &RetrospectivePanelView) {
                 ui.separator();
             }
             match kind {
-                RetrospectiveKind::UserMoveText(text) => {
-                    ui.monospace(text);
-                }
-                RetrospectiveKind::UserMoveEmpty => {
-                    ui.label("(no analysis text)");
+                RetrospectiveKind::UserMoveReady(data) => {
+                    // Format here so narration stays a renderer
+                    // concern; a future GUI pass can ignore the
+                    // string and consume data.result.analyses
+                    // directly to draw arrows / highlights.
+                    let text = format_retrospective(
+                        &data.pre_move_pos,
+                        &data.result.analyses,
+                        data.result.user_move,
+                        &NarrationOptions::default(),
+                    );
+                    if text.is_empty() {
+                        ui.label("(no analysis text)");
+                    } else {
+                        ui.monospace(text);
+                    }
                 }
                 RetrospectiveKind::UserMoveAnalyzing => {
                     ui.horizontal(|ui| {

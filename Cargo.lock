@@ -409,7 +409,6 @@ name = "chess-tutor-ui"
 version = "0.1.0"
 dependencies = [
  "chess-tutor-engine",
- "chess-tutor-narration",
 ]
 
 [[package]]

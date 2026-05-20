@@ -125,15 +125,45 @@ pub struct HistoryEntry {
     pub san: String,
     pub moved_by: Color,
     pub position_after: Position,
-    /// Filled for moves the user made. `None` while the worker is
-    /// still computing; populated when the result arrives.
-    pub retrospective_text: Option<String>,
+    /// Filled for moves the user made when auto-retrospective is on
+    /// and the worker has returned the analysis. Carries raw data so
+    /// each renderer formats with its own [`NarrationOptions`] (and a
+    /// future GUI can ignore the text entirely and draw arrows /
+    /// highlights from the per-term deltas).
+    pub retrospective: Option<RetrospectiveResult>,
     /// Filled for moves the engine made. Carries score / depth / time.
     pub engine_info: Option<EngineInfo>,
     /// `Some` when noise drove the bot off the engine's preferred
     /// move. Both desktop and CLI surface this — desktop logs it to
     /// stderr; CLI prints it inline with the played-move line.
     pub noise_pick: Option<crate::worker::NoisePickInfo>,
+}
+
+/// Raw retrospective output for one user move. The worker computes
+/// `analyses` via `analyze_position` (which is what the narration
+/// crate consumes) plus the timing surface the CLI reports. Each
+/// renderer formats text from these on demand — the worker does no
+/// prose formatting itself.
+#[derive(Clone)]
+pub struct RetrospectiveResult {
+    pub user_move: Move,
+    pub analyses: Vec<chess_tutor_engine::analysis::MoveAnalysis>,
+    pub elapsed: Duration,
+    pub nodes: u64,
+    pub nps_m: f64,
+}
+
+/// Result of a synchronous [`Session::run_analysis`] call — raw
+/// analyses + the perf surface CLI's REPL prints. The CLI's REPL
+/// `search` and `analyze` commands both consume this; they differ
+/// only in how they format the contents (one PV table vs. per-term
+/// breakdown).
+#[derive(Default)]
+pub struct AnalysisOutcome {
+    pub analyses: Vec<chess_tutor_engine::analysis::MoveAnalysis>,
+    pub elapsed: Duration,
+    pub nodes: u64,
+    pub nps_m: f64,
 }
 
 /// Which side(s) the engine plays in the current game.
@@ -160,6 +190,11 @@ impl EngineMode {
 
 pub struct Session {
     pub(crate) position: Position,
+    /// Snapshot of the position the current game started from. Lets
+    /// renderers compute the pre-move position for any history index
+    /// (`history[i-1].position_after`, or `start_position` when
+    /// `i == 0`) without storing one per entry.
+    pub(crate) start_position: Position,
     pub(crate) position_keys: Vec<u64>,
     pub(crate) history: Vec<HistoryEntry>,
     pub(crate) selected: Option<Square>,
@@ -168,6 +203,10 @@ pub struct Session {
 
     pub(crate) engine_plays: EngineMode,
     pub(crate) depth: u32,
+    /// Depth used by auto-retrospective worker jobs. Defaults to
+    /// [`ANALYTICAL_DEPTH`]; CLI consumers tweak via
+    /// [`Session::set_retrospective_depth`] for `--retrospective-depth`.
+    pub(crate) retrospective_depth: u32,
     /// When `true`, Session writes book-pick / opening-seed / noise-
     /// pick events to stderr. Defaults to `true` for the desktop's
     /// "shell window is the de facto session log" model; CLI consumers
@@ -275,6 +314,7 @@ impl Session {
         let position = Position::startpos();
         let position_keys = vec![position.key()];
         Self {
+            start_position: position.clone(),
             position,
             position_keys,
             history: Vec::new(),
@@ -283,6 +323,7 @@ impl Session {
             flipped: false,
             engine_plays: EngineMode::None,
             depth: DEFAULT_DEPTH,
+            retrospective_depth: ANALYTICAL_DEPTH,
             log_to_stderr: true,
             auto_retrospective: true,
             worker_tx: job_tx,
@@ -317,6 +358,7 @@ impl Session {
         self.gen = self.gen.wrapping_add(1);
         self.engine_thinking = false;
         self.position_keys = vec![position.key()];
+        self.start_position = position.clone();
         self.position = position;
         self.history.clear();
         self.deselect();
@@ -350,6 +392,28 @@ impl Session {
         self.auto_retrospective = enabled;
     }
 
+    /// Current auto-retrospective state. CLI's REPL `retrospect`
+    /// command queries this.
+    pub fn auto_retrospective(&self) -> bool {
+        self.auto_retrospective
+    }
+
+    /// Depth used for auto-retrospective worker jobs. CLI calls this
+    /// to honour `--retrospective-depth`; desktop leaves it at the
+    /// default [`ANALYTICAL_DEPTH`].
+    pub fn set_retrospective_depth(&mut self, depth: u32) {
+        self.retrospective_depth = depth;
+    }
+
+    /// Position the current game started from. Lets headless callers
+    /// reconstruct the pre-move position for any history index when
+    /// they need to format a retrospective from raw analyses (the
+    /// pre-move pos for `history[i]` is `history[i-1].position_after`,
+    /// falling back to this when `i == 0`).
+    pub fn start_position(&self) -> &Position {
+        &self.start_position
+    }
+
     fn start_new_game(
         &mut self,
         position: Position,
@@ -361,6 +425,7 @@ impl Session {
         self.gen = self.gen.wrapping_add(1);
         self.engine_thinking = false;
         self.position_keys = vec![position.key()];
+        self.start_position = position.clone();
         self.position = position;
         self.history.clear();
         self.deselect();
@@ -554,9 +619,9 @@ impl Session {
             let _ = self.worker_tx.send(WorkerJob::Retrospective {
                 pre_move_pos: Box::new(pre_move_pos),
                 user_move: mv,
-                // ANALYTICAL_DEPTH, not self.depth. The student's
-                // feedback wants depth even when the bot is weak.
-                depth: ANALYTICAL_DEPTH,
+                // Independent of self.depth (the bot's play depth) so a
+                // weakened bot still gives strong teaching feedback.
+                depth: self.retrospective_depth,
                 game_history: pre_move_history,
                 gen: self.gen,
                 target_index,
@@ -578,7 +643,7 @@ impl Session {
             san: san_str,
             moved_by,
             position_after: self.position.clone(),
-            retrospective_text: None,
+            retrospective: None,
             engine_info: None,
             noise_pick: None,
         });
@@ -799,13 +864,23 @@ impl Session {
             WorkerResult::Retrospective {
                 gen,
                 target_index,
-                text,
+                user_move,
+                analyses,
+                elapsed,
+                nodes,
+                nps_m,
             } => {
                 if gen != self.gen {
                     return;
                 }
                 if let Some(entry) = self.history.get_mut(target_index) {
-                    entry.retrospective_text = Some(text);
+                    entry.retrospective = Some(RetrospectiveResult {
+                        user_move,
+                        analyses,
+                        elapsed,
+                        nodes,
+                        nps_m,
+                    });
                 }
             }
             WorkerResult::Analyze { for_key, analyses } => {
@@ -823,6 +898,12 @@ impl Session {
                     pos: self.position.clone(),
                     analyses,
                 });
+            }
+            WorkerResult::AnalyzeSync { .. } => {
+                // Synchronous analyses are consumed inline by
+                // [`Self::run_analysis`], not via the regular event
+                // stream. Any AnalyzeSync result that reaches here is
+                // a stale arrival — drop it.
             }
         }
     }
@@ -898,19 +979,37 @@ impl Session {
             .find_map(|e| e.engine_info.as_ref())
     }
 
-    /// Picks which entry to show in the retrospective panel:
+    /// Picks the (index, entry) to show in the retrospective panel:
     ///   - Viewing back: the viewed entry.
     ///   - Live: the most recent user-move entry (so the engine's
     ///     reply doesn't bury the analysis of the user's own move).
-    pub(crate) fn panel_entry(&self) -> Option<&HistoryEntry> {
+    pub(crate) fn panel_entry_with_index(&self) -> Option<(usize, &HistoryEntry)> {
         if let Some(i) = self.viewing_index {
-            return self.history.get(i);
+            return self.history.get(i).map(|e| (i, e));
+        }
+        if let Some(found) = self
+            .history
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, e)| self.is_user_move(e))
+        {
+            return Some(found);
         }
         self.history
-            .iter()
-            .rev()
-            .find(|e| self.is_user_move(e))
-            .or_else(|| self.history.last())
+            .last()
+            .map(|e| (self.history.len() - 1, e))
+    }
+
+    /// Pre-move position for history entry `i` — needed by anything
+    /// that wants to format an analysis whose root was the position
+    /// the user faced before their move.
+    fn pre_move_position(&self, i: usize) -> Position {
+        if i == 0 {
+            self.start_position.clone()
+        } else {
+            self.history[i - 1].position_after.clone()
+        }
     }
 
     pub(crate) fn is_user_move(&self, entry: &HistoryEntry) -> bool {
@@ -968,6 +1067,40 @@ impl Session {
             self.handle_worker_result(result);
         }
         self.poll_worker();
+    }
+
+    /// Run an analysis on `pos` with `params`, blocking until the
+    /// worker returns. The CLI's REPL `search` and `analyze` commands
+    /// use this so they don't need a private engine — the same
+    /// analytical worker that powers retrospective and hint paths
+    /// handles them too. Other worker results encountered while
+    /// waiting are processed normally (engine moves applied to
+    /// history, etc.). Returns an empty [`AnalysisOutcome`] if the
+    /// worker channel is disconnected.
+    pub fn run_analysis(&mut self, pos: Position, params: SearchParams) -> AnalysisOutcome {
+        let _ = self.worker_tx.send(WorkerJob::AnalyzeSync {
+            pos: Box::new(pos),
+            params,
+        });
+        loop {
+            match self.worker_rx.recv() {
+                Ok(WorkerResult::AnalyzeSync {
+                    analyses,
+                    elapsed,
+                    nodes,
+                    nps_m,
+                }) => {
+                    return AnalysisOutcome {
+                        analyses,
+                        elapsed,
+                        nodes,
+                        nps_m,
+                    };
+                }
+                Ok(other) => self.handle_worker_result(other),
+                Err(_) => return AnalysisOutcome::default(),
+            }
+        }
     }
 
     /// Engine mode for the current game.
@@ -1148,7 +1281,7 @@ impl Session {
 
     fn build_retrospective_view(&self) -> RetrospectivePanelView {
         let game_outcome = self.game_outcome();
-        let Some(entry) = self.panel_entry() else {
+        let Some((entry_index, entry)) = self.panel_entry_with_index() else {
             return RetrospectivePanelView {
                 game_outcome,
                 body: RetrospectiveBody::NoMoves,
@@ -1156,9 +1289,13 @@ impl Session {
         };
         let viewing_back_san = (!self.is_viewing_live()).then(|| entry.san.clone());
         let kind = if self.is_user_move(entry) {
-            match &entry.retrospective_text {
-                Some(text) if !text.is_empty() => RetrospectiveKind::UserMoveText(text.clone()),
-                Some(_) => RetrospectiveKind::UserMoveEmpty,
+            match &entry.retrospective {
+                Some(result) => RetrospectiveKind::UserMoveReady(Box::new(
+                    crate::view::UserMoveReadyData {
+                        pre_move_pos: self.pre_move_position(entry_index),
+                        result: result.clone(),
+                    },
+                )),
                 None => RetrospectiveKind::UserMoveAnalyzing,
             }
         } else if let Some(info) = &entry.engine_info {

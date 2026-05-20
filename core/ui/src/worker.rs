@@ -16,8 +16,6 @@ use chess_tutor_engine::noise::{self, NoisePick};
 use chess_tutor_engine::opponent::NoiseProfile;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Move, Value};
-use chess_tutor_narration::{format_retrospective, NarrationOptions};
-
 use crate::session::RepaintFn;
 
 const RETROSPECTIVE_MULTI_PV: usize = 3;
@@ -59,6 +57,14 @@ pub(crate) enum WorkerJob {
         game_history: Vec<u64>,
         for_key: u64,
     },
+    /// Run a search and reply with the raw analyses + timing. The
+    /// dispatcher ([`crate::session::Session::run_analysis`]) blocks
+    /// on the response. Used by the CLI's REPL `search` / `analyze`
+    /// commands; the GUI hint panel uses [`Self::Analyze`] instead.
+    AnalyzeSync {
+        pos: Box<Position>,
+        params: SearchParams,
+    },
 }
 
 pub(crate) enum WorkerResult {
@@ -89,11 +95,25 @@ pub(crate) enum WorkerResult {
     Retrospective {
         gen: u64,
         target_index: usize,
-        text: String,
+        user_move: Move,
+        analyses: Vec<MoveAnalysis>,
+        elapsed: Duration,
+        nodes: u64,
+        nps_m: f64,
     },
     Analyze {
         for_key: u64,
         analyses: Vec<MoveAnalysis>,
+    },
+    /// Blocking analysis for headless callers — CLI's REPL `search` /
+    /// `analyze` commands. No stale-detection; the caller blocks via
+    /// [`crate::session::Session::run_analysis`] until the matching
+    /// result arrives.
+    AnalyzeSync {
+        analyses: Vec<MoveAnalysis>,
+        elapsed: Duration,
+        nodes: u64,
+        nps_m: f64,
     },
 }
 
@@ -260,17 +280,19 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                     // eval, regardless of any mid-game bot mask.
                     eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 };
+                let started = Instant::now();
                 let analyses = analyze_position(&mut analysis_engine, &mut pre_move_pos, params);
-                let text = format_retrospective(
-                    &pre_move_pos,
-                    &analyses,
-                    user_move,
-                    &NarrationOptions::default(),
-                );
+                let elapsed = started.elapsed();
+                let nodes = analysis_engine.last_nodes();
+                let nps_m = analysis_engine.last_nps() / 1.0e6;
                 let _ = tx.send(WorkerResult::Retrospective {
                     gen,
                     target_index,
-                    text,
+                    user_move,
+                    analyses,
+                    elapsed,
+                    nodes,
+                    nps_m,
                 });
                 repaint();
             }
@@ -304,6 +326,23 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                 };
                 let analyses = analyze_position(&mut analysis_engine, &mut pos, params);
                 let _ = tx.send(WorkerResult::Analyze { for_key, analyses });
+                repaint();
+            }
+            WorkerJob::AnalyzeSync { mut pos, params } => {
+                // Reset to keep the answer deterministic, same rule as
+                // the other analytical paths.
+                analysis_engine.new_game();
+                let started = Instant::now();
+                let analyses = analyze_position(&mut analysis_engine, &mut pos, params);
+                let elapsed = started.elapsed();
+                let nodes = analysis_engine.last_nodes();
+                let nps_m = analysis_engine.last_nps() / 1.0e6;
+                let _ = tx.send(WorkerResult::AnalyzeSync {
+                    analyses,
+                    elapsed,
+                    nodes,
+                    nps_m,
+                });
                 repaint();
             }
         }

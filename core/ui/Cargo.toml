@@ -9,4 +9,7 @@ name = "chess_tutor_ui"
 
 [dependencies]
 chess-tutor-engine = { path = "../engine" }
-chess-tutor-narration = { path = "../narration" }
+# Note: no chess-tutor-narration dep. Worker returns raw MoveAnalysis;
+# each renderer (desktop, CLI, future mobile) calls format_retrospective
+# itself with its own NarrationOptions. Keeps narration as "the text
+# renderer" — same conceptual layer as draw::board, not a shared dep.

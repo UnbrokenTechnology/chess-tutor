@@ -15,7 +15,6 @@ mod board;
 mod eval_report;
 mod noise_bench;
 mod play;
-mod retrospective;
 mod uci;
 
 use std::time::Duration;
@@ -59,6 +58,15 @@ fn parse_user_move(pos: &mut Position, input: &str) -> Result<Move> {
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 const STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+/// Default analytical depth for the auto-retrospective. Kept
+/// deliberately *deeper* than the typical engine-play depth so the
+/// retrospective is a stronger reference than the bot the student is
+/// playing against. At depth 10 we observed opening-move verdicts
+/// that flipped at depth 12 (e.g. 1.e4 e5 2.Nf3 reads as an
+/// inaccuracy at d=10 but emerges as best at d=12). Matches
+/// `chess_tutor_ui::session::ANALYTICAL_DEPTH`.
+const DEFAULT_RETROSPECTIVE_DEPTH: u32 = 12;
 
 #[derive(Parser)]
 #[command(
@@ -262,7 +270,7 @@ enum Command {
         /// opening positions (1.e4 e5 2.Nf3 reads "inaccuracy" at
         /// d=10, "best" at d=12). Independent of `--depth` so a
         /// weakened bot can still give strong feedback.
-        #[arg(long, default_value_t = retrospective::RETROSPECTIVE_DEPTH)]
+        #[arg(long, default_value_t = DEFAULT_RETROSPECTIVE_DEPTH)]
         retrospective_depth: u32,
         /// Engine time cap per move (milliseconds). Omit for pure
         /// depth-capped search.

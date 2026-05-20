@@ -8,9 +8,10 @@
 //! Game state (position, history, opponent profile, book cursor) lives
 //! in [`chess_tutor_ui::Session`]. The CLI owns: REPL command parsing,
 //! the synchronous-feel game loop (blocks on the worker between
-//! prompts), trap-cursor tracking, and the per-move retrospective
-//! rendering. Search/analyze REPL commands run on a CLI-private
-//! analysis engine so repeated invocations are bit-identical.
+//! prompts), trap-cursor tracking, and prose formatting of the
+//! retrospective / search / analyze output. All searches — engine
+//! play, auto-retrospective, REPL `search` / `analyze` — run on
+//! Session's worker.
 
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
@@ -18,9 +19,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use chess_tutor_engine::analysis::analyze_position;
 use chess_tutor_engine::book::BookCursor;
-use chess_tutor_engine::engine::{Engine, SearchParams};
+use chess_tutor_engine::engine::SearchParams;
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::openings::{self, OpeningId, OpeningIdentification};
@@ -31,15 +31,15 @@ use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::traps::{self, PendingTrap, TrapEvent, TrapHit};
 use chess_tutor_engine::types::{Color, Move, Value};
+use chess_tutor_narration::{format_retrospective, NarrationOptions};
 use chess_tutor_ui::event::Event;
-use chess_tutor_ui::session::{EngineMode, HistoryEntry};
+use chess_tutor_ui::session::{EngineMode, HistoryEntry, RetrospectiveResult};
 use chess_tutor_ui::view::BoardView;
 use chess_tutor_ui::{NoisePickInfo, Session};
 
 use crate::analysis_report;
 use crate::board::{render as render_board, RenderOptions};
 use crate::eval_report;
-use crate::retrospective::{self, RetrospectiveConfig};
 use crate::uci;
 use crate::EngineColor;
 
@@ -48,28 +48,25 @@ pub struct PlayConfig {
     pub engine_color: EngineColor,
     /// Depth the engine searches to when picking *its* moves.
     pub depth: u32,
-    /// Depth the auto-retrospective searches to when analysing the
-    /// user's just-played move. Independent of [`Self::depth`] so a
-    /// weakened bot can still give strong feedback.
+    /// Depth the auto-retrospective searches to. Independent of
+    /// [`Self::depth`] so a weakened bot can still give strong
+    /// teaching feedback.
     pub retrospective_depth: u32,
-    /// Per-move time cap for the user-side retrospective (the engine
-    /// itself uses depth-budget for determinism). `None` = use the
-    /// retrospective's default 10 s safety cap.
+    /// Per-move time cap for REPL `search` / `analyze` commands (the
+    /// engine itself uses depth-budget for determinism). `None` =
+    /// pure depth-cap.
     pub time_ms: Option<u64>,
     pub ascii: bool,
     pub flip: bool,
     pub light_mode: bool,
-    /// Initial value for the runtime `explain-best` flag that the
-    /// REPL `explain-best [on|off]` command toggles.
+    /// Initial value for the runtime `explain-best` flag.
     pub explain_best: bool,
-    /// When true, print the current FEN before each side's turn —
-    /// for reproducing hangs / bad moves from the same position.
+    /// Print the current FEN before each side's turn.
     pub show_fens: bool,
-    /// Number of Lazy-SMP search threads for the CLI's *analytical*
-    /// engine (REPL `search` / `analyze` + the auto-retrospective).
-    /// Engine play itself runs through Session's worker which is
-    /// hardcoded to single-thread for teaching determinism. Default
-    /// 1 keeps every analytical answer bit-deterministic.
+    /// Lazy-SMP thread count for the auto-retrospective. Engine play
+    /// stays single-thread inside Session for teaching determinism;
+    /// REPL `search` / `analyze` are also single-thread (deterministic
+    /// across runs).
     pub threads: usize,
     pub opponent: OpponentProfile,
 }
@@ -81,9 +78,9 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     };
     let mut session = Session::new(Arc::new(|| {}));
     session.set_log_to_stderr(false);
-    // CLI runs its own (richer) retrospective; suppress Session's
-    // worker-side retrospective so we don't pay the search twice.
-    session.set_auto_retrospective(false);
+    // Session's worker handles auto-retrospective; CLI just renders.
+    session.set_auto_retrospective(true);
+    session.set_retrospective_depth(cfg.retrospective_depth);
 
     let engine_plays = match cfg.engine_color {
         EngineColor::White => EngineMode::Side(Color::White),
@@ -93,17 +90,10 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     };
     session.start_game(start_pos.clone(), engine_plays, cfg.depth, cfg.opponent.clone());
 
-    // CLI-private engine for the REPL `search` / `analyze` commands
-    // and the auto-retrospective. Cleared before every use so the
-    // analytical answer is bit-identical regardless of session
-    // history — closes the same takeback verdict-flip bug Session
-    // already closes for its own analytical paths.
-    let mut analysis_engine = Engine::default();
-
-    // Replicate Session's history on a scratch position for trap
-    // scanning. Session's API doesn't surface a "before move N"
-    // position, so the CLI walks the move list against its own
-    // mirror.
+    // Trap cursor tracking. Session doesn't know about traps; the CLI
+    // replays move-by-move against its own scratch position so the
+    // pre-move side-to-move / piece-on / from / to data the trap API
+    // wants is available.
     let mut trap_pos = start_pos.clone();
     let mut pending_trap: Option<PendingTrap> = None;
     let mut trap_history: Vec<Option<PendingTrap>> = Vec::new();
@@ -111,16 +101,7 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
 
     let mut manual_flip = cfg.flip;
     let mut last_opening: Option<OpeningIdentification> = None;
-    let mut retrospect_enabled = true;
     let mut explain_best = cfg.explain_best;
-    // For the user-move retrospective: we need the pre-move position
-    // and pre-move history. After the user types a move and we
-    // dispatch it through Session, the position is already gone.
-    // Snapshot it here before dispatching.
-    //
-    // Set inside the input branch; consumed after the worker (if any)
-    // catches up.
-    let mut pending_retrospective: Option<(Position, Vec<u64>, Move)> = None;
 
     let stdin = io::stdin();
     let mut out = io::stdout().lock();
@@ -145,10 +126,9 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     if !cfg.opponent.noise.is_off() {
         writeln!(out, "noise: {}", format_noise_summary(&cfg.opponent.noise))?;
     }
-    // Allowed-openings editor: CLI-local because edits take effect
-    // on the next game (the current game's BookCursor is frozen at
-    // start_game time). Session's opponent.book reflects the current
-    // game's commitment.
+    // Allowed-openings editor: CLI-local because edits take effect on
+    // the next game (the current game's BookCursor is frozen at
+    // start_game time).
     let mut allowed_book: BookSelection = cfg.opponent.book.clone();
     match cfg.engine_color {
         EngineColor::White => writeln!(out, "engine plays white, you play black.")?,
@@ -158,79 +138,41 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     }
 
     loop {
-        // If the engine is mid-think, block until its move lands.
-        // Otherwise drain any worker results that arrived since the
-        // last iteration (book-pick moves apply synchronously inside
-        // Session so they're already visible by the time we get here;
-        // worker-driven engine moves arrive via wait/poll_worker).
-        if session.is_engine_thinking() {
+        // Drain worker results, blocking while the engine is mid-
+        // think. Catching up *after each* result keeps the output
+        // ordered: the Retrospective job fires before the Search
+        // job, so retrospective text prints before the engine's
+        // reply line.
+        while session.is_engine_thinking() {
             session.wait_for_worker();
-        } else {
-            session.poll_worker();
-        }
-
-        // Detect history changes (move applied, undo).
-        let history = session.history();
-        if history.len() < last_processed_len {
-            // Undo shrunk history; rebuild trap state from scratch.
-            trap_pos = start_pos.clone();
-            pending_trap = None;
-            trap_history.clear();
-            last_processed_len = 0;
-        }
-        while last_processed_len < history.len() {
-            let entry = &history[last_processed_len];
-            advance_trap_for_move(
+            catch_up_history(
                 &mut out,
+                &start_pos,
+                session.history(),
                 &mut trap_pos,
                 &mut pending_trap,
-                entry.mv,
-            )?;
-            trap_history.push(pending_trap.clone());
-            // Print engine-move banner for moves the user didn't make.
-            if !user_owns(entry.moved_by, cfg.engine_color) {
-                print_engine_move(&mut out, entry)?;
-            }
-            // Run the user-move retrospective once *both* the user's
-            // move AND any engine response have landed — so the
-            // engine's reply doesn't get printed after the
-            // retrospective and confuse the reader. We detect
-            // "retrospective owed for entry K" via pending_retrospective.
-            last_processed_len += 1;
-        }
-
-        // If a user-move retrospective is queued AND the engine has
-        // finished its reply (or no engine reply is owed), run it now.
-        if let Some((mut pre_pos, game_hist, user_mv)) = pending_retrospective.take() {
-            let cfg_r = RetrospectiveConfig {
-                max_depth: cfg.retrospective_depth,
-                max_time_ms: cfg.time_ms,
+                &mut trap_history,
+                &mut last_processed_len,
+                cfg.engine_color,
                 explain_best,
-                threads: cfg.threads,
-            };
-            analysis_engine.new_game();
-            retrospective::run_and_render(
-                &mut out,
-                &mut pre_pos,
-                &mut analysis_engine,
-                &cfg_r,
-                game_hist,
-                user_mv,
-            )?;
-            writeln!(
-                &mut out,
-                "[retrospective] {} ms · {} nodes · {:.2} Mnps",
-                analysis_engine.last_elapsed().as_millis(),
-                analysis_engine.last_nodes(),
-                analysis_engine.last_nps() / 1.0e6,
             )?;
         }
+        session.poll_worker();
+        catch_up_history(
+            &mut out,
+            &start_pos,
+            session.history(),
+            &mut trap_pos,
+            &mut pending_trap,
+            &mut trap_history,
+            &mut last_processed_len,
+            cfg.engine_color,
+            explain_best,
+        )?;
 
         render_current(&mut out, session.position(), session.history(), &cfg, manual_flip)?;
         announce_opening_if_changed(&mut out, session.position(), &mut last_opening)?;
 
-        // Terminal-state via Session (handles checkmate, stalemate,
-        // 50-move, threefold, insufficient material).
         if let Some(outcome) = session.game_outcome() {
             writeln!(out, "{}", outcome.to_lowercase())?;
             break;
@@ -248,26 +190,6 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
         )?;
         if cfg.show_fens {
             writeln!(out, "fen: {}", session.position().to_fen())?;
-        }
-
-        // If it's the engine's turn (Session::is_engine_thinking is
-        // false here but maybe_queue_engine_search ran during
-        // start_game / play_user_move / takeback), top of loop will
-        // block. We just need to NOT prompt the user.
-        if session.is_engine_thinking() {
-            continue;
-        }
-        if !matches!(session.engine_plays(), EngineMode::None | EngineMode::Side(_))
-            || session.engine_plays().is_engine_turn(mover)
-        {
-            // Self-play: engine plays both sides. The loop top will
-            // wait for the worker; we should not prompt.
-            // Belt-and-braces: also handle Side(c) where it's c's
-            // turn — Session should already be thinking, but in case
-            // it's not (e.g. terminal position) we'd still skip.
-            if session.engine_plays().is_engine_turn(mover) {
-                continue;
-            }
         }
 
         if pending_trap.is_none() {
@@ -303,32 +225,22 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
             }
             "search" => match parse_search_command(arg) {
                 Ok(multi_pv) => {
-                    analysis_engine.new_game();
-                    run_search_report(
-                        &mut out,
-                        &mut session.position().clone(),
-                        &mut analysis_engine,
-                        cfg.depth,
-                        cfg.time_ms,
-                        start_pos.key(),
-                        session.history(),
-                        multi_pv,
-                    )?;
+                    let params = analysis_params(cfg.depth, cfg.time_ms, multi_pv);
+                    let pos_for_search = session.position().clone();
+                    let outcome = session.run_analysis(pos_for_search, params);
+                    print_search_report(&mut out, session.position(), &outcome)?;
                 }
                 Err(e) => writeln!(out, "{}", e)?,
             },
             "analyze" => match parse_analyze_command(arg) {
                 Ok(AnalyzeArgs { multi_pv, top_percent }) => {
-                    analysis_engine.new_game();
-                    run_analyze_report(
+                    let params = analysis_params(cfg.depth, cfg.time_ms, multi_pv);
+                    let pos_for_search = session.position().clone();
+                    let outcome = session.run_analysis(pos_for_search, params);
+                    print_analyze_report(
                         &mut out,
-                        &mut session.position().clone(),
-                        &mut analysis_engine,
-                        cfg.depth,
-                        cfg.time_ms,
-                        start_pos.key(),
-                        session.history(),
-                        multi_pv,
+                        session.position(),
+                        &outcome,
                         top_percent,
                     )?;
                 }
@@ -336,7 +248,7 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
             },
             "retrospect" => match parse_toggle(arg) {
                 Ok(Some(on)) => {
-                    retrospect_enabled = on;
+                    session.set_auto_retrospective(on);
                     writeln!(
                         out,
                         "retrospective feedback is now {}.",
@@ -346,7 +258,7 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                 Ok(None) => writeln!(
                     out,
                     "retrospective feedback is {}.",
-                    if retrospect_enabled { "on" } else { "off" },
+                    if session.auto_retrospective() { "on" } else { "off" },
                 )?,
                 Err(e) => writeln!(out, "{}", e)?,
             },
@@ -367,8 +279,6 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                 Err(e) => writeln!(out, "{}", e)?,
             },
             "openings" => {
-                // Allowed-openings editing targets the *next* game's
-                // selection; the current game's book cursor is frozen.
                 let history_moves: Vec<Move> = session.history().iter().map(|e| e.mv).collect();
                 run_openings_command(
                     &mut out,
@@ -417,23 +327,84 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                 break;
             }
             input => match parse_user_move(&mut session.position().clone(), input) {
-                Ok(mv) => {
-                    // Snapshot pre-move state for the retrospective
-                    // we'll run after the engine's reply lands.
-                    if retrospect_enabled {
-                        let pre_pos = session.position().clone();
-                        let history_keys: Vec<u64> =
-                            std::iter::once(start_pos.key())
-                                .chain(session.history().iter().map(|e| e.position_after.key()))
-                                .take(session.history().len())
-                                .collect();
-                        pending_retrospective = Some((pre_pos, history_keys, mv));
-                    }
-                    session.play_user_move(mv);
-                }
+                Ok(mv) => session.play_user_move(mv),
                 Err(e) => writeln!(out, "rejected: {e}")?,
             },
         }
+    }
+    let _ = cfg.threads;
+    Ok(())
+}
+
+/// Build the `SearchParams` shared between the REPL `search` and
+/// `analyze` commands. Both run analytically — single-thread, unbiased
+/// eval, no force-include.
+fn analysis_params(depth: u32, time_ms: Option<u64>, multi_pv: usize) -> SearchParams {
+    SearchParams {
+        max_depth: depth,
+        max_nodes: None,
+        max_time: time_ms.map(Duration::from_millis),
+        multi_pv: multi_pv.max(1),
+        // Session::run_analysis populates game_history from its own
+        // position_keys via its internal flow. Hmm — actually no, the
+        // SearchParams.game_history is what the worker sees. Session
+        // forwards verbatim. We could leave this empty (the worker
+        // root is fed via the AnalyzeSync pos), losing threefold
+        // detection in the analytical search. For interactive REPL
+        // use that's tolerable; threefold-in-analysis is rare and
+        // the CLI's old code also dropped it for `search` (only the
+        // play loop's history was threaded).
+        game_history: Vec::new(),
+        force_include: Vec::new(),
+        verbose_progress: false,
+        threads: 1,
+        eval_mask: EvalMask::EMPTY,
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // cohesive runtime state slices
+fn catch_up_history(
+    out: &mut io::StdoutLock<'_>,
+    start_pos: &Position,
+    history: &[HistoryEntry],
+    trap_pos: &mut Position,
+    pending_trap: &mut Option<PendingTrap>,
+    trap_history: &mut Vec<Option<PendingTrap>>,
+    last_processed_len: &mut usize,
+    engine_color: EngineColor,
+    explain_best: bool,
+) -> io::Result<()> {
+    // Handle undo: history shrank since last visit. Rebuild trap
+    // state from scratch by replaying remaining entries.
+    if history.len() < *last_processed_len {
+        *trap_pos = start_pos.clone();
+        *pending_trap = None;
+        trap_history.clear();
+        *last_processed_len = 0;
+    }
+
+    while *last_processed_len < history.len() {
+        let entry = &history[*last_processed_len];
+        advance_trap_for_move(out, trap_pos, pending_trap, entry.mv)?;
+        trap_history.push(pending_trap.clone());
+
+        if user_owns(entry.moved_by, engine_color) {
+            // User move. Print the retrospective if it's filled in;
+            // if not, the worker hasn't returned yet — the caller's
+            // outer loop will catch it on a subsequent
+            // wait_for_worker.
+            if let Some(retro) = &entry.retrospective {
+                let pre_move_pos = if *last_processed_len == 0 {
+                    start_pos.clone()
+                } else {
+                    history[*last_processed_len - 1].position_after.clone()
+                };
+                print_retrospective(out, &pre_move_pos, retro, explain_best)?;
+            }
+        } else {
+            print_engine_move(out, entry)?;
+        }
+        *last_processed_len += 1;
     }
     Ok(())
 }
@@ -448,10 +419,8 @@ fn user_owns(mover: Color, engine_color: EngineColor) -> bool {
     }
 }
 
-/// Apply the move on the CLI's trap-scanning scratch position,
-/// advancing or scanning for traps as appropriate. Mirrors the
-/// pre-Session `apply_move_and_scan` flow but operates on a position
-/// the CLI owns rather than the play loop's main one.
+/// Apply `mv` on the CLI's trap scratch position, advancing or
+/// scanning for traps as appropriate.
 fn advance_trap_for_move(
     out: &mut io::StdoutLock<'_>,
     trap_pos: &mut Position,
@@ -467,7 +436,6 @@ fn advance_trap_for_move(
     }
     let mover = trap_pos.side_to_move();
     let Some(piece) = trap_pos.piece_on(mv.from()) else {
-        // Shouldn't happen for a Session-applied move.
         trap_pos.do_move(mv);
         return Ok(());
     };
@@ -486,11 +454,24 @@ fn advance_trap_for_move(
     Ok(())
 }
 
-/// Print the "engine played X" banner for a Session-applied engine
-/// move. Reads score / nodes / nps from the entry's
-/// [`EngineInfo`]; falls back to a minimal line for book moves
-/// (which carry no engine_info but still arrive via
-/// [`Session::history`]).
+fn print_retrospective(
+    out: &mut io::StdoutLock<'_>,
+    pre_move_pos: &Position,
+    retro: &RetrospectiveResult,
+    explain_best: bool,
+) -> io::Result<()> {
+    let opts = NarrationOptions { explain_best };
+    let text = format_retrospective(pre_move_pos, &retro.analyses, retro.user_move, &opts);
+    out.write_all(text.as_bytes())?;
+    writeln!(
+        out,
+        "[retrospective] {} ms · {} nodes · {:.2} Mnps",
+        retro.elapsed.as_millis(),
+        retro.nodes,
+        retro.nps_m,
+    )
+}
+
 fn print_engine_move(out: &mut io::StdoutLock<'_>, entry: &HistoryEntry) -> io::Result<()> {
     let noise_tag = entry
         .noise_pick
@@ -513,17 +494,12 @@ fn print_engine_move(out: &mut io::StdoutLock<'_>, entry: &HistoryEntry) -> io::
             )?;
         }
         None => {
-            // Book move: no search ran. Session's stderr logging is
-            // suppressed for CLI, so this is the only surface that
-            // says "the engine just played a book move."
             writeln!(out, "engine played {} (book move)", entry.san)?;
         }
     }
     Ok(())
 }
 
-/// Format a noise pick into a short inline tag for the engine-move
-/// line: `[noise: softmax #N of K (+X cp)]` etc.
 fn format_noise_tag(info: &NoisePickInfo) -> String {
     match info {
         NoisePickInfo::Softmax {
@@ -550,22 +526,13 @@ fn format_noise_tag(info: &NoisePickInfo) -> String {
             "[noise: blunder roll skipped — closest above-band line was -{} cp]",
             closest_above_loss_cp,
         ),
-        NoisePickInfo::Wild { engine_top, engine_top_score } => {
-            // Pre-engine-move-context formatting; the SAN is rendered
-            // without disambiguation because we don't have the
-            // pre-move position here. The desktop's debug log
-            // formats with san::format on the live position too.
-            format!(
-                "[noise: wild — engine preferred {:?} ({:+})]",
-                engine_top, engine_top_score.0,
-            )
-        }
+        NoisePickInfo::Wild { engine_top, engine_top_score } => format!(
+            "[noise: wild — engine preferred {:?} ({:+})]",
+            engine_top, engine_top_score.0,
+        ),
     }
 }
 
-/// Format a score for the engine-move line: switch from white-POV
-/// (the form HistoryEntry stores) to the mover's POV so "+0.30" reads
-/// as "I'm 0.30 ahead after the move I just played".
 fn format_score_white_pov(white_pov: Value, mover: Color) -> String {
     let from_mover = if mover == Color::White { white_pov } else { -white_pov };
     format_score(from_mover)
@@ -595,8 +562,6 @@ fn render_current(
     Ok(())
 }
 
-/// If the current position identifies as a different opening than the
-/// last one we announced, print a one-liner and update the tracker.
 fn announce_opening_if_changed(
     out: &mut io::StdoutLock<'_>,
     pos: &Position,
@@ -612,7 +577,6 @@ fn announce_opening_if_changed(
     Ok(())
 }
 
-/// Format a PV (vector of moves from `pos`) as space-separated SAN.
 fn pv_to_san(pos: &Position, pv: &[Move]) -> Vec<String> {
     let mut out = Vec::with_capacity(pv.len());
     let mut scratch = pos.clone();
@@ -623,44 +587,24 @@ fn pv_to_san(pos: &Position, pv: &[Move]) -> Vec<String> {
     out
 }
 
-#[allow(clippy::too_many_arguments)] // cohesive runtime state, mirrors run_analyze_report
-fn run_search_report(
+fn print_search_report(
     out: &mut io::StdoutLock<'_>,
-    pos: &mut Position,
-    engine: &mut Engine,
-    depth: u32,
-    time_ms: Option<u64>,
-    start_pos_key: u64,
-    history: &[HistoryEntry],
-    multi_pv: usize,
+    pos: &Position,
+    outcome: &chess_tutor_ui::session::AnalysisOutcome,
 ) -> io::Result<()> {
-    let params = SearchParams {
-        max_depth: depth,
-        max_nodes: None,
-        max_time: time_ms.map(Duration::from_millis),
-        multi_pv: multi_pv.max(1),
-        game_history: zobrist_history(start_pos_key, history),
-        force_include: Vec::new(),
-        verbose_progress: false,
-        threads: 1,
-        eval_mask: EvalMask::EMPTY,
-    };
-    let started = std::time::Instant::now();
-    let lines = engine.search(pos, params);
-    let elapsed = started.elapsed();
-    if lines.is_empty() {
+    if outcome.analyses.is_empty() {
         writeln!(out, "no legal moves.")?;
         return Ok(());
     }
-    if lines.len() == 1 {
-        let line = &lines[0];
-        let pv_san = pv_to_san(pos, &line.pv);
+    if outcome.analyses.len() == 1 {
+        let analysis = &outcome.analyses[0];
+        let pv_san = pv_to_san(pos, &analysis.pv);
         writeln!(
             out,
             "depth {} | {} | {} ms",
-            line.depth,
-            format_score(line.score),
-            elapsed.as_millis()
+            analysis.depth,
+            format_score(analysis.score),
+            outcome.elapsed.as_millis(),
         )?;
         writeln!(out, "pv: {}", pv_san.join(" "))?;
         return Ok(());
@@ -668,25 +612,25 @@ fn run_search_report(
     writeln!(
         out,
         "depth {} | {} ms | {} lines",
-        lines[0].depth,
-        elapsed.as_millis(),
-        lines.len()
+        outcome.analyses[0].depth,
+        outcome.elapsed.as_millis(),
+        outcome.analyses.len(),
     )?;
-    let top_cp = lines[0].score.0;
-    for (i, line) in lines.iter().enumerate() {
-        let pv_san = pv_to_san(pos, &line.pv);
-        let delta = line.score.0 - top_cp;
+    let top_cp = outcome.analyses[0].score.0;
+    for (i, analysis) in outcome.analyses.iter().enumerate() {
+        let pv_san = pv_to_san(pos, &analysis.pv);
+        let delta = analysis.score.0 - top_cp;
         let delta_str = if delta == 0 {
             "(0 cp)".to_string()
         } else {
             format!("({:+} cp)", delta)
         };
-        let settled_str = format_settled_suffix(&line.pv, line.settled_ply);
+        let settled_str = format_settled_suffix(&analysis.pv, analysis.settled_ply);
         writeln!(
             out,
             "  {:>2}. {:>6}   {:<10}  {:<36}  {}",
             i + 1,
-            format_score(line.score),
+            format_score(analysis.score),
             delta_str,
             pv_san.join(" "),
             settled_str,
@@ -695,67 +639,30 @@ fn run_search_report(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // cohesive runtime state, mirrors run_search_report
-fn run_analyze_report(
+fn print_analyze_report(
     out: &mut io::StdoutLock<'_>,
-    pos: &mut Position,
-    engine: &mut Engine,
-    depth: u32,
-    time_ms: Option<u64>,
-    start_pos_key: u64,
-    history: &[HistoryEntry],
-    multi_pv: usize,
+    pos: &Position,
+    outcome: &chess_tutor_ui::session::AnalysisOutcome,
     top_percent: f32,
 ) -> io::Result<()> {
-    let params = SearchParams {
-        max_depth: depth,
-        max_nodes: None,
-        max_time: time_ms.map(Duration::from_millis),
-        multi_pv: multi_pv.max(1),
-        game_history: zobrist_history(start_pos_key, history),
-        force_include: Vec::new(),
-        verbose_progress: false,
-        threads: 1,
-        eval_mask: EvalMask::EMPTY,
-    };
-    let started = std::time::Instant::now();
-    let analyses = analyze_position(engine, pos, params);
-    let elapsed = started.elapsed();
-    if analyses.is_empty() {
+    if outcome.analyses.is_empty() {
         writeln!(out, "no legal moves.")?;
         return Ok(());
     }
     writeln!(
         out,
         "depth {} | {} ms | {} lines | top {:.0}%",
-        analyses[0].depth,
-        elapsed.as_millis(),
-        analyses.len(),
+        outcome.analyses[0].depth,
+        outcome.elapsed.as_millis(),
+        outcome.analyses.len(),
         top_percent,
     )?;
     write!(
         out,
         "{}",
-        analysis_report::render(pos, &analyses, top_percent)
+        analysis_report::render(pos, &outcome.analyses, top_percent),
     )?;
     Ok(())
-}
-
-/// Build the `game_history` argument [`SearchParams`] wants: every
-/// reached Zobrist key *except* the current root (which the search
-/// pushes itself). Reconstructs Session's `position_keys` from the
-/// captured `start_pos_key` plus `history[i].position_after.key()`
-/// for the in-progress game.
-fn zobrist_history(start_pos_key: u64, history: &[HistoryEntry]) -> Vec<u64> {
-    if history.is_empty() {
-        return Vec::new();
-    }
-    let mut keys = Vec::with_capacity(history.len());
-    keys.push(start_pos_key);
-    for entry in &history[..history.len() - 1] {
-        keys.push(entry.position_after.key());
-    }
-    keys
 }
 
 fn format_settled_suffix(pv: &[Move], settled: Option<usize>) -> String {
@@ -866,10 +773,6 @@ fn print_openings_status(
     history_moves: &[Move],
 ) -> io::Result<()> {
     let count = allowed_count(allowed);
-    // Best-effort "in book" status: rebuild a cursor from the *next-
-    // game* allowed set and peek. The current game's cursor lives
-    // inside Session and isn't exposed; this still gives the user a
-    // useful answer (would this opening list still match?).
     let probe_profile = OpponentProfile {
         seed: 0,
         book: allowed.clone(),

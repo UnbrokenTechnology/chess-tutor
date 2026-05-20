@@ -9,7 +9,7 @@
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, File, Move, Piece, PieceType, Rank, Square};
 
-use crate::session::NewGameForm;
+use crate::session::{NewGameForm, RetrospectiveResult};
 
 /// Top-bar panel: New Game / Takeback / Flip / Hint / Live buttons,
 /// depth tuner, and a status slot that renders as either a spinner
@@ -274,9 +274,15 @@ pub enum RetrospectiveBody {
 }
 
 pub enum RetrospectiveKind {
+    /// User move; retrospective worker job still in flight.
     UserMoveAnalyzing,
-    UserMoveText(String),
-    UserMoveEmpty,
+    /// User move; retrospective is ready. Renderer formats the
+    /// analyses into prose via its own `chess_tutor_narration` (or
+    /// future arrow / highlight rendering). Boxed because the
+    /// payload (a `Position` plus a `Vec<MoveAnalysis>`) is large
+    /// relative to other variants and would otherwise bloat the
+    /// enum size for every panel body.
+    UserMoveReady(Box<UserMoveReadyData>),
     EngineMove {
         san: String,
         eval_pawns: f32,
@@ -284,6 +290,13 @@ pub enum RetrospectiveKind {
         elapsed_ms: u128,
     },
     EngineInfoMissing,
+}
+
+pub struct UserMoveReadyData {
+    /// Position the analyses are for; what `format_retrospective`
+    /// wants as its first argument.
+    pub pre_move_pos: Position,
+    pub result: RetrospectiveResult,
 }
 
 pub struct HintPanelView {
