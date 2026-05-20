@@ -634,55 +634,71 @@ impl Session {
     }
 
     pub(crate) fn maybe_queue_engine_search(&mut self) {
-        if self.engine_thinking {
-            return;
-        }
-        if !self.engine_plays.is_engine_turn(self.position.side_to_move()) {
-            return;
-        }
-        let mut scratch = self.position.clone();
-        if legal_moves_vec(&mut scratch).is_empty() {
-            return;
-        }
-        // Book first: walk allowed openings for any whose stored
-        // move-prefix still matches the moves played so far; if any
-        // match, play the deterministically-picked next move
-        // synchronously and skip the worker round-trip entirely. The
-        // engine_info field stays None for these moves (no search ran);
-        // the move list panel will need to recognise book moves as a
-        // separate case once we surface them in the UI.
-        let history_moves: Vec<Move> = self.history.iter().map(|e| e.mv).collect();
-        let book_pick = self
-            .book_cursor
-            .as_ref()
-            .and_then(|c| c.peek(&history_moves));
-        if let Some(book_pick) = book_pick {
-            if self.log_to_stderr {
-                let san_str = san::format(&self.position, book_pick.mv);
-                if let Some(entry) = chess_tutor_engine::openings::entry(book_pick.opening_id) {
-                    eprintln!("book: engine plays {} ({} {})", san_str, entry.eco, entry.name);
-                } else {
-                    eprintln!("book: engine plays {}", san_str);
+        // Loop because in self-play (EngineMode::Both) consecutive book
+        // moves can fire synchronously — after each one it's *still*
+        // the engine's turn, so we keep playing book moves until we hit
+        // an out-of-book position and queue an actual search (or the
+        // game ends). For user-vs-engine flows the loop iterates at
+        // most once: after one engine ply it's the user's turn and the
+        // top-of-loop guard returns.
+        loop {
+            if self.engine_thinking {
+                return;
+            }
+            if !self.engine_plays.is_engine_turn(self.position.side_to_move()) {
+                return;
+            }
+            let mut scratch = self.position.clone();
+            if legal_moves_vec(&mut scratch).is_empty() {
+                return;
+            }
+            // Book first: walk allowed openings for any whose stored
+            // move-prefix still matches the moves played so far; if any
+            // match, play the deterministically-picked next move
+            // synchronously and skip the worker round-trip entirely.
+            let history_moves: Vec<Move> = self.history.iter().map(|e| e.mv).collect();
+            let book_pick = self
+                .book_cursor
+                .as_ref()
+                .and_then(|c| c.peek(&history_moves));
+            if let Some(book_pick) = book_pick {
+                if self.log_to_stderr {
+                    let san_str = san::format(&self.position, book_pick.mv);
+                    if let Some(entry) = chess_tutor_engine::openings::entry(book_pick.opening_id) {
+                        eprintln!("book: engine plays {} ({} {})", san_str, entry.eco, entry.name);
+                    } else {
+                        eprintln!("book: engine plays {}", san_str);
+                    }
                 }
+                // A successful book pick clears the "we've announced
+                // out-of-book" flag — the user may have taken back to
+                // an in-book position, and if they later deviate again
+                // we want the announcement to print fresh.
+                self.book_out_announced = false;
+                self.apply_move(book_pick.mv);
+                continue;
             }
-            // A successful book pick clears the "we've announced
-            // out-of-book" flag — the user may have taken back to an
-            // in-book position, and if they later deviate again we
-            // want the announcement to print fresh.
-            self.book_out_announced = false;
-            self.apply_move(book_pick.mv);
-            return;
-        }
-        // No book match on this position. Announce once per
-        // out-of-book streak — *don't* drop the cursor itself,
-        // because a takeback might bring us back into book territory
-        // and we need peek to keep working on the next bot turn.
-        if self.book_cursor.is_some() && !self.book_out_announced {
-            if self.log_to_stderr {
-                eprintln!("out of book — engine now plays from search.");
+            // No book match on this position. Announce once per
+            // out-of-book streak — *don't* drop the cursor itself,
+            // because a takeback might bring us back into book
+            // territory and we need peek to keep working on the next
+            // bot turn.
+            if self.book_cursor.is_some() && !self.book_out_announced {
+                if self.log_to_stderr {
+                    eprintln!("out of book — engine now plays from search.");
+                }
+                self.book_out_announced = true;
             }
-            self.book_out_announced = true;
+            return self.dispatch_engine_search();
         }
+    }
+
+    /// Dispatch a [`WorkerJob::Search`] for the current position. The
+    /// caller is responsible for checking `engine_thinking` /
+    /// `is_engine_turn` first — extracted from
+    /// [`Self::maybe_queue_engine_search`] only so the book-pick loop
+    /// can fall through to "queue a real search and exit".
+    fn dispatch_engine_search(&mut self) {
         let params = SearchParams {
             max_depth: self.depth,
             max_nodes: Some(ENGINE_TURN_NODE_CAP),
@@ -772,6 +788,13 @@ impl Session {
                 // Engine just moved — any open Hint was for the prior
                 // position, so close it.
                 self.close_hint();
+                // Self-play (EngineMode::Both) needs us to queue the
+                // *next* engine move after each completes; without this
+                // the bot freezes after move 1. For EngineMode::Side
+                // and EngineMode::None this is a no-op — the post-move
+                // side-to-move isn't the engine, so the guard returns
+                // immediately.
+                self.maybe_queue_engine_search();
             }
             WorkerResult::Retrospective {
                 gen,
