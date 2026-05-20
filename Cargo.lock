@@ -378,6 +378,7 @@ dependencies = [
  "anyhow",
  "chess-tutor-engine",
  "chess-tutor-narration",
+ "chess-tutor-ui",
  "clap",
  "dhat",
 ]

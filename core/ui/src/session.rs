@@ -17,14 +17,13 @@ use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::opponent::{EvalMask, NoiseProfile, OpponentProfile};
 use chess_tutor_engine::position::{Position, StateInfo};
 use chess_tutor_engine::san;
-use chess_tutor_engine::types::{Color, File, Move, MoveKind, Piece, PieceType, Rank, Square, Value};
+use chess_tutor_engine::types::{Color, Move, MoveKind, PieceType, Square, Value};
 
 use crate::event::Event;
 use crate::view::{
-    BoardCell, BoardView, EvalBarView, HintEntryView, HintPanelState, HintPanelView,
-    MoveDotKind, MoveListCell, MoveListRow, MoveListView, NewGameDialogView, PromotionEntry,
-    PromotionPickerView, RetrospectiveBody, RetrospectiveKind, RetrospectivePanelView,
-    SidePanelBody, SidePanelView, TopBarView,
+    BoardView, EvalBarView, HintEntryView, HintPanelState, HintPanelView, MoveListCell,
+    MoveListRow, MoveListView, NewGameDialogView, PromotionPickerView, RetrospectiveBody,
+    RetrospectiveKind, RetrospectivePanelView, SidePanelBody, SidePanelView, TopBarView,
 };
 use crate::worker::{worker_loop, NoisePickInfo, WorkerJob, WorkerResult};
 
@@ -906,89 +905,32 @@ impl Session {
     pub fn build_board_view(&self) -> BoardView {
         let viewed_pos = self.viewed_position().clone();
         let viewed_mv = self.viewed_entry().map(|e| e.mv);
-        let king_in_check = viewed_pos
-            .in_check()
-            .then(|| viewed_pos.king_square(viewed_pos.side_to_move()));
         let live = self.is_viewing_live();
-
-        let mut rows: [[BoardCell; 8]; 8] = std::array::from_fn(|_| {
-            std::array::from_fn(|_| BoardCell {
-                square: Square::new(File::A, Rank::R1),
-                is_light: false,
-                piece: None,
-                last_move: false,
-                selected: false,
-                check_tint: false,
-                move_dot: None,
-            })
-        });
-
-        for display_row in 0..8u8 {
-            for display_col in 0..8u8 {
-                let (file_idx, rank_idx) = if self.flipped {
-                    (7 - display_col, display_row)
-                } else {
-                    (display_col, 7 - display_row)
-                };
-                let is_light = (rank_idx + file_idx) % 2 != 0;
-                let sq = Square::new(
-                    File::from_index(file_idx).unwrap(),
-                    Rank::from_index(rank_idx).unwrap(),
-                );
-                let last_move = viewed_mv
-                    .map(|mv| mv.from() == sq || mv.to() == sq)
-                    .unwrap_or(false);
-                let selected = live && Some(sq) == self.selected;
-                let check_tint = Some(sq) == king_in_check;
-                let piece = viewed_pos.piece_on(sq);
-                let move_dot = if live {
-                    self.legal_from_selected
-                        .iter()
-                        .find(|m| m.to() == sq)
-                        .copied()
-                        .map(|m| {
-                            if self.position.is_capture(m) {
-                                MoveDotKind::Capture
-                            } else {
-                                MoveDotKind::Move
-                            }
-                        })
-                } else {
-                    None
-                };
-                rows[display_row as usize][display_col as usize] = BoardCell {
-                    square: sq,
-                    is_light,
-                    piece,
-                    last_move,
-                    selected,
-                    check_tint,
-                    move_dot,
-                };
-            }
-        }
-
         let pending_promotion = self.pending_promotion.as_ref().map(|p| {
-            let promoter_color = self.position.side_to_move();
-            let entries: [PromotionEntry; 4] = std::array::from_fn(|i| {
-                let mv = p.candidates[i];
-                let pt = mv.promoted_to();
-                let sq = picker_square_at(p.to, i);
-                let (display_col, display_row) = square_to_display_coords(sq, self.flipped);
-                PromotionEntry {
-                    display_col,
-                    display_row,
-                    piece: Piece::new(promoter_color, pt),
-                    move_: mv,
-                }
-            });
-            PromotionPickerView { entries }
+            PromotionPickerView::compose(
+                p.to,
+                p.candidates,
+                self.position.side_to_move(),
+                self.flipped,
+            )
         });
-
-        BoardView {
-            rows,
+        // When browsing back, suppress mouse-state overlays: the
+        // selected piece and its legal-move dots belong to the *live*
+        // position, not the historical one we're displaying. The
+        // BoardCell.selected / move_dot fields stay None.
+        let (selected, legals): (Option<Square>, &[Move]) = if live {
+            (self.selected, &self.legal_from_selected)
+        } else {
+            (None, &[])
+        };
+        BoardView::compose(
+            &viewed_pos,
+            self.flipped,
+            viewed_mv,
+            selected,
+            legals,
             pending_promotion,
-        }
+        )
     }
 
     pub fn build_side_panel_view(&self) -> SidePanelView {
@@ -1180,30 +1122,6 @@ fn log_new_game_intro(opponent: &OpponentProfile) {
     // hasn't committed to any specific opening at game start. The
     // opening that emerges is announced inline on each book move
     // (`book: engine plays X (ECO Name)`).
-}
-
-/// Display (column, row) for `sq` given board orientation.
-fn square_to_display_coords(sq: Square, flipped: bool) -> (u8, u8) {
-    let file_idx = sq.file().index() as u8;
-    let rank_idx = sq.rank().index() as u8;
-    if flipped {
-        (7 - file_idx, rank_idx)
-    } else {
-        (file_idx, 7 - rank_idx)
-    }
-}
-
-/// The `i`-th square in the promotion picker stack: index 0 = the
-/// promotion target itself, then walking back along the file toward
-/// the centre of the board. Always returns a valid square because
-/// promotions land on rank 1 or rank 8, leaving four ranks of
-/// headroom in the relevant direction.
-fn picker_square_at(target: Square, i: usize) -> Square {
-    let file = target.file();
-    let target_rank = target.rank().index() as i8;
-    let direction: i8 = if target_rank == 7 { -1 } else { 1 };
-    let rank_idx = (target_rank + direction * i as i8) as u8;
-    Square::new(file, Rank::from_index(rank_idx).unwrap())
 }
 
 /// Format a score for display in the hint panel. Root-stm POV is

@@ -398,21 +398,9 @@ fn main() -> Result<()> {
             flip,
             light_mode,
         } => {
-            // Validate the FEN through the engine so we fail fast on
-            // bad input, but we render from the string directly.
-            let _ = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
-            print!(
-                "{}",
-                render_board(
-                    &fen,
-                    &RenderOptions {
-                        ascii,
-                        flip,
-                        highlight: None,
-                        light_mode,
-                    },
-                )
-            );
+            let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let view = chess_tutor_ui::view::BoardView::compose(&pos, flip, None, None, &[], None);
+            print!("{}", render_board(&view, &RenderOptions { ascii, light_mode }));
         }
         Command::Moves { fen } => {
             let mut pos =

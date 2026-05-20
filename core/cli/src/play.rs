@@ -498,19 +498,23 @@ fn render_current(
     cfg: &PlayConfig,
     manual_flip: bool,
 ) -> io::Result<()> {
-    let highlight = history
-        .last()
-        .map(|h| (h.mv.from().to_algebraic(), h.mv.to().to_algebraic()));
+    let last_move = history.last().map(|h| h.mv);
+    let view = chess_tutor_ui::view::BoardView::compose(
+        pos,
+        manual_flip,
+        last_move,
+        None,
+        &[],
+        None,
+    );
     writeln!(out)?;
     write!(
         out,
         "{}",
         render_board(
-            &pos.to_fen(),
+            &view,
             &RenderOptions {
                 ascii: cfg.ascii,
-                flip: manual_flip,
-                highlight,
                 light_mode: cfg.light_mode,
             },
         )
