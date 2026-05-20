@@ -78,6 +78,13 @@ pub(crate) enum WorkerResult {
         /// engine-best hot path.
         noise_pick: Option<NoisePickInfo>,
         elapsed: Duration,
+        /// Total nodes searched by the play engine for this turn. Used
+        /// by the CLI to print "N nodes · X Mnps" alongside the move;
+        /// the GUI ignores it.
+        nodes: u64,
+        /// Mega-nodes per second (`engine.last_nps() / 1e6`) for the
+        /// CLI's perf surface.
+        nps_m: f64,
     },
     Retrospective {
         gen: u64,
@@ -91,7 +98,7 @@ pub(crate) enum WorkerResult {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum NoisePickInfo {
+pub enum NoisePickInfo {
     /// Softmax branch fired — sampled `pick_idx` from the top-K.
     Softmax {
         pick_idx: usize,
@@ -202,7 +209,17 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                         (Some(wild_mv), None, info)
                     }
                 };
-                let _ = tx.send(WorkerResult::Search { gen, mv, line, noise_pick, elapsed });
+                let nodes = engine.last_nodes();
+                let nps_m = engine.last_nps() / 1.0e6;
+                let _ = tx.send(WorkerResult::Search {
+                    gen,
+                    mv,
+                    line,
+                    noise_pick,
+                    elapsed,
+                    nodes,
+                    nps_m,
+                });
                 repaint();
             }
             WorkerJob::Retrospective {

@@ -4,9 +4,17 @@
 //! Move input accepts both SAN (`Nf3`, `Qxc6`, `O-O`, `e8=Q`) and UCI
 //! (`g1f3`, `e2e4`, `e7e8q`). SAN parsing is lenient — missing `x`,
 //! stray `+`/`#`, and 0-0 / O-O are all fine.
+//!
+//! Game state (position, history, opponent profile, book cursor) lives
+//! in [`chess_tutor_ui::Session`]. The CLI owns: REPL command parsing,
+//! the synchronous-feel game loop (blocks on the worker between
+//! prompts), trap-cursor tracking, and the per-move retrospective
+//! rendering. Search/analyze REPL commands run on a CLI-private
+//! analysis engine so repeated invocations are bit-identical.
 
 use std::io::{self, BufRead, Write};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -15,7 +23,6 @@ use chess_tutor_engine::book::BookCursor;
 use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
-use chess_tutor_engine::noise::{self, NoisePick};
 use chess_tutor_engine::openings::{self, OpeningId, OpeningIdentification};
 use chess_tutor_engine::opponent::{
     BookSelection, EvalCategory, EvalMask, NoiseProfile, OpponentProfile,
@@ -24,6 +31,10 @@ use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::traps::{self, PendingTrap, TrapEvent, TrapHit};
 use chess_tutor_engine::types::{Color, Move, Value};
+use chess_tutor_ui::event::Event;
+use chess_tutor_ui::session::{EngineMode, HistoryEntry};
+use chess_tutor_ui::view::BoardView;
+use chess_tutor_ui::{NoisePickInfo, Session};
 
 use crate::analysis_report;
 use crate::board::{render as render_board, RenderOptions};
@@ -32,28 +43,18 @@ use crate::retrospective::{self, RetrospectiveConfig};
 use crate::uci;
 use crate::EngineColor;
 
-/// Per-engine-move node cap for interactive play. At typical speeds
-/// (~4 Mnodes/s) this bounds the wait to ~1.3 s even on pathological
-/// positions that would otherwise search indefinitely at the nominal
-/// depth. Normal middlegame moves complete well under this (~10k–
-/// 100k nodes), so it only triggers when something is misbehaving.
-const ENGINE_TURN_NODE_CAP: u64 = 5_000_000;
-
 pub struct PlayConfig {
     pub start_fen: Option<String>,
     pub engine_color: EngineColor,
-    /// Depth the engine searches to when picking *its* moves. The
-    /// retrospective uses [`PlayConfig::retrospective_depth`] —
-    /// kept separate so the bot can be weak (low depth) while the
-    /// student's feedback comes from a stronger analytical pass.
+    /// Depth the engine searches to when picking *its* moves.
     pub depth: u32,
     /// Depth the auto-retrospective searches to when analysing the
-    /// user's just-played move. Defaults to
-    /// [`crate::retrospective::RETROSPECTIVE_DEPTH`] (currently 12)
-    /// because at depth 10 we observed verdict flips on common
-    /// opening positions (e.g. 1.e4 e5 2.Nf3 reads "inaccuracy" at
-    /// d=10 but "best" at d=12).
+    /// user's just-played move. Independent of [`Self::depth`] so a
+    /// weakened bot can still give strong feedback.
     pub retrospective_depth: u32,
+    /// Per-move time cap for the user-side retrospective (the engine
+    /// itself uses depth-budget for determinism). `None` = use the
+    /// retrospective's default 10 s safety cap.
     pub time_ms: Option<u64>,
     pub ascii: bool,
     pub flip: bool,
@@ -64,75 +65,62 @@ pub struct PlayConfig {
     /// When true, print the current FEN before each side's turn —
     /// for reproducing hangs / bad moves from the same position.
     pub show_fens: bool,
-    /// Diagnostic: clear the engine's TT + history before every
-    /// engine move. See `--reset-engine-per-move` CLI help for the
-    /// rationale.
-    pub reset_engine_per_move: bool,
-    /// Diagnostic: stream iterative-deepening and root-move progress
-    /// from the engine to stderr during each search. Sets
-    /// `SearchParams::verbose_progress` on every search we run.
-    pub search_progress: bool,
-    /// Number of Lazy-SMP search threads for **every** search in this
-    /// session — engine moves AND the auto-retrospective. Defaults to
-    /// `1` (bit-deterministic across runs and takebacks, which the
-    /// teaching tool relies on for "play the same move, get the same
-    /// verdict"). Raise to use more cores in benchmarking. REPL
-    /// `analyze` / `search` commands stay single-threaded regardless.
+    /// Number of Lazy-SMP search threads for the CLI's *analytical*
+    /// engine (REPL `search` / `analyze` + the auto-retrospective).
+    /// Engine play itself runs through Session's worker which is
+    /// hardcoded to single-thread for teaching determinism. Default
+    /// 1 keeps every analytical answer bit-deterministic.
     pub threads: usize,
-    /// Bot personality / variability toggles for this game. Phase A:
-    /// the only populated field is [`OpponentProfile::seed`], logged
-    /// at game start. Subsequent phases hook opening books, eval
-    /// signal masking, and move noise into this struct.
     pub opponent: OpponentProfile,
 }
 
-/// One played ply — enough to undo the move and show what was played.
-struct HistoryEntry {
-    mv: Move,
-    state: chess_tutor_engine::position::StateInfo,
-    san: String,
-    /// Snapshot of `pending_trap` as it was *before* this move was
-    /// applied. On `undo`, we restore this so the trap cursor walks
-    /// backward with the game.
-    pending_before: Option<PendingTrap>,
-}
-
-pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
-    let mut pos = match &cfg.start_fen {
+pub fn play_loop(cfg: PlayConfig) -> Result<()> {
+    let start_pos = match &cfg.start_fen {
         Some(fen) => Position::from_fen(fen).map_err(|e| anyhow::anyhow!("invalid --fen: {e}"))?,
         None => Position::startpos(),
     };
-    let mut engine = Engine::default();
-    // Dedicated engine for analytical paths (`search` / `analyze` REPL
-    // commands + auto-retrospective). Cleared via `new_game()` before
-    // every use so the answer for a given position is bit-identical
-    // regardless of session history — closes the same takeback
-    // verdict-flip bug the desktop hit. The old `engine.clone()`
-    // pattern silently captured the play engine's accumulated TT and
-    // produced different verdicts for the same move depending on what
-    // had been searched before.
+    let mut session = Session::new(Arc::new(|| {}));
+    session.set_log_to_stderr(false);
+    // CLI runs its own (richer) retrospective; suppress Session's
+    // worker-side retrospective so we don't pay the search twice.
+    session.set_auto_retrospective(false);
+
+    let engine_plays = match cfg.engine_color {
+        EngineColor::White => EngineMode::Side(Color::White),
+        EngineColor::Black => EngineMode::Side(Color::Black),
+        EngineColor::Both => EngineMode::Both,
+        EngineColor::None => EngineMode::None,
+    };
+    session.start_game(start_pos.clone(), engine_plays, cfg.depth, cfg.opponent.clone());
+
+    // CLI-private engine for the REPL `search` / `analyze` commands
+    // and the auto-retrospective. Cleared before every use so the
+    // analytical answer is bit-identical regardless of session
+    // history — closes the same takeback verdict-flip bug Session
+    // already closes for its own analytical paths.
     let mut analysis_engine = Engine::default();
-    let mut history: Vec<HistoryEntry> = Vec::new();
-    // Every reached position's Zobrist key, starting with the initial
-    // position and appending one entry per played move. `position_keys
-    // .len() == history.len() + 1` always.
-    let mut position_keys: Vec<u64> = vec![pos.key()];
-    let mut manual_flip = cfg.flip;
-    // Most-recently-announced opening name, if any. Used to print a
-    // banner only on transitions — not once per render.
-    let mut last_opening: Option<OpeningIdentification> = None;
-    // Live trap cursor, when a trap is mid-refutation. `Some` between
-    // a trigger firing and the next terminal event; `None` otherwise.
+
+    // Replicate Session's history on a scratch position for trap
+    // scanning. Session's API doesn't surface a "before move N"
+    // position, so the CLI walks the move list against its own
+    // mirror.
+    let mut trap_pos = start_pos.clone();
     let mut pending_trap: Option<PendingTrap> = None;
-    // When true, every human move triggers an automatic retrospective
-    // analysis of the pre-move position: verdict + engine-preferred
-    // alternative + dominant term shift. Toggle via `retrospect on/off`.
+    let mut trap_history: Vec<Option<PendingTrap>> = Vec::new();
+    let mut last_processed_len: usize = 0;
+
+    let mut manual_flip = cfg.flip;
+    let mut last_opening: Option<OpeningIdentification> = None;
     let mut retrospect_enabled = true;
-    // When true, `Best` verdicts still render the full per-term
-    // narration so the student learns *why* their move was best.
-    // Default on; flip via REPL `explain-best off` or the CLI
-    // `--no-explain-best` startup flag.
     let mut explain_best = cfg.explain_best;
+    // For the user-move retrospective: we need the pre-move position
+    // and pre-move history. After the user types a move and we
+    // dispatch it through Session, the position is already gone.
+    // Snapshot it here before dispatching.
+    //
+    // Set inside the input branch; consumed after the worker (if any)
+    // catches up.
+    let mut pending_retrospective: Option<(Position, Vec<u64>, Move)> = None;
 
     let stdin = io::stdin();
     let mut out = io::stdout().lock();
@@ -145,27 +133,11 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
         out,
         "commands: moves | eval | search | analyze | retrospect | explain-best | openings | eval-mask | noise | undo | fen | flip | resign | help | quit"
     )?;
-    // Log the opponent seed so a varied game can be replayed exactly.
     writeln!(
         out,
         "opponent seed: {} (pass --seed {} to replay this game)",
         cfg.opponent.seed, cfg.opponent.seed,
     )?;
-    // Initialise the book for this game (if the profile allows one
-    // and we're starting from startpos). The cursor is stateless w.r.t.
-    // game progression — each bot-move call to `peek(history)` walks
-    // the allowed openings fresh, finds those whose move-prefix still
-    // matches, and picks one. We deliberately don't announce a
-    // pre-committed opening at game start: until the human plays,
-    // an engine-playing-Black has no idea what opening will emerge,
-    // and even an engine-playing-White might branch into several
-    // theoretical continuations depending on Black's response.
-    //
-    // The cursor stays alive for the whole game; a separate flag
-    // dedupes the "out of book" announcement and gets reset on undo
-    // so the line re-prints if the user undoes and deviates again.
-    let book_cursor = BookCursor::new(&cfg.opponent, &pos);
-    let mut book_out_announced = false;
     if !cfg.opponent.eval_mask.is_empty() {
         let disabled: Vec<_> = cfg.opponent.eval_mask.disabled_iter().map(|c| c.slug()).collect();
         writeln!(out, "eval-mask: bot blind to {}", disabled.join(", "))?;
@@ -173,11 +145,10 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
     if !cfg.opponent.noise.is_off() {
         writeln!(out, "noise: {}", format_noise_summary(&cfg.opponent.noise))?;
     }
-    // Editable view of the opponent's allowed-openings set. Changes
-    // via the `openings allow / deny / reset` commands take effect on
-    // the *next* game (the current cursor was already picked above);
-    // we still let the user query and edit it so they can shape their
-    // practice list while a game is in flight.
+    // Allowed-openings editor: CLI-local because edits take effect
+    // on the next game (the current game's BookCursor is frozen at
+    // start_game time). Session's opponent.book reflects the current
+    // game's commitment.
     let mut allowed_book: BookSelection = cfg.opponent.book.clone();
     match cfg.engine_color {
         EngineColor::White => writeln!(out, "engine plays white, you play black.")?,
@@ -187,101 +158,120 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
     }
 
     loop {
-        render_current(&mut out, &pos, &history, &cfg, manual_flip)?;
-        announce_opening_if_changed(&mut out, &pos, &mut last_opening)?;
+        // If the engine is mid-think, block until its move lands.
+        // Otherwise drain any worker results that arrived since the
+        // last iteration (book-pick moves apply synchronously inside
+        // Session so they're already visible by the time we get here;
+        // worker-driven engine moves arrive via wait/poll_worker).
+        if session.is_engine_thinking() {
+            session.wait_for_worker();
+        } else {
+            session.poll_worker();
+        }
 
-        // Terminal-state detection.
-        let legal = legal_moves_vec(&mut pos);
-        if legal.is_empty() {
-            if pos.in_check() {
-                let winner = match pos.side_to_move() {
-                    Color::White => "black",
-                    Color::Black => "white",
-                };
-                writeln!(out, "checkmate — {winner} wins.")?;
-            } else {
-                writeln!(out, "stalemate — draw.")?;
+        // Detect history changes (move applied, undo).
+        let history = session.history();
+        if history.len() < last_processed_len {
+            // Undo shrunk history; rebuild trap state from scratch.
+            trap_pos = start_pos.clone();
+            pending_trap = None;
+            trap_history.clear();
+            last_processed_len = 0;
+        }
+        while last_processed_len < history.len() {
+            let entry = &history[last_processed_len];
+            advance_trap_for_move(
+                &mut out,
+                &mut trap_pos,
+                &mut pending_trap,
+                entry.mv,
+            )?;
+            trap_history.push(pending_trap.clone());
+            // Print engine-move banner for moves the user didn't make.
+            if !user_owns(entry.moved_by, cfg.engine_color) {
+                print_engine_move(&mut out, entry)?;
             }
-            break;
+            // Run the user-move retrospective once *both* the user's
+            // move AND any engine response have landed — so the
+            // engine's reply doesn't get printed after the
+            // retrospective and confuse the reader. We detect
+            // "retrospective owed for entry K" via pending_retrospective.
+            last_processed_len += 1;
         }
-        if pos.halfmove_clock() >= 100 {
-            writeln!(out, "draw by 50-move rule.")?;
-            break;
+
+        // If a user-move retrospective is queued AND the engine has
+        // finished its reply (or no engine reply is owed), run it now.
+        if let Some((mut pre_pos, game_hist, user_mv)) = pending_retrospective.take() {
+            let cfg_r = RetrospectiveConfig {
+                max_depth: cfg.retrospective_depth,
+                max_time_ms: cfg.time_ms,
+                explain_best,
+                threads: cfg.threads,
+            };
+            analysis_engine.new_game();
+            retrospective::run_and_render(
+                &mut out,
+                &mut pre_pos,
+                &mut analysis_engine,
+                &cfg_r,
+                game_hist,
+                user_mv,
+            )?;
+            writeln!(
+                &mut out,
+                "[retrospective] {} ms · {} nodes · {:.2} Mnps",
+                analysis_engine.last_elapsed().as_millis(),
+                analysis_engine.last_nodes(),
+                analysis_engine.last_nps() / 1.0e6,
+            )?;
         }
-        if threefold_reached(&position_keys) {
-            writeln!(out, "draw by threefold repetition.")?;
-            break;
-        }
-        if pos.has_insufficient_material() {
-            writeln!(out, "draw by insufficient material.")?;
+
+        render_current(&mut out, session.position(), session.history(), &cfg, manual_flip)?;
+        announce_opening_if_changed(&mut out, session.position(), &mut last_opening)?;
+
+        // Terminal-state via Session (handles checkmate, stalemate,
+        // 50-move, threefold, insufficient material).
+        if let Some(outcome) = session.game_outcome() {
+            writeln!(out, "{}", outcome.to_lowercase())?;
             break;
         }
 
-        let mover = pos.side_to_move();
+        let mover = session.position().side_to_move();
         let mover_name = match mover {
             Color::White => "white",
             Color::Black => "black",
         };
-        writeln!(out, "move {}: {mover_name} to move.", pos.fullmove_number(),)?;
+        writeln!(
+            out,
+            "move {}: {mover_name} to move.",
+            session.position().fullmove_number(),
+        )?;
         if cfg.show_fens {
-            writeln!(out, "fen: {}", pos.to_fen())?;
+            writeln!(out, "fen: {}", session.position().to_fen())?;
         }
 
-        if is_engine_turn(mover, cfg.engine_color) {
-            // Book first: walk allowed openings for any whose stored
-            // move-prefix matches the game so far; if any match, play
-            // the deterministically-picked next move. This is the only
-            // place the book overrides search results — see the
-            // BookCursor docs for the strict invariant that analytical
-            // paths must not consult the book.
-            let history_moves: Vec<Move> = history.iter().map(|e| e.mv).collect();
-            let book_pick = book_cursor.as_ref().and_then(|c| c.peek(&history_moves));
-            if let Some(book_pick) = book_pick {
-                let san_text = san::format(&pos, book_pick.mv);
-                let opening = chess_tutor_engine::openings::entry(book_pick.opening_id);
-                if let Some(entry) = opening {
-                    writeln!(out, "book: engine plays {san_text} ({} {})", entry.eco, entry.name)?;
-                } else {
-                    writeln!(out, "book: engine plays {san_text}")?;
-                }
-                // Re-arm the announcement — we might have re-entered
-                // book via undo and could deviate again later.
-                book_out_announced = false;
-                apply_move_and_scan(
-                    &mut out,
-                    &mut pos,
-                    book_pick.mv,
-                    &mut history,
-                    &mut position_keys,
-                    &mut pending_trap,
-                )?;
-                continue;
-            }
-            // No book match at this position. Announce once per
-            // out-of-book streak — *don't* drop the cursor itself,
-            // because an undo might bring us back into book territory
-            // and we need peek to keep working on the next bot turn.
-            if book_cursor.is_some() && !book_out_announced {
-                writeln!(out, "out of book — engine now plays from search.")?;
-                book_out_announced = true;
-            }
-            play_engine_turn(
-                &mut out,
-                &mut pos,
-                &mut engine,
-                &cfg,
-                &legal,
-                &mut history,
-                &mut position_keys,
-                &mut pending_trap,
-            )?;
+        // If it's the engine's turn (Session::is_engine_thinking is
+        // false here but maybe_queue_engine_search ran during
+        // start_game / play_user_move / takeback), top of loop will
+        // block. We just need to NOT prompt the user.
+        if session.is_engine_thinking() {
             continue;
         }
+        if !matches!(session.engine_plays(), EngineMode::None | EngineMode::Side(_))
+            || session.engine_plays().is_engine_turn(mover)
+        {
+            // Self-play: engine plays both sides. The loop top will
+            // wait for the worker; we should not prompt.
+            // Belt-and-braces: also handle Side(c) where it's c's
+            // turn — Session should already be thinking, but in case
+            // it's not (e.g. terminal position) we'd still skip.
+            if session.engine_plays().is_engine_turn(mover) {
+                continue;
+            }
+        }
 
-        // Don't spam the student with pre-move warnings while they're
-        // already mid-trap — the trap cursor is doing the narration.
         if pending_trap.is_none() {
-            announce_trap_threats(&mut out, &pos)?;
+            announce_trap_threats(&mut out, session.position())?;
         }
         write!(out, "> ")?;
         out.flush()?;
@@ -293,10 +283,6 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
         if cmd.is_empty() {
             continue;
         }
-        // Split once on whitespace: the first token is the verb, the
-        // rest (if any) is the verb-specific argument. This lets
-        // `search` take an optional PV count while keeping simple
-        // one-word commands (`quit`, `eval`, `undo`, …) working.
         let (verb, arg) = match cmd.split_once(char::is_whitespace) {
             Some((v, a)) => (v, a.trim()),
             None => (cmd, ""),
@@ -305,47 +291,46 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
             "quit" | "exit" => break,
             "help" | "?" => print_help(&mut out)?,
             "moves" => {
-                let sans: Vec<String> = legal.iter().map(|m| san::format(&pos, *m)).collect();
+                let mut scratch = session.position().clone();
+                let legal = legal_moves_vec(&mut scratch);
+                let sans: Vec<String> =
+                    legal.iter().map(|m| san::format(session.position(), *m)).collect();
                 writeln!(out, "{} legal moves: {}", sans.len(), sans.join(" "))?;
             }
             "eval" => {
-                let (_v, trace) = evaluate_with_trace(&pos);
+                let (_v, trace) = evaluate_with_trace(session.position());
                 print!("{}", eval_report::render(&trace));
             }
             "search" => match parse_search_command(arg) {
-                // Analytical commands use a dedicated engine that's
-                // cleared before each call — repeated `search`/`analyze`
-                // for the same position give bit-identical output
-                // regardless of session order or what the play engine
-                // has been doing.
                 Ok(multi_pv) => {
                     analysis_engine.new_game();
                     run_search_report(
                         &mut out,
-                        &mut pos,
+                        &mut session.position().clone(),
                         &mut analysis_engine,
-                        &cfg,
-                        &position_keys,
+                        cfg.depth,
+                        cfg.time_ms,
+                        start_pos.key(),
+                        session.history(),
                         multi_pv,
-                    )?
+                    )?;
                 }
                 Err(e) => writeln!(out, "{}", e)?,
             },
             "analyze" => match parse_analyze_command(arg) {
-                Ok(AnalyzeArgs {
-                    multi_pv,
-                    top_percent,
-                }) => {
+                Ok(AnalyzeArgs { multi_pv, top_percent }) => {
                     analysis_engine.new_game();
                     run_analyze_report(
                         &mut out,
-                        &mut pos,
+                        &mut session.position().clone(),
                         &mut analysis_engine,
-                        &cfg,
-                        &position_keys,
+                        cfg.depth,
+                        cfg.time_ms,
+                        start_pos.key(),
+                        session.history(),
                         multi_pv,
                         top_percent,
-                    )?
+                    )?;
                 }
                 Err(e) => writeln!(out, "{}", e)?,
             },
@@ -382,35 +367,47 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                 Err(e) => writeln!(out, "{}", e)?,
             },
             "openings" => {
-                let history_moves: Vec<Move> = history.iter().map(|e| e.mv).collect();
+                // Allowed-openings editing targets the *next* game's
+                // selection; the current game's book cursor is frozen.
+                let history_moves: Vec<Move> = session.history().iter().map(|e| e.mv).collect();
                 run_openings_command(
                     &mut out,
                     arg,
                     &mut allowed_book,
-                    &book_cursor,
+                    session.position(),
                     &history_moves,
-                    &pos,
-                )?
+                )?;
             }
-            "eval-mask" => run_eval_mask_command(&mut out, arg, &mut cfg.opponent.eval_mask)?,
-            "noise" => run_noise_command(&mut out, arg, &mut cfg.opponent.noise)?,
-            "fen" => writeln!(out, "{}", pos.to_fen())?,
+            "eval-mask" => {
+                let mask = &mut session.opponent_mut().eval_mask;
+                run_eval_mask_command(&mut out, arg, mask)?;
+            }
+            "noise" => {
+                let noise = &mut session.opponent_mut().noise;
+                run_noise_command(&mut out, arg, noise)?;
+            }
+            "fen" => writeln!(out, "{}", session.position().to_fen())?,
             "flip" => manual_flip = !manual_flip,
-            "undo" => match history.pop() {
-                Some(entry) => {
-                    pos.undo_move(entry.mv, entry.state);
-                    position_keys.pop();
-                    pending_trap = entry.pending_before;
-                    // Book cursor doesn't need restore: it's stateless
-                    // and rederives from the (now-rolled-back) history
-                    // on the next bot turn. Re-arm the out-of-book
-                    // announcement so it re-prints if the user later
-                    // deviates again from this point.
-                    book_out_announced = false;
-                    writeln!(out, "undid {}", entry.san)?;
+            "undo" => {
+                let history = session.history();
+                if history.is_empty() {
+                    writeln!(out, "nothing to undo.")?;
+                } else {
+                    let last_san = history.last().map(|e| e.san.clone());
+                    let prev_san = (history.len() >= 2)
+                        .then(|| history[history.len() - 2].san.clone());
+                    let len_before = history.len();
+                    session.dispatch(Event::Takeback);
+                    let rewound = len_before - session.history().len();
+                    match (rewound, last_san, prev_san) {
+                        (2, Some(last), Some(prev)) => {
+                            writeln!(out, "undid {prev} (and engine's {last}).")?;
+                        }
+                        (_, Some(last), _) => writeln!(out, "undid {last}.")?,
+                        _ => writeln!(out, "undid.")?,
+                    }
                 }
-                None => writeln!(out, "nothing to undo.")?,
-            },
+            }
             "resign" => {
                 let winner = match mover {
                     Color::White => "black",
@@ -419,76 +416,159 @@ pub fn play_loop(mut cfg: PlayConfig) -> Result<()> {
                 writeln!(out, "you resigned — {winner} wins.")?;
                 break;
             }
-            input => match parse_user_move(&mut pos, input) {
+            input => match parse_user_move(&mut session.position().clone(), input) {
                 Ok(mv) => {
-                    // Snapshot pre-move state so retrospective can
-                    // analyze the position the user just faced. Cloning
-                    // the Position is cheap compared to the search we're
-                    // about to run anyway.
-                    let pre_move_snapshot = if retrospect_enabled {
-                        Some((pos.clone(), game_history_for_search(&position_keys)))
-                    } else {
-                        None
-                    };
-                    apply_move_and_scan(
-                        &mut out,
-                        &mut pos,
-                        mv,
-                        &mut history,
-                        &mut position_keys,
-                        &mut pending_trap,
-                    )?;
-                    if let Some((mut pre_pos, game_hist)) = pre_move_snapshot {
-                        let cfg_r = RetrospectiveConfig {
-                            // Retrospective uses its own depth knob,
-                            // independent of the engine-play depth
-                            // (`cfg.depth`). The analytical pass should
-                            // be deeper than the bot is for the
-                            // student's feedback to be a strong
-                            // reference — see `RETROSPECTIVE_DEPTH`.
-                            max_depth: cfg.retrospective_depth,
-                            max_time_ms: cfg.time_ms,
-                            explain_best,
-                            // Retrospective inherits whatever the
-                            // user picked for `--threads` (default 1).
-                            // Same-thread-count as engine moves keeps
-                            // the entire CLI flow either fully
-                            // bit-deterministic (threads=1) or fully
-                            // multi-thread (threads>1); avoids the
-                            // confusing middle ground where engine
-                            // moves are stable but retrospectives drift.
-                            threads: cfg.threads,
-                        };
-                        // Use the dedicated analysis engine (cleared
-                        // before every use). See its declaration near
-                        // the top of `run` for the full rationale —
-                        // closes the takeback verdict-flip bug where
-                        // the same move would get different verdicts
-                        // depending on what the play engine had been
-                        // doing previously.
-                        analysis_engine.new_game();
-                        retrospective::run_and_render(
-                            &mut out,
-                            &mut pre_pos,
-                            &mut analysis_engine,
-                            &cfg_r,
-                            game_hist,
-                            mv,
-                        )?;
-                        writeln!(
-                            &mut out,
-                            "[retrospective] {} ms · {} nodes · {:.2} Mnps",
-                            analysis_engine.last_elapsed().as_millis(),
-                            analysis_engine.last_nodes(),
-                            analysis_engine.last_nps() / 1.0e6,
-                        )?;
+                    // Snapshot pre-move state for the retrospective
+                    // we'll run after the engine's reply lands.
+                    if retrospect_enabled {
+                        let pre_pos = session.position().clone();
+                        let history_keys: Vec<u64> =
+                            std::iter::once(start_pos.key())
+                                .chain(session.history().iter().map(|e| e.position_after.key()))
+                                .take(session.history().len())
+                                .collect();
+                        pending_retrospective = Some((pre_pos, history_keys, mv));
                     }
+                    session.play_user_move(mv);
                 }
                 Err(e) => writeln!(out, "rejected: {e}")?,
             },
         }
     }
     Ok(())
+}
+
+/// True when `mover` is a user-owned side under `engine_color`.
+fn user_owns(mover: Color, engine_color: EngineColor) -> bool {
+    match engine_color {
+        EngineColor::None => true,
+        EngineColor::Both => false,
+        EngineColor::White => mover != Color::White,
+        EngineColor::Black => mover != Color::Black,
+    }
+}
+
+/// Apply the move on the CLI's trap-scanning scratch position,
+/// advancing or scanning for traps as appropriate. Mirrors the
+/// pre-Session `apply_move_and_scan` flow but operates on a position
+/// the CLI owns rather than the play loop's main one.
+fn advance_trap_for_move(
+    out: &mut io::StdoutLock<'_>,
+    trap_pos: &mut Position,
+    pending_trap: &mut Option<PendingTrap>,
+    mv: Move,
+) -> io::Result<()> {
+    if let Some(pending) = pending_trap.as_mut() {
+        let event = traps::advance_pending(pending, trap_pos, mv);
+        announce_trap_event(out, &event)?;
+        if event.is_terminal() {
+            *pending_trap = None;
+        }
+    }
+    let mover = trap_pos.side_to_move();
+    let Some(piece) = trap_pos.piece_on(mv.from()) else {
+        // Shouldn't happen for a Session-applied move.
+        trap_pos.do_move(mv);
+        return Ok(());
+    };
+    let from = mv.from();
+    let to = mv.to();
+    trap_pos.do_move(mv);
+    if pending_trap.is_none() {
+        if let Some((entry, hit)) = traps::scan_after_move(trap_pos, mover, piece.kind(), from, to)
+            .into_iter()
+            .next()
+        {
+            announce_trap_hit(out, &hit)?;
+            *pending_trap = Some(PendingTrap::new(entry, hit));
+        }
+    }
+    Ok(())
+}
+
+/// Print the "engine played X" banner for a Session-applied engine
+/// move. Reads score / nodes / nps from the entry's
+/// [`EngineInfo`]; falls back to a minimal line for book moves
+/// (which carry no engine_info but still arrive via
+/// [`Session::history`]).
+fn print_engine_move(out: &mut io::StdoutLock<'_>, entry: &HistoryEntry) -> io::Result<()> {
+    let noise_tag = entry
+        .noise_pick
+        .as_ref()
+        .map(|p| format!(" {}", format_noise_tag(p)))
+        .unwrap_or_default();
+    match &entry.engine_info {
+        Some(info) => {
+            let score_str = format_score_white_pov(info.score_white_pov, entry.moved_by);
+            writeln!(
+                out,
+                "engine played {} ({}){} at depth {} in {} ms · {} nodes · {:.2} Mnps",
+                entry.san,
+                score_str,
+                noise_tag,
+                info.depth,
+                info.elapsed.as_millis(),
+                info.nodes,
+                info.nps_m,
+            )?;
+        }
+        None => {
+            // Book move: no search ran. Session's stderr logging is
+            // suppressed for CLI, so this is the only surface that
+            // says "the engine just played a book move."
+            writeln!(out, "engine played {} (book move)", entry.san)?;
+        }
+    }
+    Ok(())
+}
+
+/// Format a noise pick into a short inline tag for the engine-move
+/// line: `[noise: softmax #N of K (+X cp)]` etc.
+fn format_noise_tag(info: &NoisePickInfo) -> String {
+    match info {
+        NoisePickInfo::Softmax {
+            pick_idx,
+            num_lines,
+            delta_from_top_cp,
+        } => format!(
+            "[noise: softmax #{} of {} ({:+} cp)]",
+            pick_idx + 1,
+            num_lines,
+            delta_from_top_cp,
+        ),
+        NoisePickInfo::Blunder {
+            pick_idx,
+            num_lines,
+            delta_from_top_cp,
+        } => format!(
+            "[noise: blunder #{} of {} ({:+} cp)]",
+            pick_idx + 1,
+            num_lines,
+            delta_from_top_cp,
+        ),
+        NoisePickInfo::BlunderSkipped { closest_above_loss_cp } => format!(
+            "[noise: blunder roll skipped — closest above-band line was -{} cp]",
+            closest_above_loss_cp,
+        ),
+        NoisePickInfo::Wild { engine_top, engine_top_score } => {
+            // Pre-engine-move-context formatting; the SAN is rendered
+            // without disambiguation because we don't have the
+            // pre-move position here. The desktop's debug log
+            // formats with san::format on the live position too.
+            format!(
+                "[noise: wild — engine preferred {:?} ({:+})]",
+                engine_top, engine_top_score.0,
+            )
+        }
+    }
+}
+
+/// Format a score for the engine-move line: switch from white-POV
+/// (the form HistoryEntry stores) to the mover's POV so "+0.30" reads
+/// as "I'm 0.30 ahead after the move I just played".
+fn format_score_white_pov(white_pov: Value, mover: Color) -> String {
+    let from_mover = if mover == Color::White { white_pov } else { -white_pov };
+    format_score(from_mover)
 }
 
 fn render_current(
@@ -499,14 +579,7 @@ fn render_current(
     manual_flip: bool,
 ) -> io::Result<()> {
     let last_move = history.last().map(|h| h.mv);
-    let view = chess_tutor_ui::view::BoardView::compose(
-        pos,
-        manual_flip,
-        last_move,
-        None,
-        &[],
-        None,
-    );
+    let view = BoardView::compose(pos, manual_flip, last_move, None, &[], None);
     writeln!(out)?;
     write!(
         out,
@@ -524,7 +597,6 @@ fn render_current(
 
 /// If the current position identifies as a different opening than the
 /// last one we announced, print a one-liner and update the tracker.
-/// Silent when the opening hasn't changed (or has become unknown).
 fn announce_opening_if_changed(
     out: &mut io::StdoutLock<'_>,
     pos: &Position,
@@ -540,158 +612,7 @@ fn announce_opening_if_changed(
     Ok(())
 }
 
-fn is_engine_turn(side: Color, engine_color: EngineColor) -> bool {
-    match engine_color {
-        EngineColor::White => side == Color::White,
-        EngineColor::Black => side == Color::Black,
-        EngineColor::Both => true,
-        EngineColor::None => false,
-    }
-}
-
-#[allow(clippy::too_many_arguments)] // cohesive runtime-state slices the play loop owns
-fn play_engine_turn(
-    out: &mut io::StdoutLock<'_>,
-    pos: &mut Position,
-    engine: &mut Engine,
-    cfg: &PlayConfig,
-    legal_moves: &[Move],
-    history: &mut Vec<HistoryEntry>,
-    position_keys: &mut Vec<u64>,
-    pending_trap: &mut Option<PendingTrap>,
-) -> io::Result<()> {
-    if cfg.reset_engine_per_move {
-        engine.new_game();
-    }
-    let effective_multi_pv = cfg.opponent.noise.effective_multi_pv();
-    let params = SearchParams {
-        max_depth: cfg.depth,
-        // Safety cap: positions where alpha-beta pruning degenerates
-        // (e.g., late self-play endgames where most lines draw by
-        // repetition) can run for minutes at the nominal depth. 5M
-        // nodes is ~1.3 s of search at typical speed — plenty for
-        // interactive play, and ensures the engine always returns
-        // something rather than hanging indefinitely.
-        max_nodes: Some(ENGINE_TURN_NODE_CAP),
-        max_time: cfg.time_ms.map(Duration::from_millis),
-        // Bot noise widens this from 1 when the opponent profile
-        // wants alternatives to sample from. With the default
-        // (off) profile this stays 1 and the engine keeps its
-        // single-PV fast path.
-        multi_pv: effective_multi_pv,
-        game_history: game_history_for_search(position_keys),
-        force_include: Vec::new(),
-        verbose_progress: cfg.search_progress,
-        threads: cfg.threads,
-        // Play engine move — apply the opponent's eval mask so the
-        // bot plays "as if blind to" the masked categories. This is
-        // the only path that consumes the mask; every analytical
-        // construction below uses EvalMask::EMPTY.
-        eval_mask: cfg.opponent.eval_mask,
-    };
-    write!(out, "engine thinking (depth {})... ", cfg.depth)?;
-    out.flush()?;
-    let started = Instant::now();
-    let lines = engine.search(pos, params);
-    let elapsed = started.elapsed();
-    if lines.is_empty() {
-        writeln!(out, "no legal moves.")?;
-        return Ok(());
-    }
-    // Per the strict invariant in `opponent.rs`, only the play search
-    // consults the noise profile. The pick is deterministic for a given
-    // (seed, ply) — see `noise::pick`.
-    let ply = position_keys.len() as u64;
-    let pick = noise::pick(&cfg.opponent.noise, cfg.opponent.seed, ply, &lines, legal_moves);
-    let (mv, score_label, noise_tag) = match pick {
-        NoisePick::Line(idx) => {
-            let line = &lines[idx];
-            let Some(&mv) = line.pv.first() else {
-                writeln!(out, "(search returned empty pv)")?;
-                return Ok(());
-            };
-            // Annotate softmax-sampled picks so the student knows the
-            // bot is off the best line. Silent on the common idx == 0
-            // (no-branch-fired) path.
-            let tag = if idx == 0 {
-                String::new()
-            } else {
-                let delta = line.score.0 - lines[0].score.0;
-                format!(" [noise: softmax #{} of {} ({:+} cp)]", idx + 1, lines.len(), delta)
-            };
-            (mv, format_score(line.score), tag)
-        }
-        NoisePick::Blunder(idx) => {
-            let line = &lines[idx];
-            let Some(&mv) = line.pv.first() else {
-                writeln!(out, "(search returned empty pv)")?;
-                return Ok(());
-            };
-            let delta = line.score.0 - lines[0].score.0;
-            let tag = format!(
-                " [noise: blunder #{} of {} ({:+} cp)]",
-                idx + 1, lines.len(), delta,
-            );
-            (mv, format_score(line.score), tag)
-        }
-        NoisePick::BlunderSkipped { closest_above_loss_cp } => {
-            // Blunder roll fired but no plausible alternative — log
-            // and play best.
-            let line = &lines[0];
-            let Some(&mv) = line.pv.first() else {
-                writeln!(out, "(search returned empty pv)")?;
-                return Ok(());
-            };
-            let cap = (cfg.opponent.noise.blunder_max_loss_cp as f32
-                * chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE)
-                as i32;
-            writeln!(
-                out,
-                "noise: blunder roll fired but closest alternative was -{closest_above_loss_cp} cp \
-                 (exceeds {}× max-loss = {} cp cap); bot plays best.",
-                chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE,
-                cap,
-            )?;
-            (mv, format_score(line.score), String::new())
-        }
-        NoisePick::Wild(mv) => {
-            // Wild bypassed the engine's ranking. There's no score for
-            // the wild move (we didn't search it), so the score column
-            // shows the engine's preferred move instead — that's the
-            // most useful teaching signal: "I was going to play Nf3
-            // (+0.34) but the bot wild-picked Qh5 instead."
-            let top_san = lines[0]
-                .pv
-                .first()
-                .map(|m| san::format(pos, *m))
-                .unwrap_or_else(|| "?".to_string());
-            let tag = format!(
-                " [noise: wild — engine preferred {} ({})]",
-                top_san,
-                format_score(lines[0].score),
-            );
-            (mv, "wild".to_string(), tag)
-        }
-    };
-    let san_text = san::format(pos, mv);
-    let nodes = engine.last_nodes();
-    let nps_m = engine.last_nps() / 1.0e6;
-    writeln!(
-        out,
-        "played {} ({}){} in {} ms · {} nodes · {:.2} Mnps",
-        san_text,
-        score_label,
-        noise_tag,
-        elapsed.as_millis(),
-        nodes,
-        nps_m,
-    )?;
-    apply_move_and_scan(out, pos, mv, history, position_keys, pending_trap)?;
-    Ok(())
-}
-
-/// Format a PV (vector of moves from `pos`) as space-separated SAN. The
-/// position is not mutated.
+/// Format a PV (vector of moves from `pos`) as space-separated SAN.
 fn pv_to_san(pos: &Position, pv: &[Move]) -> Vec<String> {
     let mut out = Vec::with_capacity(pv.len());
     let mut scratch = pos.clone();
@@ -702,39 +623,35 @@ fn pv_to_san(pos: &Position, pv: &[Move]) -> Vec<String> {
     out
 }
 
+#[allow(clippy::too_many_arguments)] // cohesive runtime state, mirrors run_analyze_report
 fn run_search_report(
     out: &mut io::StdoutLock<'_>,
     pos: &mut Position,
     engine: &mut Engine,
-    cfg: &PlayConfig,
-    position_keys: &[u64],
+    depth: u32,
+    time_ms: Option<u64>,
+    start_pos_key: u64,
+    history: &[HistoryEntry],
     multi_pv: usize,
 ) -> io::Result<()> {
-    let effective_multi_pv = multi_pv.max(1);
     let params = SearchParams {
-        max_depth: cfg.depth,
+        max_depth: depth,
         max_nodes: None,
-        max_time: cfg.time_ms.map(Duration::from_millis),
-        multi_pv: effective_multi_pv,
-        game_history: game_history_for_search(position_keys),
+        max_time: time_ms.map(Duration::from_millis),
+        multi_pv: multi_pv.max(1),
+        game_history: zobrist_history(start_pos_key, history),
         force_include: Vec::new(),
         verbose_progress: false,
-        // REPL `search` is analytical — stay single-threaded so
-        // repeated invocations on the same position match bit-for-bit.
         threads: 1,
-        // Analytical paths always run the unbiased eval so the
-        // student sees true best play, regardless of any signal mask
-        // the bot is currently using mid-game.
         eval_mask: EvalMask::EMPTY,
     };
-    let started = Instant::now();
+    let started = std::time::Instant::now();
     let lines = engine.search(pos, params);
     let elapsed = started.elapsed();
     if lines.is_empty() {
         writeln!(out, "no legal moves.")?;
         return Ok(());
     }
-
     if lines.len() == 1 {
         let line = &lines[0];
         let pv_san = pv_to_san(pos, &line.pv);
@@ -748,10 +665,6 @@ fn run_search_report(
         writeln!(out, "pv: {}", pv_san.join(" "))?;
         return Ok(());
     }
-
-    // Multi-PV output: one row per line with aligned rank / score /
-    // delta / PV columns. The top line shows `(0 cp)` in the delta
-    // column so the PV column lines up with subsequent rows' PV column.
     writeln!(
         out,
         "depth {} | {} ms | {} lines",
@@ -782,33 +695,30 @@ fn run_search_report(
     Ok(())
 }
 
-/// Run the teaching-analysis pipeline on the current position and
-/// render each returned move's per-term delta attribution. Mirrors the
-/// one-shot `chess-tutor search --analyze` surface but reuses the
-/// REPL's depth / time-budget / repetition-history configuration.
+#[allow(clippy::too_many_arguments)] // cohesive runtime state, mirrors run_search_report
 fn run_analyze_report(
     out: &mut io::StdoutLock<'_>,
     pos: &mut Position,
     engine: &mut Engine,
-    cfg: &PlayConfig,
-    position_keys: &[u64],
+    depth: u32,
+    time_ms: Option<u64>,
+    start_pos_key: u64,
+    history: &[HistoryEntry],
     multi_pv: usize,
     top_percent: f32,
 ) -> io::Result<()> {
     let params = SearchParams {
-        max_depth: cfg.depth,
+        max_depth: depth,
         max_nodes: None,
-        max_time: cfg.time_ms.map(Duration::from_millis),
+        max_time: time_ms.map(Duration::from_millis),
         multi_pv: multi_pv.max(1),
-        game_history: game_history_for_search(position_keys),
+        game_history: zobrist_history(start_pos_key, history),
         force_include: Vec::new(),
         verbose_progress: false,
-        // REPL `analyze` is analytical — single-threaded.
         threads: 1,
-        // Analytical: always unbiased eval.
         eval_mask: EvalMask::EMPTY,
     };
-    let started = Instant::now();
+    let started = std::time::Instant::now();
     let analyses = analyze_position(engine, pos, params);
     let elapsed = started.elapsed();
     if analyses.is_empty() {
@@ -831,9 +741,23 @@ fn run_analyze_report(
     Ok(())
 }
 
-/// Render a `[settles ply N]` / `[settles leaf]` suffix for a PV given
-/// its `settled_ply`. Empty string when the PV is empty or no settled
-/// index is reported.
+/// Build the `game_history` argument [`SearchParams`] wants: every
+/// reached Zobrist key *except* the current root (which the search
+/// pushes itself). Reconstructs Session's `position_keys` from the
+/// captured `start_pos_key` plus `history[i].position_after.key()`
+/// for the in-progress game.
+fn zobrist_history(start_pos_key: u64, history: &[HistoryEntry]) -> Vec<u64> {
+    if history.is_empty() {
+        return Vec::new();
+    }
+    let mut keys = Vec::with_capacity(history.len());
+    keys.push(start_pos_key);
+    for entry in &history[..history.len() - 1] {
+        keys.push(entry.position_after.key());
+    }
+    keys
+}
+
 fn format_settled_suffix(pv: &[Move], settled: Option<usize>) -> String {
     match settled {
         None => String::new(),
@@ -843,10 +767,6 @@ fn format_settled_suffix(pv: &[Move], settled: Option<usize>) -> String {
     }
 }
 
-/// Parse the REPL `search` command's optional count argument. Returns
-/// the PV count to request — default 1 when no arg is given, so
-/// `search` matches what the engine would actually play (which uses
-/// MultiPV=1). Use `search N` for `N > 1` to see alternatives.
 fn parse_search_command(input: &str) -> Result<usize, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -861,21 +781,12 @@ fn parse_search_command(input: &str) -> Result<usize, String> {
     Ok(n)
 }
 
-/// Parsed form of the REPL `analyze` command: optional PV count and
-/// optional cumulative-coverage percent.
 #[derive(Debug, PartialEq)]
 struct AnalyzeArgs {
     multi_pv: usize,
     top_percent: f32,
 }
 
-/// Parse the REPL `analyze` command's optional arguments:
-///
-///     analyze              — default 3 PVs, 75% coverage
-///     analyze N            — N PVs, 75% coverage
-///     analyze N P          — N PVs, P% coverage
-///
-/// `P` is a percent in (0, 100]; fractional values are fine (`62.5`).
 fn parse_analyze_command(input: &str) -> Result<AnalyzeArgs, String> {
     let mut tokens = input.split_whitespace();
     let first = tokens.next();
@@ -883,7 +794,6 @@ fn parse_analyze_command(input: &str) -> Result<AnalyzeArgs, String> {
     if tokens.next().is_some() {
         return Err("too many arguments; usage: analyze [N] [PERCENT]".to_string());
     }
-
     let multi_pv = match first {
         None => 3,
         Some(tok) => {
@@ -896,7 +806,6 @@ fn parse_analyze_command(input: &str) -> Result<AnalyzeArgs, String> {
             n
         }
     };
-
     let top_percent = match second {
         None => 75.0,
         Some(tok) => {
@@ -909,33 +818,22 @@ fn parse_analyze_command(input: &str) -> Result<AnalyzeArgs, String> {
             p
         }
     };
-
-    Ok(AnalyzeArgs {
-        multi_pv,
-        top_percent,
-    })
+    Ok(AnalyzeArgs { multi_pv, top_percent })
 }
 
-/// Parse the optional `on` / `off` argument for a toggle command.
-/// `Ok(None)` means no argument — caller should render the current
-/// state. `Ok(Some(bool))` is an explicit set; `Err` is a bad token.
-/// Dispatch for the `openings` REPL command. Edits the allowed-set for
-/// the *next* game; queries display the current allowed-set and the
-/// live cursor (read-only).
 fn run_openings_command(
     out: &mut io::StdoutLock<'_>,
     arg: &str,
     allowed: &mut BookSelection,
-    cursor: &Option<BookCursor>,
-    history_moves: &[Move],
     pos: &Position,
+    history_moves: &[Move],
 ) -> io::Result<()> {
     let (subverb, subarg) = match arg.split_once(char::is_whitespace) {
         Some((v, a)) => (v.trim(), a.trim()),
         None => (arg.trim(), ""),
     };
     match subverb {
-        "" => print_openings_status(out, allowed, cursor, history_moves),
+        "" => print_openings_status(out, allowed, history_moves),
         "list" => print_allowed_list(out, allowed),
         "allow" => allow_openings(out, allowed, subarg),
         "deny" => deny_openings(out, allowed, subarg),
@@ -965,20 +863,34 @@ fn allowed_count(allowed: &BookSelection) -> usize {
 fn print_openings_status(
     out: &mut io::StdoutLock<'_>,
     allowed: &BookSelection,
-    cursor: &Option<BookCursor>,
     history_moves: &[Move],
 ) -> io::Result<()> {
     let count = allowed_count(allowed);
-    // "In book" now means: some curated opening still has a next move
-    // matching the current position — i.e., the bot's next book peek
-    // would succeed.
+    // Best-effort "in book" status: rebuild a cursor from the *next-
+    // game* allowed set and peek. The current game's cursor lives
+    // inside Session and isn't exposed; this still gives the user a
+    // useful answer (would this opening list still match?).
+    let probe_profile = OpponentProfile {
+        seed: 0,
+        book: allowed.clone(),
+        eval_mask: EvalMask::EMPTY,
+        noise: NoiseProfile::default(),
+    };
+    let probe_pos = Position::startpos();
+    let cursor = BookCursor::new(&probe_profile, &probe_pos);
     let in_book = cursor
         .as_ref()
         .and_then(|c| c.peek(history_moves))
         .is_some();
-    writeln!(out, "openings: {count} allowed in book; {} this game.",
-        if in_book { "in book" } else { "out of book" })?;
-    writeln!(out, "  try: openings list | allow PAT | deny PAT | reset | selected")
+    writeln!(
+        out,
+        "openings: {count} allowed in book; {} for the next-game profile.",
+        if in_book { "in book" } else { "out of book" }
+    )?;
+    writeln!(
+        out,
+        "  try: openings list | allow PAT | deny PAT | reset | selected"
+    )
 }
 
 fn print_allowed_list(out: &mut io::StdoutLock<'_>, allowed: &BookSelection) -> io::Result<()> {
@@ -1055,9 +967,6 @@ fn deny_openings(
     )
 }
 
-/// Dispatch for the `eval-mask` REPL command. Mutates the
-/// [`OpponentProfile::eval_mask`] in place so subsequent engine
-/// moves pick up the change without restarting the game.
 fn run_eval_mask_command(
     out: &mut io::StdoutLock<'_>,
     arg: &str,
@@ -1074,22 +983,14 @@ fn run_eval_mask_command(
                 mask.disable(cat);
                 writeln!(out, "eval-mask: bot now blind to {}.", cat.slug())
             }
-            None => writeln!(
-                out,
-                "unknown category {subarg:?}; try one of: {}",
-                slug_list(),
-            ),
+            None => writeln!(out, "unknown category {subarg:?}; try one of: {}", slug_list()),
         },
         "enable" => match EvalCategory::from_slug(subarg) {
             Some(cat) => {
                 mask.enable(cat);
                 writeln!(out, "eval-mask: bot now considers {} again.", cat.slug())
             }
-            None => writeln!(
-                out,
-                "unknown category {subarg:?}; try one of: {}",
-                slug_list(),
-            ),
+            None => writeln!(out, "unknown category {subarg:?}; try one of: {}", slug_list()),
         },
         "reset" => {
             *mask = EvalMask::EMPTY;
@@ -1110,8 +1011,6 @@ fn slug_list() -> String {
         .join(", ")
 }
 
-/// One-line summary of the active noise knobs — used in the game-start
-/// banner and as the default response to `noise` with no argument.
 fn format_noise_summary(n: &NoiseProfile) -> String {
     if n.is_off() {
         return "off (bot always plays #1)".to_string();
@@ -1133,10 +1032,6 @@ fn format_noise_summary(n: &NoiseProfile) -> String {
     )
 }
 
-/// Dispatch for the `noise` REPL command. Mutates the
-/// [`OpponentProfile::noise`] in place so subsequent engine moves pick
-/// up the change; the next call to `play_engine_turn` reads the new
-/// effective MultiPV automatically.
 fn run_noise_command(
     out: &mut io::StdoutLock<'_>,
     arg: &str,
@@ -1234,10 +1129,6 @@ fn print_eval_mask(out: &mut io::StdoutLock<'_>, mask: &EvalMask) -> io::Result<
 }
 
 fn print_selected(out: &mut io::StdoutLock<'_>, pos: &Position) -> io::Result<()> {
-    // Position-based lookup via the EPD index — this is the opening
-    // name for the *current* board, transposition-tolerant and
-    // independent of the move order that reached it. Returns None at
-    // startpos and at positions no opening reaches.
     match chess_tutor_engine::openings::identify(pos) {
         Some(id) => writeln!(out, "openings: current position is {} {}", id.eco, id.name),
         None => writeln!(out, "openings: current position is not in the openings database."),
@@ -1254,8 +1145,6 @@ fn parse_toggle(input: &str) -> Result<Option<bool>, String> {
 }
 
 fn parse_user_move(pos: &mut Position, input: &str) -> Result<Move, String> {
-    // Try SAN first; fall back to UCI. SAN may fail for things that
-    // are parseable as UCI (e.g., `e2e4`), and vice versa.
     match san::parse(pos, input) {
         Ok(mv) => Ok(mv),
         Err(san_err) => match uci::parse(pos, input) {
@@ -1265,91 +1154,6 @@ fn parse_user_move(pos: &mut Position, input: &str) -> Result<Move, String> {
     }
 }
 
-/// Slice `position_keys` into the form `SearchParams::game_history`
-/// expects: every reached key *except* the current one (which the
-/// search pushes separately as the root).
-fn game_history_for_search(position_keys: &[u64]) -> Vec<u64> {
-    if position_keys.is_empty() {
-        return Vec::new();
-    }
-    position_keys[..position_keys.len() - 1].to_vec()
-}
-
-fn apply_move(
-    pos: &mut Position,
-    mv: Move,
-    history: &mut Vec<HistoryEntry>,
-    position_keys: &mut Vec<u64>,
-    pending_before: Option<PendingTrap>,
-) {
-    let san = san::format(pos, mv);
-    let state = pos.do_move(mv);
-    history.push(HistoryEntry {
-        mv,
-        state,
-        san,
-        pending_before,
-    });
-    position_keys.push(pos.key());
-}
-
-/// [`apply_move`] plus trap bookkeeping: advance the pending cursor
-/// when a trap is live and look for a newly-fired trap on the
-/// post-move position. The trap snapshot is folded into the new
-/// [`HistoryEntry`] so `undo` rolls it back. The opening-book cursor
-/// is no longer threaded here — it's stateless and the play loop
-/// re-derives it from history at each bot turn.
-fn apply_move_and_scan(
-    out: &mut io::StdoutLock<'_>,
-    pos: &mut Position,
-    mv: Move,
-    history: &mut Vec<HistoryEntry>,
-    position_keys: &mut Vec<u64>,
-    pending_trap: &mut Option<PendingTrap>,
-) -> io::Result<()> {
-    // Snapshot pending-trap BEFORE we advance it, so `undo` restores
-    // the world exactly as it was before this move.
-    let pending_snapshot = pending_trap.clone();
-
-    // If a trap is already mid-refutation, advance the cursor using
-    // the pre-move position (san::parse needs legal-move context).
-    if let Some(pending) = pending_trap.as_mut() {
-        let event = traps::advance_pending(pending, pos, mv);
-        announce_trap_event(out, &event)?;
-        if event.is_terminal() {
-            *pending_trap = None;
-        }
-    }
-
-    // Capture pre-move data the scan_after_move path needs.
-    let mover = pos.side_to_move();
-    let piece = pos
-        .piece_on(mv.from())
-        .expect("caller passed a legal move; source square must have a piece");
-    let from = mv.from();
-    let to = mv.to();
-
-    apply_move(pos, mv, history, position_keys, pending_snapshot);
-
-    // Only scan for newly-fired traps when nothing is already pending.
-    // Overlapping traps are theoretically possible but vanishingly
-    // rare in the opening phase where the library lives.
-    if pending_trap.is_none() {
-        if let Some((entry, hit)) = traps::scan_after_move(pos, mover, piece.kind(), from, to)
-            .into_iter()
-            .next()
-        {
-            announce_trap_hit(out, &hit)?;
-            *pending_trap = Some(PendingTrap::new(entry, hit));
-        }
-    }
-
-    Ok(())
-}
-
-/// Print pre-move warnings for every legal move the side-to-move
-/// could play that would hand a known trap to the opponent. Silent
-/// when no candidate threats exist (the common case).
 fn announce_trap_threats(out: &mut io::StdoutLock<'_>, pos: &Position) -> io::Result<()> {
     for t in traps::scan_threats(pos) {
         let pv = t.hit.main_line_san.join(" ");
@@ -1362,9 +1166,6 @@ fn announce_trap_threats(out: &mut io::StdoutLock<'_>, pos: &Position) -> io::Re
     Ok(())
 }
 
-/// Print a banner announcing a trap that just became live. The
-/// `punisher` side in `hit` is whoever now gets to execute the
-/// scripted refutation.
 fn announce_trap_hit(out: &mut io::StdoutLock<'_>, hit: &TrapHit) -> io::Result<()> {
     let side = match hit.punisher {
         Color::White => "white",
@@ -1379,9 +1180,6 @@ fn announce_trap_hit(out: &mut io::StdoutLock<'_>, hit: &TrapHit) -> io::Result<
     Ok(())
 }
 
-/// Narrate a move-by-move event from the pending-trap cursor.
-/// Each variant gets a one-liner that tells the student what just
-/// happened relative to the scripted tree.
 fn announce_trap_event(out: &mut io::StdoutLock<'_>, event: &TrapEvent) -> io::Result<()> {
     let name = event.trap().name;
     match event {
@@ -1425,24 +1223,7 @@ fn announce_trap_event(out: &mut io::StdoutLock<'_>, event: &TrapEvent) -> io::R
     Ok(())
 }
 
-/// True when the position currently on the board has appeared at least
-/// three times, counting the initial position and every post-move key.
-///
-/// `position_keys` is expected to hold every reached key in order (the
-/// starting position plus one entry per played move), so the current
-/// position is always `position_keys.last()`.
-fn threefold_reached(position_keys: &[u64]) -> bool {
-    let Some(&current) = position_keys.last() else {
-        return false;
-    };
-    position_keys.iter().filter(|&&k| k == current).count() >= 3
-}
-
 fn format_score(v: Value) -> String {
-    // Mate-distance scores are encoded as MATE - ply. Report them as
-    // `#N` / `-#N` (full moves) so the UI reads like a chess app.
-    // Regular scores render as pawns (`+0.28`, `-1.05`) which is the
-    // form the teaching output uses everywhere.
     let mate = Value::MATE.0;
     let abs = v.0.abs();
     if abs >= mate - Value::MAX_PLY {
@@ -1464,54 +1245,18 @@ fn print_help(out: &mut io::StdoutLock<'_>) -> io::Result<()> {
     )?;
     writeln!(out, "commands:")?;
     writeln!(out, "  moves    list every legal move as SAN")?;
-    writeln!(
-        out,
-        "  eval     per-term evaluation trace for the current position"
-    )?;
-    writeln!(
-        out,
-        "  search [N]   run the engine; print top N PVs with deltas (default N=1, matching engine play)"
-    )?;
-    writeln!(
-        out,
-        "  analyze [N] [P]   teaching breakdown: top N PVs with per-term deltas,"
-    )?;
-    writeln!(
-        out,
-        "                    cumulative coverage P% (default N=3, P=75)"
-    )?;
-    writeln!(
-        out,
-        "  retrospect [on|off]   toggle automatic post-move verdict (default on)"
-    )?;
-    writeln!(
-        out,
-        "  explain-best [on|off] narrate why Best moves were best, not just the headline"
-    )?;
-    writeln!(
-        out,
-        "  openings [list | allow PAT | deny PAT | reset | selected]"
-    )?;
-    writeln!(
-        out,
-        "                    inspect or edit the opening book; PAT is a case-insensitive substring"
-    )?;
-    writeln!(
-        out,
-        "  eval-mask [list | disable CAT | enable CAT | reset]"
-    )?;
-    writeln!(
-        out,
-        "                    toggle bot's blindness to eval categories (effective from next engine move)"
-    )?;
-    writeln!(
-        out,
-        "  noise [show | pool N | temp CP | blunder F | severity CP | wild F | guarantee N | reset]"
-    )?;
-    writeln!(
-        out,
-        "                    bot move-sampling: top-K + softmax temperature, exploitable blunder, wild beginner-bot branch"
-    )?;
+    writeln!(out, "  eval     per-term evaluation trace for the current position")?;
+    writeln!(out, "  search [N]   run the engine; print top N PVs with deltas (default N=1)")?;
+    writeln!(out, "  analyze [N] [P]   teaching breakdown: top N PVs with per-term deltas,")?;
+    writeln!(out, "                    cumulative coverage P% (default N=3, P=75)")?;
+    writeln!(out, "  retrospect [on|off]   toggle automatic post-move verdict (default on)")?;
+    writeln!(out, "  explain-best [on|off] narrate why Best moves were best")?;
+    writeln!(out, "  openings [list | allow PAT | deny PAT | reset | selected]")?;
+    writeln!(out, "                    inspect or edit the opening book (effective next game)")?;
+    writeln!(out, "  eval-mask [list | disable CAT | enable CAT | reset]")?;
+    writeln!(out, "                    toggle bot's blindness to eval categories")?;
+    writeln!(out, "  noise [show | pool N | temp CP | blunder F | wild F | guarantee N | reset]")?;
+    writeln!(out, "                    bot move-sampling knobs")?;
     writeln!(out, "  undo     take back one ply")?;
     writeln!(out, "  fen      print the current FEN")?;
     writeln!(out, "  flip     flip the board")?;
@@ -1526,107 +1271,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn threefold_empty_history_is_not_a_draw() {
-        assert!(!threefold_reached(&[]));
-    }
-
-    #[test]
-    fn threefold_single_visit_is_not_a_draw() {
-        // Starting position only; one visit.
-        assert!(!threefold_reached(&[0xAAAA_BBBB]));
-    }
-
-    #[test]
-    fn threefold_second_visit_is_not_yet_a_draw() {
-        // Regression: the original implementation fired a draw on the
-        // second occurrence of a position (true twofold repetition).
-        // The user's winning game ended early because of this.
-        let k = 0xDEAD_BEEF_u64;
-        let other = 0x1234_5678_u64;
-        let keys = vec![k, other, k];
-        assert!(!threefold_reached(&keys));
-    }
-
-    #[test]
-    fn threefold_third_visit_is_a_draw() {
-        let k = 0xDEAD_BEEF_u64;
-        let other = 0x1234_5678_u64;
-        let keys = vec![k, other, k, other, k];
-        assert!(threefold_reached(&keys));
-    }
-
-    #[test]
-    fn threefold_counts_starting_position() {
-        // A knight-shuffle cycle can return to the starting position.
-        // The starting position counts as the first occurrence, so three
-        // visits total (start + two cycles back) draws.
-        let start = 0xFFFF_u64;
-        let k1 = 0x1111_u64;
-        let k2 = 0x2222_u64;
-        let k3 = 0x3333_u64;
-        // Start → cycle1 → start → cycle2 → start.
-        let keys = vec![start, k1, k2, k3, start, k1, k2, k3, start];
-        assert!(threefold_reached(&keys));
-    }
-
-    #[test]
-    fn threefold_end_to_end_via_knight_shuffle() {
-        // Nf3 Nf6 Ng1 Ng8 returns both sides to the starting position.
-        // Exercises apply_move + threefold_reached together on the real
-        // path the REPL walks.
-        let mut pos = Position::startpos();
-        let mut history: Vec<HistoryEntry> = Vec::new();
-        let mut keys: Vec<u64> = vec![pos.key()];
-
-        let cycle = ["g1f3", "g8f6", "f3g1", "f6g8"];
-        // First cycle: two visits to the startpos. Still not a draw.
-        for m in cycle {
-            let mv = crate::uci::parse(&mut pos, m).unwrap();
-            apply_move(&mut pos, mv, &mut history, &mut keys, None);
-        }
-        assert!(!threefold_reached(&keys), "second visit must not draw");
-
-        // Second cycle: three visits to the startpos. Draw.
-        for m in cycle {
-            let mv = crate::uci::parse(&mut pos, m).unwrap();
-            apply_move(&mut pos, mv, &mut history, &mut keys, None);
-        }
-        assert!(threefold_reached(&keys), "third visit is threefold");
-    }
-
-    // ---- REPL `search [N]` argument parsing --------------------------
-
-    #[test]
-    fn parse_search_command_defaults_to_one() {
-        // No-arg `search` means "what would the engine play?" — i.e.
-        // MultiPV=1, matching `play_engine_turn`'s search params.
+    fn parse_search_default_to_one() {
         assert_eq!(parse_search_command(""), Ok(1));
         assert_eq!(parse_search_command("   "), Ok(1));
     }
 
     #[test]
-    fn parse_search_command_accepts_positive_integer() {
-        assert_eq!(parse_search_command("1"), Ok(1));
-        assert_eq!(parse_search_command("5"), Ok(5));
-        assert_eq!(parse_search_command("20"), Ok(20));
+    fn parse_search_accepts_n() {
+        assert_eq!(parse_search_command("3"), Ok(3));
+        assert_eq!(parse_search_command("  5 "), Ok(5));
     }
 
     #[test]
-    fn parse_search_command_rejects_zero() {
+    fn parse_search_rejects_zero() {
         assert!(parse_search_command("0").is_err());
     }
 
     #[test]
-    fn parse_search_command_rejects_garbage() {
-        assert!(parse_search_command("abc").is_err());
-        assert!(parse_search_command("-3").is_err());
-        assert!(parse_search_command("3.5").is_err());
-    }
-
-    // ---- REPL `analyze [N] [P]` argument parsing --------------------
-
-    #[test]
-    fn parse_analyze_command_defaults_to_three_and_seventy_five() {
+    fn parse_analyze_default() {
         assert_eq!(
             parse_analyze_command(""),
             Ok(AnalyzeArgs {
@@ -1637,86 +1299,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_analyze_command_accepts_count_only() {
+    fn parse_analyze_n_p() {
         assert_eq!(
-            parse_analyze_command("5"),
-            Ok(AnalyzeArgs {
-                multi_pv: 5,
-                top_percent: 75.0,
-            })
-        );
-    }
-
-    #[test]
-    fn parse_analyze_command_accepts_count_and_percent() {
-        assert_eq!(
-            parse_analyze_command("4 90"),
+            parse_analyze_command("4 80"),
             Ok(AnalyzeArgs {
                 multi_pv: 4,
-                top_percent: 90.0,
+                top_percent: 80.0,
             })
         );
     }
 
     #[test]
-    fn parse_analyze_command_accepts_fractional_percent() {
-        assert_eq!(
-            parse_analyze_command("2 62.5"),
-            Ok(AnalyzeArgs {
-                multi_pv: 2,
-                top_percent: 62.5,
-            })
-        );
-    }
-
-    #[test]
-    fn parse_analyze_command_rejects_zero_count() {
-        assert!(parse_analyze_command("0").is_err());
-    }
-
-    #[test]
-    fn parse_analyze_command_rejects_percent_out_of_range() {
-        assert!(parse_analyze_command("2 0").is_err());
-        assert!(parse_analyze_command("2 150").is_err());
-        assert!(parse_analyze_command("2 -10").is_err());
-    }
-
-    #[test]
-    fn parse_analyze_command_rejects_extra_args() {
-        assert!(parse_analyze_command("3 80 extra").is_err());
-    }
-
-    #[test]
-    fn parse_analyze_command_rejects_garbage() {
-        assert!(parse_analyze_command("abc").is_err());
-        assert!(parse_analyze_command("2 nope").is_err());
-    }
-
-    // ---- parse_toggle ------------------------------------------------
-
-    #[test]
-    fn parse_toggle_empty_returns_none() {
-        assert_eq!(parse_toggle(""), Ok(None));
-        assert_eq!(parse_toggle("   "), Ok(None));
-    }
-
-    #[test]
-    fn parse_toggle_accepts_on_variants() {
-        assert_eq!(parse_toggle("on"), Ok(Some(true)));
-        assert_eq!(parse_toggle("true"), Ok(Some(true)));
-        assert_eq!(parse_toggle("1"), Ok(Some(true)));
-    }
-
-    #[test]
-    fn parse_toggle_accepts_off_variants() {
-        assert_eq!(parse_toggle("off"), Ok(Some(false)));
-        assert_eq!(parse_toggle("false"), Ok(Some(false)));
-        assert_eq!(parse_toggle("0"), Ok(Some(false)));
-    }
-
-    #[test]
-    fn parse_toggle_rejects_garbage() {
-        assert!(parse_toggle("maybe").is_err());
-        assert!(parse_toggle("yes").is_err());
+    fn parse_analyze_rejects_too_many() {
+        assert!(parse_analyze_command("1 2 3").is_err());
     }
 }

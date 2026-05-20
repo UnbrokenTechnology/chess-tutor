@@ -286,18 +286,6 @@ enum Command {
         /// move, the last-printed FEN reproduces the position exactly.
         #[arg(long)]
         show_fens: bool,
-        /// Diagnostic: call `Engine::new_game()` before every engine
-        /// move, clearing the transposition table and butterfly
-        /// history. Isolates whether accumulated state is the cause
-        /// of pathological search times in long self-play games. Not
-        /// for normal use — gives up all TT / history learning.
-        #[arg(long)]
-        reset_engine_per_move: bool,
-        /// Diagnostic: write iterative-deepening + root-move progress
-        /// to stderr during every engine search. Useful for spotting
-        /// search loops or depth-N iterations that never return.
-        #[arg(long)]
-        search_progress: bool,
         /// Number of search threads (Lazy SMP) for **every** search:
         /// engine moves AND the auto-retrospective. Default 1 keeps
         /// every search bit-deterministic across runs and takebacks
@@ -599,8 +587,6 @@ fn main() -> Result<()> {
             light_mode,
             no_explain_best,
             show_fens,
-            reset_engine_per_move,
-            search_progress,
             threads,
             seed,
             no_book,
@@ -667,8 +653,6 @@ fn main() -> Result<()> {
                 opponent,
                 explain_best: !no_explain_best,
                 show_fens,
-                reset_engine_per_move,
-                search_progress,
                 threads: threads.max(1),
             })?;
         }

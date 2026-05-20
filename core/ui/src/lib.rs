@@ -17,3 +17,4 @@ pub mod view;
 mod worker;
 
 pub use session::{RepaintFn, Session};
+pub use worker::NoisePickInfo;

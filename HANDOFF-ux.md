@@ -76,10 +76,20 @@ Additional:
 
 Goal: collapse the GUI/CLI duplication and put `chess-tutor-desktop` on the same footing as future Apple/Android renderers — each platform shell becomes a thin unidirectional renderer of view descriptors, with all session state + game logic in shared Rust. CLI's `play.rs` (1,718 lines) and `desktop/src/main.rs` (previously 1,927 lines) duplicate game state today; the refactor pays off twice over.
 
-Steps 1–3 have landed: the in-place split, view descriptors + intent events, and the `core/ui` crate extraction. The `chess-tutor-ui` crate exports [`Session`](core/ui/src/session.rs), the [`view`](core/ui/src/view.rs) descriptors, [`event::Event`](core/ui/src/event.rs), and a `RepaintFn` callback type the renderer passes in to wake its event loop. `desktop/src/` is now a ~330-line shell (`main.rs` + `draw/*`); zero behavioural change from the pre-refactor build. Remaining steps:
+Steps 1–4 have landed:
 
-1. **Migrate CLI's `play.rs`** onto `chess_tutor_ui::Session`. Most of `play.rs` is headless and ports directly; REPL command parsing (`search`, `analyze`, `openings`, `noise`, `eval-mask`) stays CLI-side. The CLI's [`board.rs`](core/cli/src/board.rs) ANSI renderer becomes the CLI's `draw::board` equivalent, taking a `BoardView`. Larger lift than steps 1–3 because `play.rs` ties together REPL parsing, board rendering, and game logic that's already covered by `Session::dispatch`.
-2. **Mobile shells** (`apple/`, `android/`) consume `chess_tutor_ui` via `core/ffi`. Each platform is a renderer + event dispatcher, ~hundreds of lines, not thousands. The FFI crate itself is a separate prerequisite — outstanding decisions (UniFFI vs. raw C ABI, in-process vs. out-of-process, how to expose `MoveAnalysis` across the boundary) are tracked in the "FFI crate" entry above.
+- **Steps 1–3** built the platform-portable split: `desktop/src/main.rs` shrunk from 1,927 lines to ~75; `core/ui` exports [`Session`](core/ui/src/session.rs), [`view`](core/ui/src/view.rs) descriptors, [`event::Event`](core/ui/src/event.rs), and a `RepaintFn` callback. desktop's `App` is a thin newtype wrapping `Session`.
+- **Step 4** put the CLI on the same `Session`. `core/cli/src/board.rs` now consumes a `BoardView` (same descriptor the egui shell paints) and `core/cli/src/play.rs` shrunk from 1,718 lines to ~870 by delegating position / history / opponent / book to `Session`. The CLI keeps its own retrospective rendering (deeper / configurable via `--retrospective-depth` and `--no-explain-best`) and its own analytical engine for `search` / `analyze` REPL commands.
+
+Session API surface added for the CLI: `Session::start_game(pos, EngineMode, depth, OpponentProfile)`, `wait_for_worker()` (blocking variant of `poll_worker`), `set_log_to_stderr(false)` and `set_auto_retrospective(false)` opt-outs, `play_user_move(Move)`, and accessors for `position` / `history` / `opponent` / `is_engine_thinking` / `game_outcome`. `engine_plays: Option<Color>` became `engine_plays: EngineMode` to support self-play (`--engine-color both`).
+
+Two minor CLI surface changes from the migration:
+- `undo` now rewinds the user-move + engine-reply pair (matching the desktop's takeback) instead of one ply at a time.
+- The `--time-ms`, `--reset-engine-per-move`, and `--search-progress` flags were dropped — time-budget violates the determinism contract anyway, and the diagnostics had no Session equivalent.
+
+Remaining step:
+
+1. **Mobile shells** (`apple/`, `android/`) consume `chess_tutor_ui` via `core/ffi`. Each platform is a renderer + event dispatcher, ~hundreds of lines, not thousands. The FFI crate itself is a separate prerequisite — outstanding decisions (UniFFI vs. raw C ABI, in-process vs. out-of-process, how to expose `MoveAnalysis` across the boundary) are tracked in the "FFI crate" entry above.
 
 ### Locked-in design decisions
 

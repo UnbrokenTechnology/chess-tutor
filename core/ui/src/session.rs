@@ -47,10 +47,16 @@ pub(crate) const DEFAULT_DEPTH: u32 = 10;
 /// dialog only tunes engine depth.
 pub(crate) const ANALYTICAL_DEPTH: u32 = 12;
 
-pub(crate) struct EngineInfo {
-    pub(crate) score_white_pov: Value,
-    pub(crate) depth: u32,
-    pub(crate) elapsed: Duration,
+pub struct EngineInfo {
+    pub score_white_pov: Value,
+    pub depth: u32,
+    pub elapsed: Duration,
+    /// Total nodes searched for this engine move. Populated for the
+    /// CLI's per-move output; the GUI ignores it.
+    pub nodes: u64,
+    /// Mega-nodes per second. Same source as `nodes` —
+    /// `engine.last_nps() / 1e6`.
+    pub nps_m: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,9 +88,13 @@ impl NewGameForm {
     fn from_current(session: &Session) -> Self {
         Self {
             color: match session.engine_plays {
-                Some(Color::Black) => ColorChoice::White,
-                Some(Color::White) => ColorChoice::Black,
-                None => ColorChoice::Both,
+                EngineMode::Side(Color::Black) => ColorChoice::White,
+                EngineMode::Side(Color::White) => ColorChoice::Black,
+                // Both EngineMode::None (user plays both) and
+                // EngineMode::Both (engine self-play) land here. The
+                // GUI dialog has no self-play radio; Both is the
+                // closest match.
+                EngineMode::None | EngineMode::Both => ColorChoice::Both,
             },
             fen: String::new(),
             depth: session.depth,
@@ -109,17 +119,43 @@ impl NewGameForm {
     }
 }
 
-pub(crate) struct HistoryEntry {
-    pub(crate) mv: Move,
-    pub(crate) state: StateInfo,
-    pub(crate) san: String,
-    pub(crate) moved_by: Color,
-    pub(crate) position_after: Position,
+pub struct HistoryEntry {
+    pub mv: Move,
+    pub state: StateInfo,
+    pub san: String,
+    pub moved_by: Color,
+    pub position_after: Position,
     /// Filled for moves the user made. `None` while the worker is
     /// still computing; populated when the result arrives.
-    pub(crate) retrospective_text: Option<String>,
+    pub retrospective_text: Option<String>,
     /// Filled for moves the engine made. Carries score / depth / time.
-    pub(crate) engine_info: Option<EngineInfo>,
+    pub engine_info: Option<EngineInfo>,
+    /// `Some` when noise drove the bot off the engine's preferred
+    /// move. Both desktop and CLI surface this — desktop logs it to
+    /// stderr; CLI prints it inline with the played-move line.
+    pub noise_pick: Option<crate::worker::NoisePickInfo>,
+}
+
+/// Which side(s) the engine plays in the current game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineMode {
+    /// Neither side is the engine — user controls both colours.
+    None,
+    /// Engine plays the given colour; user plays the other.
+    Side(Color),
+    /// Engine plays both sides (self-play). User never moves.
+    Both,
+}
+
+impl EngineMode {
+    /// True when `side` is whose move it is and the engine should pick it.
+    pub fn is_engine_turn(self, side: Color) -> bool {
+        match self {
+            EngineMode::None => false,
+            EngineMode::Side(c) => side == c,
+            EngineMode::Both => true,
+        }
+    }
 }
 
 pub struct Session {
@@ -130,8 +166,19 @@ pub struct Session {
     pub(crate) legal_from_selected: Vec<Move>,
     pub(crate) flipped: bool,
 
-    pub(crate) engine_plays: Option<Color>,
+    pub(crate) engine_plays: EngineMode,
     pub(crate) depth: u32,
+    /// When `true`, Session writes book-pick / opening-seed / noise-
+    /// pick events to stderr. Defaults to `true` for the desktop's
+    /// "shell window is the de facto session log" model; CLI consumers
+    /// set this to `false` and surface the same data through their own
+    /// stdout output.
+    pub(crate) log_to_stderr: bool,
+    /// When `true`, every user move triggers an auto-retrospective
+    /// search via the worker. Defaults to `true` for desktop; CLI
+    /// callers that run their own retrospective set this to `false`
+    /// to avoid the redundant search.
+    pub(crate) auto_retrospective: bool,
 
     pub(crate) worker_tx: Sender<WorkerJob>,
     pub(crate) worker_rx: Receiver<WorkerResult>,
@@ -234,8 +281,10 @@ impl Session {
             selected: None,
             legal_from_selected: Vec::new(),
             flipped: false,
-            engine_plays: None,
+            engine_plays: EngineMode::None,
             depth: DEFAULT_DEPTH,
+            log_to_stderr: true,
+            auto_retrospective: true,
             worker_tx: job_tx,
             worker_rx: result_rx,
             gen: 0,
@@ -253,10 +302,58 @@ impl Session {
         }
     }
 
+    /// Start a fresh game directly, bypassing the New Game dialog.
+    /// Used by CLI / headless callers; the desktop goes through
+    /// [`Self::try_start_from_form`] via the dialog widget.
+    pub fn start_game(
+        &mut self,
+        position: Position,
+        engine_plays: EngineMode,
+        depth: u32,
+        opponent: OpponentProfile,
+    ) {
+        self.new_game_form = None;
+        self.first_launch = false;
+        self.gen = self.gen.wrapping_add(1);
+        self.engine_thinking = false;
+        self.position_keys = vec![position.key()];
+        self.position = position;
+        self.history.clear();
+        self.deselect();
+        self.viewing_index = None;
+        self.engine_plays = engine_plays;
+        self.depth = depth;
+        self.opponent = opponent;
+        self.book_cursor = BookCursor::new(&self.opponent, &self.position);
+        self.book_out_announced = false;
+        if self.log_to_stderr {
+            log_new_game_intro(&self.opponent);
+        }
+        self.close_hint();
+        let _ = self.worker_tx.send(WorkerJob::NewGame);
+        self.maybe_queue_engine_search();
+    }
+
+    /// Toggle Session's stderr logging of book picks / opening seed /
+    /// noise-pick events. Defaults to `true` (desktop's "shell window
+    /// is the de facto log" model); CLI sets `false` and surfaces the
+    /// same data through its own stdout output.
+    pub fn set_log_to_stderr(&mut self, enabled: bool) {
+        self.log_to_stderr = enabled;
+    }
+
+    /// Toggle the auto-retrospective worker job. Defaults to `true`;
+    /// CLI callers that run their own retrospective set this to
+    /// `false` so [`Self::apply_user_move`] doesn't queue a redundant
+    /// search.
+    pub fn set_auto_retrospective(&mut self, enabled: bool) {
+        self.auto_retrospective = enabled;
+    }
+
     fn start_new_game(
         &mut self,
         position: Position,
-        engine_plays: Option<Color>,
+        engine_plays: EngineMode,
         depth: u32,
         noise: NoiseProfile,
         eval_mask: EvalMask,
@@ -277,7 +374,9 @@ impl Session {
         self.opponent.eval_mask = eval_mask;
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
         self.book_out_announced = false;
-        log_new_game_intro(&self.opponent);
+        if self.log_to_stderr {
+            log_new_game_intro(&self.opponent);
+        }
         self.close_hint();
         let _ = self.worker_tx.send(WorkerJob::NewGame);
         self.maybe_queue_engine_search();
@@ -335,16 +434,16 @@ impl Session {
             }
         };
         let engine_plays = match form.color {
-            ColorChoice::White => Some(Color::Black),
-            ColorChoice::Black => Some(Color::White),
+            ColorChoice::White => EngineMode::Side(Color::Black),
+            ColorChoice::Black => EngineMode::Side(Color::White),
             ColorChoice::Random => {
                 if random_bit() == 0 {
-                    Some(Color::Black) // user is white
+                    EngineMode::Side(Color::Black) // user is white
                 } else {
-                    Some(Color::White) // user is black
+                    EngineMode::Side(Color::White) // user is black
                 }
             }
-            ColorChoice::Both => None,
+            ColorChoice::Both => EngineMode::None,
         };
         let depth = form.depth;
         let noise = form.noise.clone();
@@ -384,10 +483,7 @@ impl Session {
     }
 
     pub(crate) fn is_users_turn(&self) -> bool {
-        match self.engine_plays {
-            Some(c) => self.position.side_to_move() != c,
-            None => true,
-        }
+        !self.engine_plays.is_engine_turn(self.position.side_to_move())
     }
 
     fn select(&mut self, sq: Square) {
@@ -434,26 +530,40 @@ impl Session {
         true
     }
 
+    /// Apply a user move and queue the engine's reply if it's now the
+    /// engine's turn. The convenience entry point for CLI / headless
+    /// callers that parse a [`Move`] directly (SAN / UCI input). The
+    /// desktop's click path goes through [`Self::apply_user_move`] +
+    /// [`Self::maybe_queue_engine_search`] separately because it
+    /// re-resolves through [`Event::SelectSquare`].
+    pub fn play_user_move(&mut self, mv: Move) {
+        self.apply_user_move(mv);
+        self.maybe_queue_engine_search();
+    }
+
     /// Finalise a move chosen via the regular click path *or* the
     /// promotion picker. Snapshots pre-move state for the retrospective
-    /// job, applies the move, and clears the hint panel.
-    pub(crate) fn apply_user_move(&mut self, mv: Move) {
-        let pre_move_pos = self.position.clone();
-        let pre_move_history = game_history_for_search(&self.position_keys);
-
-        self.apply_move(mv);
-        let target_index = self.history.len() - 1;
-
-        let _ = self.worker_tx.send(WorkerJob::Retrospective {
-            pre_move_pos: Box::new(pre_move_pos),
-            user_move: mv,
-            // ANALYTICAL_DEPTH, not self.depth. The student's
-            // feedback wants depth even when the bot is weak.
-            depth: ANALYTICAL_DEPTH,
-            game_history: pre_move_history,
-            gen: self.gen,
-            target_index,
-        });
+    /// job (when [`Self::auto_retrospective`] is set), applies the
+    /// move, and clears the hint panel.
+    pub fn apply_user_move(&mut self, mv: Move) {
+        if self.auto_retrospective {
+            let pre_move_pos = self.position.clone();
+            let pre_move_history = game_history_for_search(&self.position_keys);
+            self.apply_move(mv);
+            let target_index = self.history.len() - 1;
+            let _ = self.worker_tx.send(WorkerJob::Retrospective {
+                pre_move_pos: Box::new(pre_move_pos),
+                user_move: mv,
+                // ANALYTICAL_DEPTH, not self.depth. The student's
+                // feedback wants depth even when the bot is weak.
+                depth: ANALYTICAL_DEPTH,
+                game_history: pre_move_history,
+                gen: self.gen,
+                target_index,
+            });
+        } else {
+            self.apply_move(mv);
+        }
         self.close_hint();
     }
 
@@ -470,6 +580,7 @@ impl Session {
             position_after: self.position.clone(),
             retrospective_text: None,
             engine_info: None,
+            noise_pick: None,
         });
         // No book-cursor advance: BookCursor is stateless and
         // re-derives from history at each peek. Takeback is similarly
@@ -491,8 +602,9 @@ impl Session {
         self.undo_one();
         // In user-vs-engine mode, takeback returns to the user's
         // prior turn — undo a second ply if we just landed on the
-        // engine's turn.
-        if let Some(eng_color) = self.engine_plays {
+        // engine's turn. Self-play (Both) and user-plays-both (None)
+        // are both happy with a single ply rewind.
+        if let EngineMode::Side(eng_color) = self.engine_plays {
             if self.position.side_to_move() == eng_color && !self.history.is_empty() {
                 self.undo_one();
             }
@@ -525,10 +637,7 @@ impl Session {
         if self.engine_thinking {
             return;
         }
-        let Some(eng_color) = self.engine_plays else {
-            return;
-        };
-        if self.position.side_to_move() != eng_color {
+        if !self.engine_plays.is_engine_turn(self.position.side_to_move()) {
             return;
         }
         let mut scratch = self.position.clone();
@@ -548,11 +657,13 @@ impl Session {
             .as_ref()
             .and_then(|c| c.peek(&history_moves));
         if let Some(book_pick) = book_pick {
-            let san_str = san::format(&self.position, book_pick.mv);
-            if let Some(entry) = chess_tutor_engine::openings::entry(book_pick.opening_id) {
-                eprintln!("book: engine plays {} ({} {})", san_str, entry.eco, entry.name);
-            } else {
-                eprintln!("book: engine plays {}", san_str);
+            if self.log_to_stderr {
+                let san_str = san::format(&self.position, book_pick.mv);
+                if let Some(entry) = chess_tutor_engine::openings::entry(book_pick.opening_id) {
+                    eprintln!("book: engine plays {} ({} {})", san_str, entry.eco, entry.name);
+                } else {
+                    eprintln!("book: engine plays {}", san_str);
+                }
             }
             // A successful book pick clears the "we've announced
             // out-of-book" flag — the user may have taken back to an
@@ -567,7 +678,9 @@ impl Session {
         // because a takeback might bring us back into book territory
         // and we need peek to keep working on the next bot turn.
         if self.book_cursor.is_some() && !self.book_out_announced {
-            eprintln!("out of book — engine now plays from search.");
+            if self.log_to_stderr {
+                eprintln!("out of book — engine now plays from search.");
+            }
             self.book_out_announced = true;
         }
         let params = SearchParams {
@@ -612,7 +725,15 @@ impl Session {
 
     fn handle_worker_result(&mut self, result: WorkerResult) {
         match result {
-            WorkerResult::Search { gen, mv, line, noise_pick, elapsed } => {
+            WorkerResult::Search {
+                gen,
+                mv,
+                line,
+                noise_pick,
+                elapsed,
+                nodes,
+                nps_m,
+            } => {
                 if gen != self.gen {
                     return;
                 }
@@ -620,45 +741,9 @@ impl Session {
                 let Some(mv) = mv else {
                     return;
                 };
-                if let Some(info) = &noise_pick {
-                    // Log noise-driven picks to stderr so the user can
-                    // see when the bot is deliberately off the best
-                    // line (otherwise weakened play looks like a bug).
-                    // GUI surface for this lives in deferred Phase D
-                    // follow-on work.
-                    match info {
-                        NoisePickInfo::Softmax { pick_idx, num_lines, delta_from_top_cp } => {
-                            eprintln!(
-                                "noise: softmax picked #{} of {} ({:+} cp from #1)",
-                                pick_idx + 1, num_lines, delta_from_top_cp,
-                            );
-                        }
-                        NoisePickInfo::Blunder { pick_idx, num_lines, delta_from_top_cp } => {
-                            eprintln!(
-                                "noise: blunder picked #{} of {} ({:+} cp from #1)",
-                                pick_idx + 1, num_lines, delta_from_top_cp,
-                            );
-                        }
-                        NoisePickInfo::BlunderSkipped { closest_above_loss_cp } => {
-                            let cap = (self.opponent.noise.blunder_max_loss_cp as f32
-                                * chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE)
-                                as i32;
-                            eprintln!(
-                                "noise: blunder roll fired but closest plausible alternative \
-                                 was -{closest_above_loss_cp} cp (exceeds {}× max-loss = {} cp \
-                                 cap); bot plays best.",
-                                chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE,
-                                cap,
-                            );
-                        }
-                        NoisePickInfo::Wild { engine_top, engine_top_score } => {
-                            eprintln!(
-                                "noise: wild — bot played {} (engine preferred {} at {} cp)",
-                                san::format(&self.position, mv),
-                                san::format(&self.position, *engine_top),
-                                engine_top_score.0,
-                            );
-                        }
+                if self.log_to_stderr {
+                    if let Some(info) = &noise_pick {
+                        log_noise_pick_to_stderr(info, &self.position, mv, &self.opponent.noise);
                     }
                 }
                 let root_stm = self.position.side_to_move();
@@ -676,8 +761,13 @@ impl Session {
                             score_white_pov: white_pov,
                             depth: line.depth,
                             elapsed,
+                            nodes,
+                            nps_m,
                         });
                     }
+                }
+                if let Some(entry) = self.history.last_mut() {
+                    entry.noise_pick = noise_pick;
                 }
                 // Engine just moved — any open Hint was for the prior
                 // position, so close it.
@@ -714,7 +804,7 @@ impl Session {
         }
     }
 
-    pub(crate) fn game_outcome(&self) -> Option<&'static str> {
+    pub fn game_outcome(&self) -> Option<&'static str> {
         let mut scratch = self.position.clone();
         if legal_moves_vec(&mut scratch).is_empty() {
             return Some(if self.position.in_check() {
@@ -802,9 +892,69 @@ impl Session {
 
     pub(crate) fn is_user_move(&self, entry: &HistoryEntry) -> bool {
         match self.engine_plays {
-            Some(c) => entry.moved_by != c,
-            None => true,
+            EngineMode::None => true,
+            EngineMode::Side(c) => entry.moved_by != c,
+            EngineMode::Both => false,
         }
+    }
+
+    // ---- Public accessors (CLI / headless callers) ---------------------
+
+    /// Current live position.
+    pub fn position(&self) -> &Position {
+        &self.position
+    }
+
+    /// Move history, in play order. Engine moves have
+    /// [`HistoryEntry::engine_info`] populated; user moves have
+    /// [`HistoryEntry::retrospective_text`] (when auto-retrospective
+    /// is on).
+    pub fn history(&self) -> &[HistoryEntry] {
+        &self.history
+    }
+
+    /// Opponent profile (book selection, noise, eval mask, seed) for
+    /// the current game.
+    pub fn opponent(&self) -> &OpponentProfile {
+        &self.opponent
+    }
+
+    /// Mutable opponent access. Most fields take effect on the next
+    /// engine move (noise / eval-mask are read per search). Mutating
+    /// `book` mid-game does *not* affect the active book cursor —
+    /// that's frozen at game start; the field change applies to
+    /// the next game.
+    pub fn opponent_mut(&mut self) -> &mut OpponentProfile {
+        &mut self.opponent
+    }
+
+    /// True between a [`Self::maybe_queue_engine_search`] that
+    /// dispatched a worker job and the matching [`WorkerResult`]
+    /// arriving. CLI / headless callers use this to decide whether
+    /// to block on [`Self::wait_for_worker`] or prompt the user.
+    pub fn is_engine_thinking(&self) -> bool {
+        self.engine_thinking
+    }
+
+    /// Block until the next worker result arrives, process it, then
+    /// drain any further results. Companion to [`Self::poll_worker`]
+    /// for synchronous callers (CLI). Returns immediately if the
+    /// worker channel is disconnected.
+    pub fn wait_for_worker(&mut self) {
+        if let Ok(result) = self.worker_rx.recv() {
+            self.handle_worker_result(result);
+        }
+        self.poll_worker();
+    }
+
+    /// Engine mode for the current game.
+    pub fn engine_plays(&self) -> EngineMode {
+        self.engine_plays
+    }
+
+    /// Bot-play depth.
+    pub fn depth(&self) -> u32 {
+        self.depth
     }
 
     // ---- Event dispatch ------------------------------------------------
@@ -1122,6 +1272,69 @@ fn log_new_game_intro(opponent: &OpponentProfile) {
     // hasn't committed to any specific opening at game start. The
     // opening that emerges is announced inline on each book move
     // (`book: engine plays X (ECO Name)`).
+}
+
+/// Emit a one-line stderr entry describing a noise-driven pick.
+/// Extracted from [`Session::handle_worker_result`] so the same
+/// log line still fires when `log_to_stderr` is on without
+/// inlining the match over every variant in the hot path.
+fn log_noise_pick_to_stderr(
+    info: &NoisePickInfo,
+    pos: &Position,
+    mv: Move,
+    noise: &NoiseProfile,
+) {
+    match info {
+        NoisePickInfo::Softmax {
+            pick_idx,
+            num_lines,
+            delta_from_top_cp,
+        } => {
+            eprintln!(
+                "noise: softmax picked #{} of {} ({:+} cp from #1)",
+                pick_idx + 1,
+                num_lines,
+                delta_from_top_cp,
+            );
+        }
+        NoisePickInfo::Blunder {
+            pick_idx,
+            num_lines,
+            delta_from_top_cp,
+        } => {
+            eprintln!(
+                "noise: blunder picked #{} of {} ({:+} cp from #1)",
+                pick_idx + 1,
+                num_lines,
+                delta_from_top_cp,
+            );
+        }
+        NoisePickInfo::BlunderSkipped {
+            closest_above_loss_cp,
+        } => {
+            let cap = (noise.blunder_max_loss_cp as f32
+                * chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE)
+                as i32;
+            eprintln!(
+                "noise: blunder roll fired but closest plausible alternative \
+                 was -{closest_above_loss_cp} cp (exceeds {}× max-loss = {} cp \
+                 cap); bot plays best.",
+                chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE,
+                cap,
+            );
+        }
+        NoisePickInfo::Wild {
+            engine_top,
+            engine_top_score,
+        } => {
+            eprintln!(
+                "noise: wild — bot played {} (engine preferred {} at {} cp)",
+                san::format(pos, mv),
+                san::format(pos, *engine_top),
+                engine_top_score.0,
+            );
+        }
+    }
 }
 
 /// Format a score for display in the hint panel. Root-stm POV is
