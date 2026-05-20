@@ -17,6 +17,7 @@ use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::opponent::{EvalMask, NoiseProfile, OpponentProfile};
 use chess_tutor_engine::position::{Position, StateInfo};
 use chess_tutor_engine::san;
+use chess_tutor_engine::traps::{self, PendingTrap, TrapEvent, TrapHit, TrapThreatened};
 use chess_tutor_engine::types::{Color, Move, MoveKind, PieceType, Square, Value};
 
 use crate::event::Event;
@@ -137,6 +138,22 @@ pub struct HistoryEntry {
     /// move. Both desktop and CLI surface this — desktop logs it to
     /// stderr; CLI prints it inline with the played-move line.
     pub noise_pick: Option<crate::worker::NoisePickInfo>,
+
+    // ---- Trap library bookkeeping ----
+    /// Snapshot of Session's `pending_trap` *before* this move was
+    /// applied. Used by [`Session::dispatch`] takeback to roll the
+    /// trap cursor back in lockstep with the position.
+    pub pending_trap_before: Option<PendingTrap>,
+    /// Move-by-move events the trap cursor emitted as this move was
+    /// applied (`PunisherExecuted`, `DefenderInTree`, etc.). Empty
+    /// when no trap was active. Renderers iterate to print prose
+    /// (CLI) or surface badges (future GUI).
+    pub trap_events: Vec<TrapEvent>,
+    /// `Some` when this move triggered a *new* trap (i.e. the
+    /// opponent walked into a known refutation). Distinct from
+    /// `trap_events`: that field narrates the continuation of an
+    /// already-active trap; this one marks the trigger move itself.
+    pub trap_hit: Option<TrapHit>,
 }
 
 /// Raw retrospective output for one user move. The worker computes
@@ -279,6 +296,13 @@ pub struct Session {
     /// B / N variants of the same from→to). Cleared on pick, off-board
     /// click, or any state-changing action (new game, takeback).
     pub(crate) pending_promotion: Option<PendingPromotion>,
+
+    /// Live trap-library cursor. `Some` between a trap firing and
+    /// the refutation tree reaching a terminal node; `None`
+    /// otherwise. Renderers query [`Self::pending_trap`] /
+    /// [`Self::trap_threats`] to surface active traps and pre-move
+    /// warnings.
+    pub(crate) pending_trap: Option<PendingTrap>,
 }
 
 pub(crate) struct PendingPromotion {
@@ -340,6 +364,7 @@ impl Session {
             book_out_announced: false,
             first_launch: true,
             pending_promotion: None,
+            pending_trap: None,
         }
     }
 
@@ -368,6 +393,7 @@ impl Session {
         self.opponent = opponent;
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
         self.book_out_announced = false;
+        self.pending_trap = None;
         if self.log_to_stderr {
             log_new_game_intro(&self.opponent);
         }
@@ -439,6 +465,7 @@ impl Session {
         self.opponent.eval_mask = eval_mask;
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
         self.book_out_announced = false;
+        self.pending_trap = None;
         if self.log_to_stderr {
             log_new_game_intro(&self.opponent);
         }
@@ -635,8 +662,48 @@ impl Session {
     fn apply_move(&mut self, mv: Move) {
         let san_str = san::format(&self.position, mv);
         let moved_by = self.position.side_to_move();
+
+        // ---- Trap bookkeeping, pre-move pass ----
+        // Snapshot for undo restore.
+        let pending_trap_before = self.pending_trap.clone();
+        // Advance the cursor (if any). The pre-move position is what
+        // `advance_pending` wants — the cursor was scripted against
+        // moves played FROM the position before each ply.
+        let mut trap_events = Vec::new();
+        if let Some(pending) = self.pending_trap.as_mut() {
+            let event = traps::advance_pending(pending, &self.position, mv);
+            let terminal = event.is_terminal();
+            trap_events.push(event);
+            if terminal {
+                self.pending_trap = None;
+            }
+        }
+        // Capture pre-move data the post-move scan needs (piece kind
+        // can only be read while the source square still has the
+        // piece).
+        let scan_inputs = self
+            .position
+            .piece_on(mv.from())
+            .map(|piece| (moved_by, piece.kind(), mv.from(), mv.to()));
+
         let state = self.position.do_move(mv);
         self.position_keys.push(self.position.key());
+
+        // ---- Trap bookkeeping, post-move pass ----
+        let mut trap_hit = None;
+        if self.pending_trap.is_none() {
+            if let Some((mover, piece_kind, from, to)) = scan_inputs {
+                if let Some((entry, hit)) =
+                    traps::scan_after_move(&self.position, mover, piece_kind, from, to)
+                        .into_iter()
+                        .next()
+                {
+                    trap_hit = Some(hit.clone());
+                    self.pending_trap = Some(PendingTrap::new(entry, hit));
+                }
+            }
+        }
+
         self.history.push(HistoryEntry {
             mv,
             state,
@@ -646,6 +713,9 @@ impl Session {
             retrospective: None,
             engine_info: None,
             noise_pick: None,
+            pending_trap_before,
+            trap_events,
+            trap_hit,
         });
         // No book-cursor advance: BookCursor is stateless and
         // re-derives from history at each peek. Takeback is similarly
@@ -686,6 +756,10 @@ impl Session {
         if let Some(entry) = self.history.pop() {
             self.position.undo_move(entry.mv, entry.state);
             self.position_keys.pop();
+            // Roll the trap cursor back to its pre-move snapshot so
+            // the refutation tree is walked in lockstep with the
+            // position.
+            self.pending_trap = entry.pending_trap_before;
             // No book-cursor restore needed — the stateless cursor
             // re-derives from history on the next peek.
             self.deselect();
@@ -1106,6 +1180,23 @@ impl Session {
     /// Engine mode for the current game.
     pub fn engine_plays(&self) -> EngineMode {
         self.engine_plays
+    }
+
+    /// Live trap cursor. `Some` between a trap firing and its
+    /// refutation tree reaching a terminal node. Renderers use this
+    /// to decide whether to suppress pre-move threat warnings (CLI)
+    /// or to surface a "trap active" badge (future GUI).
+    pub fn pending_trap(&self) -> Option<&PendingTrap> {
+        self.pending_trap.as_ref()
+    }
+
+    /// Pre-move trap threats for the side currently to move: legal
+    /// moves that would walk into a known refutation. Computed fresh
+    /// each call (the underlying library scan is cheap). Renderers
+    /// typically suppress this when [`Self::pending_trap`] is already
+    /// `Some` — a trap mid-refutation is doing its own narration.
+    pub fn trap_threats(&self) -> Vec<TrapThreatened> {
+        traps::scan_threats(&self.position)
     }
 
     /// Bot-play depth.

@@ -29,7 +29,7 @@ use chess_tutor_engine::opponent::{
 };
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
-use chess_tutor_engine::traps::{self, PendingTrap, TrapEvent, TrapHit};
+use chess_tutor_engine::traps::{TrapEvent, TrapHit, TrapThreatened};
 use chess_tutor_engine::types::{Color, Move, Value};
 use chess_tutor_narration::{format_retrospective, NarrationOptions};
 use chess_tutor_ui::event::Event;
@@ -90,13 +90,9 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
     };
     session.start_game(start_pos.clone(), engine_plays, cfg.depth, cfg.opponent.clone());
 
-    // Trap cursor tracking. Session doesn't know about traps; the CLI
-    // replays move-by-move against its own scratch position so the
-    // pre-move side-to-move / piece-on / from / to data the trap API
-    // wants is available.
-    let mut trap_pos = start_pos.clone();
-    let mut pending_trap: Option<PendingTrap> = None;
-    let mut trap_history: Vec<Option<PendingTrap>> = Vec::new();
+    // Trap events live on Session's HistoryEntry now; the CLI just
+    // walks newly-applied entries and prints whatever the engine /
+    // session populated.
     let mut last_processed_len: usize = 0;
 
     let mut manual_flip = cfg.flip;
@@ -149,9 +145,6 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                 &mut out,
                 &start_pos,
                 session.history(),
-                &mut trap_pos,
-                &mut pending_trap,
-                &mut trap_history,
                 &mut last_processed_len,
                 cfg.engine_color,
                 explain_best,
@@ -162,9 +155,6 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
             &mut out,
             &start_pos,
             session.history(),
-            &mut trap_pos,
-            &mut pending_trap,
-            &mut trap_history,
             &mut last_processed_len,
             cfg.engine_color,
             explain_best,
@@ -192,8 +182,8 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
             writeln!(out, "fen: {}", session.position().to_fen())?;
         }
 
-        if pending_trap.is_none() {
-            announce_trap_threats(&mut out, session.position())?;
+        if session.pending_trap().is_none() {
+            announce_trap_threats(&mut out, &session.trap_threats())?;
         }
         write!(out, "> ")?;
         out.flush()?;
@@ -362,31 +352,34 @@ fn analysis_params(depth: u32, time_ms: Option<u64>, multi_pv: usize) -> SearchP
     }
 }
 
-#[allow(clippy::too_many_arguments)] // cohesive runtime state slices
 fn catch_up_history(
     out: &mut io::StdoutLock<'_>,
     start_pos: &Position,
     history: &[HistoryEntry],
-    trap_pos: &mut Position,
-    pending_trap: &mut Option<PendingTrap>,
-    trap_history: &mut Vec<Option<PendingTrap>>,
     last_processed_len: &mut usize,
     engine_color: EngineColor,
     explain_best: bool,
 ) -> io::Result<()> {
-    // Handle undo: history shrank since last visit. Rebuild trap
-    // state from scratch by replaying remaining entries.
+    // Handle undo: history shrank since last visit. Replay anything
+    // remaining from index 0; trap state itself is already restored
+    // by Session::dispatch(Takeback).
     if history.len() < *last_processed_len {
-        *trap_pos = start_pos.clone();
-        *pending_trap = None;
-        trap_history.clear();
         *last_processed_len = 0;
     }
 
     while *last_processed_len < history.len() {
         let entry = &history[*last_processed_len];
-        advance_trap_for_move(out, trap_pos, pending_trap, entry.mv)?;
-        trap_history.push(pending_trap.clone());
+
+        // Trap events Session emitted while applying this move
+        // (advance_pending output), followed by any new-trap hit
+        // (scan_after_move output). Mutually exclusive in practice
+        // but the loop handles both consistently.
+        for event in &entry.trap_events {
+            announce_trap_event(out, event)?;
+        }
+        if let Some(hit) = &entry.trap_hit {
+            announce_trap_hit(out, hit)?;
+        }
 
         if user_owns(entry.moved_by, engine_color) {
             // User move. Print the retrospective if it's filled in;
@@ -417,41 +410,6 @@ fn user_owns(mover: Color, engine_color: EngineColor) -> bool {
         EngineColor::White => mover != Color::White,
         EngineColor::Black => mover != Color::Black,
     }
-}
-
-/// Apply `mv` on the CLI's trap scratch position, advancing or
-/// scanning for traps as appropriate.
-fn advance_trap_for_move(
-    out: &mut io::StdoutLock<'_>,
-    trap_pos: &mut Position,
-    pending_trap: &mut Option<PendingTrap>,
-    mv: Move,
-) -> io::Result<()> {
-    if let Some(pending) = pending_trap.as_mut() {
-        let event = traps::advance_pending(pending, trap_pos, mv);
-        announce_trap_event(out, &event)?;
-        if event.is_terminal() {
-            *pending_trap = None;
-        }
-    }
-    let mover = trap_pos.side_to_move();
-    let Some(piece) = trap_pos.piece_on(mv.from()) else {
-        trap_pos.do_move(mv);
-        return Ok(());
-    };
-    let from = mv.from();
-    let to = mv.to();
-    trap_pos.do_move(mv);
-    if pending_trap.is_none() {
-        if let Some((entry, hit)) = traps::scan_after_move(trap_pos, mover, piece.kind(), from, to)
-            .into_iter()
-            .next()
-        {
-            announce_trap_hit(out, &hit)?;
-            *pending_trap = Some(PendingTrap::new(entry, hit));
-        }
-    }
-    Ok(())
 }
 
 fn print_retrospective(
@@ -1057,8 +1015,11 @@ fn parse_user_move(pos: &mut Position, input: &str) -> Result<Move, String> {
     }
 }
 
-fn announce_trap_threats(out: &mut io::StdoutLock<'_>, pos: &Position) -> io::Result<()> {
-    for t in traps::scan_threats(pos) {
+fn announce_trap_threats(
+    out: &mut io::StdoutLock<'_>,
+    threats: &[TrapThreatened],
+) -> io::Result<()> {
+    for t in threats {
         let pv = t.hit.main_line_san.join(" ");
         writeln!(
             out,
