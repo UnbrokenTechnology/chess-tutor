@@ -142,7 +142,7 @@ pub use castling_outcome::{compute_castling_outcome, CastlingOutcome};
 pub use initiative_outcome::{compute_initiative_outcome, InitiativeOutcome};
 pub use king_safety_outcome::{compute_king_safety_outcome, KingSafetyOutcome, KingSafetySnapshot};
 pub use material_outcome::{compute_material_outcome, CaptureEvent, MaterialOutcome};
-pub use mobility_outcome::{compute_mobility_outcome, MobilityOutcome};
+pub use mobility_outcome::{compute_mobility_outcome, MobilityOutcome, PieceMobility};
 pub use move_analysis::{analyze_position, MoveAnalysis};
 pub use passed_pawns_outcome::{compute_passed_pawns_outcome, PassedPawnsOutcome};
 pub use pawn_structure_outcome::{compute_pawn_structure_outcome, PawnStructureOutcome};
@@ -152,7 +152,7 @@ pub use surprise::{detect_surprise, SurpriseKind};
 pub use term_delta::{compute_term_deltas, cumulative_prefix, TermDelta};
 pub use term_id::{TermId, Timing};
 pub use threats_outcome::{
-    compute_threats_outcome, HangingPiece, PieceLocation, PressureKind, PressuredPiece,
-    ThreatsOutcome,
+    compute_threats_outcome, filter_guaranteed_targets, HangingPiece, PieceLocation, PressureKind,
+    PressuredPiece, ThreatsOutcome,
 };
 pub use verdict::{classify_move, MoveVerdict};

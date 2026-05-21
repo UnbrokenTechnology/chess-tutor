@@ -31,6 +31,17 @@ pub enum Event {
     /// session re-maps "clicked the last move" to `JumpToLive`.
     ViewHistoryIndex(Option<usize>),
 
+    // ---- Retrospective panel
+    /// User clicked card `i` in the retrospective panel. The session
+    /// toggles selection: same index clicked twice deselects. The
+    /// selected item's annotations flow into the next [`crate::view::BoardView`].
+    SelectRetrospectiveItem(usize),
+    /// User toggled the "show all signals" checkbox. When on, the
+    /// retrospective surfaces every non-zero mobility shift per piece
+    /// type and every residual term in "Other shifts" (no cumulative-
+    /// prefix filter). Sticks across moves for the current session.
+    ToggleShowAllSignals,
+
     // ---- Global cancel
     /// Generic "back out" intent. Session resolves priority:
     /// pending promotion > open dialog > deselect.

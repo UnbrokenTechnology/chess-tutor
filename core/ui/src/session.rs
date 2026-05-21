@@ -303,6 +303,21 @@ pub struct Session {
     /// [`Self::trap_threats`] to surface active traps and pre-move
     /// warnings.
     pub(crate) pending_trap: Option<PendingTrap>,
+
+    /// Currently-selected retrospective card for the panel entry the
+    /// user is viewing. `Some((history_index, item_index))` while a
+    /// card is selected; `None` when nothing's selected (or when the
+    /// user has navigated to a different move). Drives which board
+    /// annotations the next [`Self::build_board_view`] surfaces.
+    pub(crate) selected_retrospective: Option<(usize, usize)>,
+
+    /// When `true`, the retrospective view surfaces every non-zero
+    /// per-piece-type mobility shift and every residual term in
+    /// "Other shifts" (no cumulative-prefix filter). When `false`
+    /// (default), mobility uses a 50 cp floor per piece type and
+    /// "Other shifts" caps at the 50%-coverage prefix. Sticky across
+    /// moves so the student can opt in once and keep the wider view.
+    pub(crate) show_all_signals: bool,
 }
 
 pub(crate) struct PendingPromotion {
@@ -365,6 +380,8 @@ impl Session {
             first_launch: true,
             pending_promotion: None,
             pending_trap: None,
+            selected_retrospective: None,
+            show_all_signals: false,
         }
     }
 
@@ -394,6 +411,7 @@ impl Session {
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
         self.book_out_announced = false;
         self.pending_trap = None;
+        self.selected_retrospective = None;
         if self.log_to_stderr {
             log_new_game_intro(&self.opponent);
         }
@@ -466,6 +484,7 @@ impl Session {
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
         self.book_out_announced = false;
         self.pending_trap = None;
+        self.selected_retrospective = None;
         if self.log_to_stderr {
             log_new_game_intro(&self.opponent);
         }
@@ -1233,6 +1252,24 @@ impl Session {
                     Some(i) if i + 1 == self.history.len() => None,
                     other => other,
                 };
+                // Clear retrospective selection when navigating to
+                // a different move — annotations belong to the move
+                // they describe, not whatever the user clicks next.
+                self.selected_retrospective = None;
+            }
+            Event::SelectRetrospectiveItem(item_idx) => {
+                let Some((entry_idx, _)) = self.panel_entry_with_index() else {
+                    return;
+                };
+                // Toggle: clicking the selected card again deselects.
+                self.selected_retrospective =
+                    match self.selected_retrospective {
+                        Some((h, i)) if h == entry_idx && i == item_idx => None,
+                        _ => Some((entry_idx, item_idx)),
+                    };
+            }
+            Event::ToggleShowAllSignals => {
+                self.show_all_signals = !self.show_all_signals;
             }
             Event::Cancel => self.handle_cancel(),
             Event::ConfirmNewGame => self.try_start_from_form(),
@@ -1320,6 +1357,7 @@ impl Session {
         } else {
             (None, &[])
         };
+        let annotations = self.collect_board_annotations();
         BoardView::compose(
             &viewed_pos,
             self.flipped,
@@ -1327,7 +1365,44 @@ impl Session {
             selected,
             legals,
             pending_promotion,
+            annotations,
         )
+    }
+
+    /// Gather any annotations to draw on the board. Sources:
+    /// - The currently-viewed user-move entry's retrospective: best-
+    ///   move arrow always shown; the selected card's annotations
+    ///   layer on top.
+    /// - Future: trap-refutation arrows, pin renderer per HANDOFF-ux.
+    fn collect_board_annotations(&self) -> Vec<crate::view::BoardAnnotation> {
+        let mut out = Vec::new();
+        let Some((entry_idx, entry)) = self.panel_entry_with_index() else {
+            return out;
+        };
+        if !self.is_user_move(entry) {
+            return out;
+        }
+        let Some(result) = &entry.retrospective else {
+            return out;
+        };
+        let pre = self.pre_move_position(entry_idx);
+        let vm = crate::retrospective_view::build_retrospective_view(
+            &pre,
+            &result.analyses,
+            result.user_move,
+            self.show_all_signals,
+        );
+        if let Some(ann) = vm.headline.best_move_annotation {
+            out.push(ann);
+        }
+        if let Some((selected_entry, item_idx)) = self.selected_retrospective {
+            if selected_entry == entry_idx {
+                if let Some(item) = vm.items.get(item_idx) {
+                    out.extend(item.annotations.iter().copied());
+                }
+            }
+        }
+        out
     }
 
     pub fn build_side_panel_view(&self) -> SidePanelView {
@@ -1376,17 +1451,29 @@ impl Session {
             return RetrospectivePanelView {
                 game_outcome,
                 body: RetrospectiveBody::NoMoves,
+                show_all_signals: self.show_all_signals,
             };
         };
         let viewing_back_san = (!self.is_viewing_live()).then(|| entry.san.clone());
         let kind = if self.is_user_move(entry) {
             match &entry.retrospective {
-                Some(result) => RetrospectiveKind::UserMoveReady(Box::new(
-                    crate::view::UserMoveReadyData {
-                        pre_move_pos: self.pre_move_position(entry_index),
-                        result: result.clone(),
-                    },
-                )),
+                Some(result) => {
+                    let pre = self.pre_move_position(entry_index);
+                    let view_model = crate::retrospective_view::build_retrospective_view(
+                        &pre,
+                        &result.analyses,
+                        result.user_move,
+                        self.show_all_signals,
+                    );
+                    let selected_item = match self.selected_retrospective {
+                        Some((h, i)) if h == entry_index => Some(i),
+                        _ => None,
+                    };
+                    RetrospectiveKind::UserMoveReady {
+                        view_model: Box::new(view_model),
+                        selected_item,
+                    }
+                }
                 None => RetrospectiveKind::UserMoveAnalyzing,
             }
         } else if let Some(info) = &entry.engine_info {
@@ -1405,6 +1492,7 @@ impl Session {
                 viewing_back_san,
                 kind,
             },
+            show_all_signals: self.show_all_signals,
         }
     }
 

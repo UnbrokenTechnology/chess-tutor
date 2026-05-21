@@ -84,14 +84,33 @@ pub struct ThreatsOutcome {
     /// undefended.
     pub ours_hanging: Vec<HangingPiece>,
     /// Their pieces after the user's move that are attacked and
-    /// undefended.
+    /// undefended. **Raw / static snapshot** — does not check
+    /// whether the opponent's next move can refute the threat. Use
+    /// [`theirs_hanging_guaranteed`](Self::theirs_hanging_guaranteed)
+    /// for teaching surfaces.
     pub theirs_hanging: Vec<HangingPiece>,
     /// Our pieces after the user's move that are defended but still
     /// lose material in an SEE-assessed exchange initiated by the
     /// enemy.
     pub ours_see_losing: Vec<HangingPiece>,
-    /// Their pieces where the same SEE assessment favours us.
+    /// Their pieces where the same SEE assessment favours us. Raw /
+    /// static, like `theirs_hanging`. Use
+    /// [`theirs_see_losing_guaranteed`](Self::theirs_see_losing_guaranteed)
+    /// for teaching surfaces.
     pub theirs_see_losing: Vec<HangingPiece>,
+    /// Subset of [`theirs_hanging`](Self::theirs_hanging) that
+    /// survives *every* legal opponent response — the target piece
+    /// stays on its square AND our cheapest attacker remains
+    /// SEE-positive after every reply. This is the honest "you can
+    /// win material" surface: phrasing the static list as a winnable
+    /// claim mis-teaches when the opponent's reply (defend, move the
+    /// target, capture an attacker, or pose a bigger counter-threat)
+    /// refutes the win.
+    pub theirs_hanging_guaranteed: Vec<HangingPiece>,
+    /// Subset of [`theirs_see_losing`](Self::theirs_see_losing) that
+    /// survives every legal opponent response, by the same logic as
+    /// `theirs_hanging_guaranteed`.
+    pub theirs_see_losing_guaranteed: Vec<HangingPiece>,
     /// Our pieces under Stockfish-style positional pressure.
     pub ours_pressured: Vec<PressuredPiece>,
     /// Their pieces under the same form of positional pressure from
@@ -138,6 +157,11 @@ pub fn compute_threats_outcome(
     let ours_pressured = list_pressured(&scratch, root_stm);
     let theirs_pressured = list_pressured(&scratch, !root_stm);
 
+    let theirs_hanging_guaranteed =
+        filter_guaranteed_targets(&scratch, &theirs_hanging, root_stm);
+    let theirs_see_losing_guaranteed =
+        filter_guaranteed_targets(&scratch, &theirs_see_losing, root_stm);
+
     let ours_hanging_delta = ours_hanging.len() as i32 - pre_ours_hang as i32;
     let theirs_hanging_delta = theirs_hanging.len() as i32 - pre_theirs_hang as i32;
     let ours_see_losing_delta = ours_see_losing.len() as i32 - pre_ours_see as i32;
@@ -150,6 +174,8 @@ pub fn compute_threats_outcome(
         theirs_hanging,
         ours_see_losing,
         theirs_see_losing,
+        theirs_hanging_guaranteed,
+        theirs_see_losing_guaranteed,
         ours_pressured,
         theirs_pressured,
         ours_hanging_delta,
@@ -159,6 +185,114 @@ pub fn compute_threats_outcome(
         ours_pressured_delta,
         theirs_pressured_delta,
     }
+}
+
+/// Return the subset of `targets` that are *guaranteed* winnable on
+/// `our_color`'s next move — i.e. for every legal opponent response,
+/// the target piece is still on its square AND our cheapest attacker
+/// still has a SEE-positive capture there.
+///
+/// `pos_after_user_move` is the position immediately after the user
+/// moved, with the opponent to move. Each `HangingPiece` in `targets`
+/// must already describe an opponent piece in that position
+/// (typically [`ThreatsOutcome::theirs_hanging`] or
+/// [`ThreatsOutcome::theirs_see_losing`]).
+///
+/// Why this matters: the raw lists are a static after-our-move
+/// snapshot. A piece can look "hanging" right after we attack it but
+/// the opponent's response (defend, move the piece, capture an
+/// attacker, or force us to deal with a bigger threat) refutes the
+/// win. Surfacing "you can win material" before this filter produces
+/// false positives that mis-teach the student.
+///
+/// Edge cases:
+/// - Opponent has no legal moves (stalemate/mate): every target is
+///   trivially "guaranteed". Acceptable; the game is over and the
+///   material claim is moot.
+/// - Opponent captures one of our attackers: re-running
+///   `attackers_to`/SEE on the post-response position handles this
+///   automatically.
+/// - Opponent moves the target to a still-attacked square: counts as
+///   refuted. We don't chase the target to its new square; teaching
+///   value is "the original threat persists no matter what."
+///
+/// Known false-positive (not yet handled): when the "hanging" target
+/// is actually a sacrifice setup — opponent left it there to bait
+/// our capture into a prepared tactic (fork, pin, mating net). Every
+/// passive opponent response leaves the piece capturable, so we
+/// pass the static check; but the right move for us is to *not*
+/// take, because the next move after our capture lands us in the
+/// tactic. Detecting this needs a one-ply search of *our* response
+/// (take vs. refuse) and an SEE/eval check on the position after
+/// the opponent's follow-up. See memory note on the sacrifice-tactic
+/// misfire for future work.
+pub fn filter_guaranteed_targets(
+    pos_after_user_move: &Position,
+    targets: &[HangingPiece],
+    our_color: Color,
+) -> Vec<HangingPiece> {
+    targets
+        .iter()
+        .filter(|h| is_target_guaranteed(pos_after_user_move, h, our_color))
+        .cloned()
+        .collect()
+}
+
+fn is_target_guaranteed(
+    pos_after_user_move: &Position,
+    hanging: &HangingPiece,
+    our_color: Color,
+) -> bool {
+    let target_sq = hanging.location.square;
+    let mut scratch_for_movegen = pos_after_user_move.clone();
+    let legal = crate::movegen::legal_moves_vec(&mut scratch_for_movegen);
+    if legal.is_empty() {
+        // Stalemate / mate — no responses to refute the claim. Edge
+        // case; game is over so the "win material" framing is moot.
+        return true;
+    }
+    for mv in legal {
+        let mut scratch = pos_after_user_move.clone();
+        scratch.do_move(mv);
+        if !target_still_winnable(&scratch, target_sq, our_color) {
+            return false;
+        }
+    }
+    true
+}
+
+fn target_still_winnable(pos: &Position, target_sq: Square, our_color: Color) -> bool {
+    let Some(piece_on_target) = pos.piece_on(target_sq) else {
+        // Target moved off its square.
+        return false;
+    };
+    if piece_on_target.color() == our_color {
+        // Shouldn't happen — opponent just moved — but guard anyway.
+        return false;
+    }
+    let occupied = pos.occupied();
+    let our_attackers = pos.attackers_to(target_sq, occupied) & pos.pieces_by_color(our_color);
+    if our_attackers == Bitboard::EMPTY {
+        return false;
+    }
+    // SEE the cheapest-attacker capture. Threshold = 1 cp (any
+    // strictly-positive material gain). Matches list_see_losing's
+    // convention.
+    let mut cheapest_from: Option<Square> = None;
+    let mut cheapest_value = i32::MAX;
+    for from in our_attackers {
+        if let Some(p) = pos.piece_on(from) {
+            let v = Value::mg_of_piece(p.kind()).0;
+            if v < cheapest_value {
+                cheapest_value = v;
+                cheapest_from = Some(from);
+            }
+        }
+    }
+    let Some(from) = cheapest_from else {
+        return false;
+    };
+    pos.see_ge(Move::normal(from, target_sq), Value(1))
 }
 
 /// Count pieces of both colours that are attacked and undefended.
@@ -716,5 +850,53 @@ mod tests {
         let (ours, theirs) = count_hanging(&pos, Color::Black);
         assert_eq!(ours, 0, "king in check must not count as hanging");
         assert_eq!(theirs, 0, "white king should not count either");
+    }
+
+    // ---- filter_guaranteed_targets ----------------------------------
+
+    #[test]
+    fn guarantee_filter_drops_e5_after_nf3_because_nc6_defends() {
+        // After 1.e4 e5 2.Nf3 — Black to move. e5 looks hanging
+        // statically (attacked by Nf3, no defender), but 2...Nc6
+        // defends. The guarantee filter must drop e5 so the
+        // retrospective doesn't tell the student they can win the
+        // pawn — Nxe5? would lose a knight after ...Nxe5.
+        let fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2";
+        let pos = Position::from_fen(fen).unwrap();
+        let hanging = list_hanging(&pos, Color::Black);
+        assert!(
+            hanging.iter().any(|h| h.location.square == Square::E5),
+            "static check should still flag e5 as hanging (precondition for test)"
+        );
+        let guaranteed = filter_guaranteed_targets(&pos, &hanging, Color::White);
+        assert!(
+            guaranteed.iter().all(|h| h.location.square != Square::E5),
+            "Nc6 defends e5 — guarantee filter must drop the entry, got {guaranteed:?}"
+        );
+    }
+
+    #[test]
+    fn guarantee_filter_keeps_target_when_opponent_is_in_stalemate() {
+        // Edge-case branch: when the opponent has no legal moves at
+        // all, every static target is trivially "guaranteed"
+        // (there's no response that could refute). Game-over
+        // territory; teaching value moot. But the branch should
+        // exercise so we know it doesn't panic.
+        // Stalemate position: black king on h8, white queen on g6,
+        // white king on f7. Black to move, no legal moves.
+        let fen = "7k/5K2/6Q1/8/8/8/8/8 b - - 0 1";
+        let pos = Position::from_fen(fen).unwrap();
+        // Construct a synthetic HangingPiece (the test doesn't care
+        // whether it's actually hanging — the filter's stalemate
+        // short-circuit returns true unconditionally).
+        let synthetic = HangingPiece {
+            location: PieceLocation {
+                square: Square::H8,
+                piece: PieceType::King,
+            },
+            attackers: Vec::new(),
+        };
+        let kept = filter_guaranteed_targets(&pos, &[synthetic.clone()], Color::White);
+        assert_eq!(kept.len(), 1, "stalemate branch must keep all targets");
     }
 }

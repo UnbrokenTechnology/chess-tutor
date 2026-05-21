@@ -30,11 +30,17 @@ pub(crate) fn render_threats(
         )?;
         wrote = true;
     }
-    if outcome.theirs_hanging_delta > 0 && !outcome.theirs_hanging.is_empty() {
+    // Only narrate "you expose the opponent's …" when the threat is
+    // *guaranteed* — survives every legal opponent response. The
+    // raw theirs_hanging list misfires on pieces the opponent can
+    // defend on their next turn (1.Nf3 attacking e5 is the canonical
+    // case: ...Nc6 defends, so we should not tell the student they
+    // can win the pawn).
+    if outcome.theirs_hanging_delta > 0 && !outcome.theirs_hanging_guaranteed.is_empty() {
         writeln!(
             out,
             "                {}",
-            phrase_their_hanging(&outcome.theirs_hanging),
+            phrase_their_hanging(&outcome.theirs_hanging_guaranteed),
         )?;
         wrote = true;
     }
@@ -48,11 +54,12 @@ pub(crate) fn render_threats(
         )?;
         wrote = true;
     }
-    if outcome.theirs_see_losing_delta > 0 && !outcome.theirs_see_losing.is_empty() {
+    // Same guarantee rule for "their piece loses to a trade".
+    if outcome.theirs_see_losing_delta > 0 && !outcome.theirs_see_losing_guaranteed.is_empty() {
         writeln!(
             out,
             "                {}",
-            phrase_their_see_losing(&outcome.theirs_see_losing),
+            phrase_their_see_losing(&outcome.theirs_see_losing_guaranteed),
         )?;
         wrote = true;
     }

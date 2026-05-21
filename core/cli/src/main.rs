@@ -395,7 +395,15 @@ fn main() -> Result<()> {
             light_mode,
         } => {
             let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
-            let view = chess_tutor_ui::view::BoardView::compose(&pos, flip, None, None, &[], None);
+            let view = chess_tutor_ui::view::BoardView::compose(
+                &pos,
+                flip,
+                None,
+                None,
+                &[],
+                None,
+                Vec::new(),
+            );
             print!("{}", render_board(&view, &RenderOptions { ascii, light_mode }));
         }
         Command::Moves { fen } => {

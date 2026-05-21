@@ -41,6 +41,17 @@ pub struct CaptureEvent {
 /// Aggregate material story along the user's PV through the settled
 /// ply. Purely structured data — no prose — so platform renderers
 /// can phrase it however they like.
+///
+/// Two surfaces:
+/// - [`events`](Self::events) — every capture along the PV up to
+///   `last_ply`. Right input for hypothetical framings (CLI's
+///   "Best line: …") that are explicit about being a predicted
+///   sequence.
+/// - [`realized_events`](Self::realized_events) — captures at
+///   ply ≤ 1 only: the user's own move plus any forced opponent
+///   recapture. Right input for past-tense framings ("You won
+///   material" cards) that describe what just resolved in the
+///   position the student is looking at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaterialOutcome {
     /// Every capture walked through, in ply order.
@@ -61,6 +72,36 @@ pub struct MaterialOutcome {
     /// minus one when the PV never formally "settled." UIs that
     /// want to render "by move N" lift this through the SAN lookup.
     pub last_ply: usize,
+}
+
+/// Maximum ply index (inclusive) considered "realized" — captures
+/// the student can fairly read as past-tense. Ply 0 = user's own
+/// move. Ply 1 = opponent's immediate response (forced recapture
+/// when the user's move was a SEE-positive capture). Captures
+/// beyond ply 1 are speculative engine continuation and don't
+/// belong in past-tense framings.
+const REALIZED_PLY_CAP: usize = 1;
+
+impl MaterialOutcome {
+    /// The subset of [`events`](Self::events) that describe captures
+    /// at ply ≤ 1 — i.e. what actually resolved at the position the
+    /// student is looking at, not deeper engine speculation. See the
+    /// type-level docs for which framing to pick.
+    pub fn realized_events(&self) -> impl Iterator<Item = &CaptureEvent> {
+        self.events.iter().filter(|ev| ev.ply <= REALIZED_PLY_CAP)
+    }
+
+    /// Net material at ply ≤ 1, in engine-cp midgame, from
+    /// `root_stm`'s POV. Positive = realized gain; negative =
+    /// realized loss; zero = no realized exchange (or even trade).
+    pub fn realized_net_mg_cp(&self, root_stm: Color) -> i32 {
+        self.realized_events()
+            .map(|ev| {
+                let sign = if ev.captor == root_stm { 1 } else { -1 };
+                sign * ev.value_mg
+            })
+            .sum()
+    }
 }
 
 /// Walk `ma.pv` from `pre_move_pos` up through the settled ply (or

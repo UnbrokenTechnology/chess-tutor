@@ -12,9 +12,11 @@
 //! post to their native run loop. There's no other platform coupling.
 
 pub mod event;
+pub mod retrospective_view;
 pub mod session;
 pub mod view;
 mod worker;
 
+pub use retrospective_view::build_retrospective_view;
 pub use session::{RepaintFn, Session};
 pub use worker::NoisePickInfo;

@@ -168,7 +168,7 @@ mod tests {
 
     fn startpos_view(flipped: bool) -> BoardView {
         let pos = Position::startpos();
-        BoardView::compose(&pos, flipped, None, None, &[], None)
+        BoardView::compose(&pos, flipped, None, None, &[], None, Vec::new())
     }
 
     #[test]
@@ -285,7 +285,7 @@ mod tests {
     fn highlight_uses_amber_bg_not_reverse_video() {
         let mut pos = Position::from_fen(STARTPOS_FEN).unwrap();
         let e2e4: Move = san::parse(&mut pos, "e4").unwrap();
-        let view = BoardView::compose(&pos, false, Some(e2e4), None, &[], None);
+        let view = BoardView::compose(&pos, false, Some(e2e4), None, &[], None, Vec::new());
         let out = render(&view, &RenderOptions::default());
         assert!(
             out.contains(&format!("\x1b[48;5;{DARK_MODE_HIGHLIGHT}m")),

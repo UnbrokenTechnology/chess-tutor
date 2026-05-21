@@ -9,7 +9,7 @@
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, File, Move, Piece, PieceType, Rank, Square};
 
-use crate::session::{NewGameForm, RetrospectiveResult};
+use crate::session::NewGameForm;
 
 /// Top-bar panel: New Game / Takeback / Flip / Hint / Live buttons,
 /// depth tuner, and a status slot that renders as either a spinner
@@ -41,9 +41,15 @@ pub struct EvalBarView {
 /// screen, cells left-to-right within each row. The renderer doesn't
 /// need to know about flip state; each cell carries the logical
 /// [`Square`] so clicks map back to game state.
+///
+/// `annotations` is an overlay layer (arrows + square highlights)
+/// drawn on top of the regular cell grid. Empty when no retrospective
+/// item is selected; non-empty when the user has clicked a card and
+/// the board is illustrating that item's spatial story.
 pub struct BoardView {
     pub rows: [[BoardCell; 8]; 8],
     pub pending_promotion: Option<PromotionPickerView>,
+    pub annotations: Vec<BoardAnnotation>,
 }
 
 impl BoardView {
@@ -56,6 +62,11 @@ impl BoardView {
     /// is *also* used for `is_capture` lookups on `legal_from_selected`
     /// entries — pass the live position there if you want capture
     /// rings to read correctly.
+    ///
+    /// `annotations` carries the overlay layer (arrows + square
+    /// highlights) — typically the spatial story of a retrospective
+    /// card the user is hovering / has selected. Pass an empty `Vec`
+    /// when nothing is selected.
     pub fn compose(
         pos: &Position,
         flipped: bool,
@@ -63,6 +74,7 @@ impl BoardView {
         selected: Option<Square>,
         legal_from_selected: &[Move],
         pending_promotion: Option<PromotionPickerView>,
+        annotations: Vec<BoardAnnotation>,
     ) -> Self {
         let king_in_check = pos
             .in_check()
@@ -121,8 +133,183 @@ impl BoardView {
         BoardView {
             rows,
             pending_promotion,
+            annotations,
         }
     }
+}
+
+/// Spatial annotation drawn on top of the regular cell grid. Each
+/// renderer maps `kind` to its own visual language (egui paints
+/// arrows; the CLI can ignore the layer entirely or print a text
+/// summary under the board).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoardAnnotation {
+    /// An arrow from `from` to `to`. Used for moves (best-move,
+    /// engine-preferred line, capture sequence) and threats
+    /// (attacker → target).
+    Arrow {
+        from: Square,
+        to: Square,
+        kind: AnnotationKind,
+    },
+    /// Tint or border the square. Used for hanging pieces, king
+    /// rings, outposts, weak pawns, etc.
+    SquareHighlight {
+        square: Square,
+        kind: AnnotationKind,
+    },
+}
+
+/// Semantic role of a [`BoardAnnotation`] — drives renderer color +
+/// style choices. The renderer maps each kind to its own palette; no
+/// specific colors are dictated here. Kinds are deliberately
+/// fine-grained so renderers can theme them consistently (e.g.,
+/// every "Attacker" arrow renders the same regardless of which item
+/// produced it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationKind {
+    /// Engine's preferred move (the one the user missed). Subtle —
+    /// a teaching nudge, not an alarm.
+    BestMove,
+    /// A capture in the expected line. Used for material narration's
+    /// capture sequence arrows.
+    Capture,
+    /// A piece (typically the user's) is under attack or hanging.
+    /// Square highlight kind. Red-ish.
+    Threat,
+    /// An attacker piece pointing at its target. Arrow kind.
+    Attacker,
+    /// A defender piece pointing at the piece it covers. Arrow kind.
+    Defender,
+    /// The king's ring of nearby squares (king-safety narration).
+    KingRing,
+    /// A piece the narrator considers active / well-placed. Green-ish
+    /// square highlight.
+    GoodPiece,
+    /// A piece the narrator flags as weak / misplaced. Orange-ish
+    /// square highlight.
+    BadPiece,
+    /// A square the moving piece newly attacks (mobility gained).
+    NewMobility,
+    /// A square the moving piece used to attack but no longer does
+    /// (mobility lost).
+    LostMobility,
+    /// Generic teaching highlight (yellow). Used when no more
+    /// specific kind applies.
+    Highlight,
+}
+
+/// Per-side sentiment of a retrospective item — used by renderers to
+/// pick an accent color (green / red / amber / grey). "User" here is
+/// the side that just moved (`pre_move_pos.side_to_move()`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sentiment {
+    /// Helps the user.
+    Positive,
+    /// Hurts the user.
+    Negative,
+    /// Both sides affected, no clear net direction.
+    Mixed,
+    /// Informational, no sign.
+    #[default]
+    Neutral,
+}
+
+/// Structured per-move retrospective. Replaces the prior
+/// "format-to-text-blob" path: each card the renderer paints comes
+/// from one [`RetrospectiveItem`], and clicking a card surfaces its
+/// `annotations` on the board.
+///
+/// The narration crate's [`chess_tutor_narration::format_retrospective`]
+/// is still the canonical *text* renderer; this view model is the
+/// canonical *structured* surface for visual renderers. They share
+/// the underlying engine outcome computations (see
+/// [`chess_tutor_engine::analysis`]) but format independently —
+/// converging is a deferred refactor.
+#[derive(Clone, Debug, Default)]
+pub struct RetrospectiveViewModel {
+    pub headline: RetrospectiveHeadline,
+    pub items: Vec<RetrospectiveItem>,
+}
+
+/// First card of every retrospective: the verdict, the post-move
+/// score, the engine's preferred alternative (if any), and an
+/// optional surprise / sharp note.
+///
+/// `best_move_annotation` carries the from→to arrow for the engine-
+/// preferred move when the user wasn't best — renderers can paint
+/// it as the "always-on" arrow for this retrospective even when no
+/// individual card is selected.
+#[derive(Clone, Debug, Default)]
+pub struct RetrospectiveHeadline {
+    pub user_san: String,
+    /// Annotation suffix: "!!", "!", "?!", "?", "??" — empty when no
+    /// SAN annotation applies (`Best` without the sharp flag, `Good`).
+    pub san_annotation: &'static str,
+    /// Human-readable verdict label ("Best", "Inaccuracy", etc.).
+    pub verdict_label: &'static str,
+    pub verdict_sentiment: Sentiment,
+    /// Formatted post-move score from root STM's POV, e.g. "+0.30" or
+    /// "M5".
+    pub user_score: String,
+    /// Engine's preferred move in SAN — set when distinct from the
+    /// user's move.
+    pub best_san: Option<String>,
+    pub best_score: Option<String>,
+    /// `user_score − best_score`, formatted, e.g. "-0.40".
+    pub gap: Option<String>,
+    /// "Position was already lost" (BestAvailable), "Well spotted —
+    /// this looks risky at first glance, but the longer line pays
+    /// off." (sharp Best), or `None`.
+    pub note: Option<String>,
+    /// Arrow for the engine-preferred move, when present.
+    pub best_move_annotation: Option<BoardAnnotation>,
+}
+
+/// One card in the retrospective. The renderer paints these in
+/// order, framed with a sentiment-coloured strip, a heading, a
+/// summary, and (when selected) an expanded detail block. Clicking
+/// a card emits a `SelectRetrospectiveItem(i)` event.
+#[derive(Clone, Debug)]
+pub struct RetrospectiveItem {
+    pub category: RetrospectiveCategory,
+    /// Short title — appears as the card heading. e.g. "Bishop
+    /// activity", "Hanging piece", "King exposed".
+    pub heading: String,
+    /// One-line subtitle. e.g. "improved (+0.20 → +0.80)".
+    pub summary: String,
+    /// Optional multi-line explanation rendered when the card is
+    /// selected or expanded.
+    pub detail: String,
+    /// Score delta in pawns, signed from user's POV. Renderers may
+    /// show "+0.30" / "-1.20" as a small chip on the card.
+    pub score_delta_pawns: Option<f32>,
+    pub sentiment: Sentiment,
+    /// Board annotations to paint when this card is selected. Empty
+    /// for cards that don't have a spatial story (e.g. raw secondary
+    /// term shifts).
+    pub annotations: Vec<BoardAnnotation>,
+}
+
+/// Category of a retrospective item — drives icon / glyph + colour
+/// theming in renderers that want consistent styling across cards
+/// of the same family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetrospectiveCategory {
+    Material,
+    Threats,
+    KingSafety,
+    PawnStructure,
+    Mobility,
+    PassedPawns,
+    PiecePlacement,
+    Initiative,
+    BlockedCenter,
+    Castling,
+    Space,
+    /// Secondary / fallback eval-term shifts (the old "Helped" /
+    /// "Hurt" lines).
+    Secondary,
 }
 
 #[derive(Clone, Copy)]
@@ -261,6 +448,12 @@ pub struct MoveListCell {
 pub struct RetrospectivePanelView {
     pub game_outcome: Option<&'static str>,
     pub body: RetrospectiveBody,
+    /// Current state of the "show all signals" preference. Renderers
+    /// surface this as a checkbox on the panel; toggling emits
+    /// [`crate::event::Event::ToggleShowAllSignals`]. When `true`,
+    /// retrospectives include every per-piece-type mobility shift and
+    /// every residual term in "Other shifts".
+    pub show_all_signals: bool,
 }
 
 pub enum RetrospectiveBody {
@@ -276,13 +469,22 @@ pub enum RetrospectiveBody {
 pub enum RetrospectiveKind {
     /// User move; retrospective worker job still in flight.
     UserMoveAnalyzing,
-    /// User move; retrospective is ready. Renderer formats the
-    /// analyses into prose via its own `chess_tutor_narration` (or
-    /// future arrow / highlight rendering). Boxed because the
-    /// payload (a `Position` plus a `Vec<MoveAnalysis>`) is large
-    /// relative to other variants and would otherwise bloat the
-    /// enum size for every panel body.
-    UserMoveReady(Box<UserMoveReadyData>),
+    /// User move; retrospective is ready. The session builds a
+    /// structured [`RetrospectiveViewModel`] per frame from the raw
+    /// analyses; renderers paint cards from it and emit
+    /// [`crate::event::Event::SelectRetrospectiveItem`] on click.
+    ///
+    /// `selected_item` is the index into `view_model.items` of the
+    /// currently-selected card (if any). Renderers use it to choose
+    /// which card to highlight and which annotations to surface on
+    /// the board.
+    ///
+    /// Boxed because the view model is the largest variant and
+    /// would otherwise inflate every other arm's size.
+    UserMoveReady {
+        view_model: Box<RetrospectiveViewModel>,
+        selected_item: Option<usize>,
+    },
     EngineMove {
         san: String,
         eval_pawns: f32,
@@ -290,13 +492,6 @@ pub enum RetrospectiveKind {
         elapsed_ms: u128,
     },
     EngineInfoMissing,
-}
-
-pub struct UserMoveReadyData {
-    /// Position the analyses are for; what `format_retrospective`
-    /// wants as its first argument.
-    pub pre_move_pos: Position,
-    pub result: RetrospectiveResult,
 }
 
 pub struct HintPanelView {

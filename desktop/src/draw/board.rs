@@ -1,8 +1,8 @@
-use chess_tutor_engine::types::{Color, Piece, PieceType};
+use chess_tutor_engine::types::{Color, Piece, PieceType, Square};
 use eframe::egui;
 
 use chess_tutor_ui::event::Event;
-use chess_tutor_ui::view::{BoardView, MoveDotKind};
+use chess_tutor_ui::view::{AnnotationKind, BoardAnnotation, BoardView, MoveDotKind};
 
 pub(crate) fn draw(ui: &mut egui::Ui, view: &BoardView, events: &mut Vec<Event>) {
     let avail = ui.available_size();
@@ -84,6 +84,11 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &BoardView, events: &mut Vec<Event>)
         }
     }
 
+    // Annotation overlay (square highlights + arrows). Painted
+    // after the cell grid but before the promotion picker so a
+    // picker square can't be obscured by an annotation.
+    draw_annotations(&painter, view, rect, cell);
+
     // Promotion picker overlay — paint after the regular board so it
     // overdraws any piece on the squares it covers.
     if let Some(picker) = &view.pending_promotion {
@@ -122,6 +127,152 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &BoardView, events: &mut Vec<Event>)
             events.push(Event::SelectSquare(clicked_cell.square));
         }
     }
+}
+
+/// Locate the on-screen display (col, row) for a logical [`Square`]
+/// by scanning the [`BoardView`] grid — works for any flip state
+/// without needing the orientation bit exposed.
+fn cell_coords(view: &BoardView, sq: Square) -> Option<(usize, usize)> {
+    for (r, row) in view.rows.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            if cell.square == sq {
+                return Some((c, r));
+            }
+        }
+    }
+    None
+}
+
+fn square_center(view: &BoardView, board_min: egui::Pos2, cell: f32, sq: Square) -> Option<egui::Pos2> {
+    cell_coords(view, sq).map(|(c, r)| {
+        board_min + egui::vec2((c as f32 + 0.5) * cell, (r as f32 + 0.5) * cell)
+    })
+}
+
+fn draw_annotations(painter: &egui::Painter, view: &BoardView, rect: egui::Rect, cell: f32) {
+    for ann in &view.annotations {
+        match ann {
+            BoardAnnotation::SquareHighlight { square, kind } => {
+                if let Some((c, r)) = cell_coords(view, *square) {
+                    let top_left = rect.min
+                        + egui::vec2(c as f32 * cell, r as f32 * cell);
+                    let cell_rect = egui::Rect::from_min_size(top_left, egui::vec2(cell, cell));
+                    let (fill, border) = annotation_square_colors(*kind);
+                    if let Some(fill) = fill {
+                        painter.rect_filled(cell_rect, 0.0, fill);
+                    }
+                    if let Some(border) = border {
+                        let r_inset = cell_rect.shrink(2.0);
+                        painter.rect_stroke(r_inset, 0.0, egui::Stroke::new(2.5, border));
+                    }
+                }
+            }
+            BoardAnnotation::Arrow { from, to, kind } => {
+                let Some(p_from) = square_center(view, rect.min, cell, *from) else { continue };
+                let Some(p_to) = square_center(view, rect.min, cell, *to) else { continue };
+                draw_arrow(painter, p_from, p_to, cell, *kind);
+            }
+        }
+    }
+}
+
+fn annotation_square_colors(
+    kind: AnnotationKind,
+) -> (Option<egui::Color32>, Option<egui::Color32>) {
+    match kind {
+        AnnotationKind::Threat => (
+            Some(egui::Color32::from_rgba_unmultiplied(0xff, 0x40, 0x40, 0x70)),
+            Some(egui::Color32::from_rgb(0xc0, 0x20, 0x20)),
+        ),
+        AnnotationKind::Capture => (
+            Some(egui::Color32::from_rgba_unmultiplied(0xff, 0x80, 0x40, 0x60)),
+            Some(egui::Color32::from_rgb(0xc0, 0x50, 0x10)),
+        ),
+        AnnotationKind::KingRing => (
+            Some(egui::Color32::from_rgba_unmultiplied(0xff, 0x70, 0x40, 0x50)),
+            Some(egui::Color32::from_rgb(0xb0, 0x30, 0x10)),
+        ),
+        AnnotationKind::GoodPiece => (
+            Some(egui::Color32::from_rgba_unmultiplied(0x40, 0xa0, 0x60, 0x55)),
+            Some(egui::Color32::from_rgb(0x20, 0x70, 0x30)),
+        ),
+        AnnotationKind::BadPiece => (
+            Some(egui::Color32::from_rgba_unmultiplied(0xd0, 0x80, 0x10, 0x55)),
+            Some(egui::Color32::from_rgb(0xa0, 0x55, 0x00)),
+        ),
+        AnnotationKind::NewMobility => (
+            Some(egui::Color32::from_rgba_unmultiplied(0x40, 0xa0, 0x80, 0x45)),
+            None,
+        ),
+        AnnotationKind::LostMobility => (
+            Some(egui::Color32::from_rgba_unmultiplied(0xa0, 0x40, 0x40, 0x45)),
+            None,
+        ),
+        AnnotationKind::Highlight => (
+            Some(egui::Color32::from_rgba_unmultiplied(0xff, 0xeb, 0x3b, 0x55)),
+            None,
+        ),
+        // Arrow-only kinds — square fallback is just a subtle tint.
+        AnnotationKind::BestMove | AnnotationKind::Attacker | AnnotationKind::Defender => {
+            (None, None)
+        }
+    }
+}
+
+fn arrow_color(kind: AnnotationKind) -> egui::Color32 {
+    match kind {
+        AnnotationKind::BestMove => egui::Color32::from_rgba_unmultiplied(0x30, 0x80, 0xff, 0xd0),
+        AnnotationKind::Capture => egui::Color32::from_rgba_unmultiplied(0xff, 0x60, 0x20, 0xd0),
+        AnnotationKind::Attacker => egui::Color32::from_rgba_unmultiplied(0xff, 0x40, 0x40, 0xd0),
+        AnnotationKind::Defender => egui::Color32::from_rgba_unmultiplied(0x40, 0xa0, 0x60, 0xd0),
+        AnnotationKind::Threat => egui::Color32::from_rgba_unmultiplied(0xff, 0x40, 0x40, 0xd0),
+        AnnotationKind::KingRing => egui::Color32::from_rgba_unmultiplied(0xb0, 0x30, 0x10, 0xd0),
+        AnnotationKind::GoodPiece => egui::Color32::from_rgba_unmultiplied(0x20, 0x70, 0x30, 0xd0),
+        AnnotationKind::BadPiece => egui::Color32::from_rgba_unmultiplied(0xa0, 0x55, 0x00, 0xd0),
+        AnnotationKind::NewMobility => egui::Color32::from_rgba_unmultiplied(0x20, 0x90, 0x60, 0xd0),
+        AnnotationKind::LostMobility => {
+            egui::Color32::from_rgba_unmultiplied(0xa0, 0x40, 0x40, 0xd0)
+        }
+        AnnotationKind::Highlight => egui::Color32::from_rgba_unmultiplied(0xff, 0xc0, 0x10, 0xd0),
+    }
+}
+
+fn draw_arrow(
+    painter: &egui::Painter,
+    from: egui::Pos2,
+    to: egui::Pos2,
+    cell: f32,
+    kind: AnnotationKind,
+) {
+    let color = arrow_color(kind);
+    let dir = to - from;
+    let len = dir.length();
+    if len < 1.0 {
+        return;
+    }
+    let unit = dir / len;
+    // Inset both endpoints by ~25% of a cell so the arrow doesn't
+    // visually cover the pieces it's connecting.
+    let inset = cell * 0.28;
+    let shaft_from = from + unit * inset;
+    let head_tip = to - unit * inset;
+    let stroke_w = cell * 0.10;
+    painter.line_segment(
+        [shaft_from, head_tip],
+        egui::Stroke::new(stroke_w, color),
+    );
+    // Arrowhead: filled triangle.
+    let head_len = cell * 0.22;
+    let head_w = cell * 0.16;
+    let back = head_tip - unit * head_len;
+    let perp = egui::vec2(-unit.y, unit.x);
+    let left = back + perp * head_w;
+    let right = back - perp * head_w;
+    painter.add(egui::Shape::convex_polygon(
+        vec![head_tip, left, right],
+        color,
+        egui::Stroke::NONE,
+    ));
 }
 
 fn piece_glyph(piece: Piece) -> &'static str {

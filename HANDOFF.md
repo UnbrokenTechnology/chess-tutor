@@ -12,11 +12,13 @@ A **chess tutor**, not a chess engine. The product surface is move-by-move teach
 
 UIs: CLI (`chess-tutor`), egui desktop (`chess-tutor-desktop`), planned Apple + Android. FFI crate (`core/ffi/`) is the prerequisite for the platform apps and doesn't exist yet.
 
-Tests: **673 engine (+4 ignored) + 105 narration + 49 cli = 827 passing**, clippy clean.
+Tests: **703 engine (+4 ignored) + 105 narration + 33 cli + 6 ui = 847 passing**, clippy clean.
 
 ## Currently iterating on: teaching UX
 
 Engine perf is in a good place (sub-300 ms retrospective on hard positions, 43 s for the full d=20 bench at 8 threads). Further perf has diminishing returns relative to the UX work that is now the bottleneck on the actual product.
+
+The interactive retrospective landed: the desktop side panel now renders structured cards (heading, score-delta chip, sentiment-coloured strip, click-to-expand detail) instead of a monospace text blob. Clicking a card surfaces that item's spatial story on the board (square highlights + arrows) via a new `BoardView.annotations` overlay layer. View-model lives in [`core/ui/src/retrospective_view.rs`](core/ui/src/retrospective_view.rs); CLI keeps using the unchanged `format_retrospective` text path.
 
 → **[`HANDOFF-ux.md`](HANDOFF-ux.md)** — teaching layer state, deferred Phase 2/4/5 work, narration tuning, UX platform tasks, live-play tuning loop. Read this when iterating on teaching UX.
 

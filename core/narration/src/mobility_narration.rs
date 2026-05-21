@@ -107,11 +107,18 @@ mod tests {
         theirs_pre: MobilityBreakdown,
         theirs_post: MobilityBreakdown,
     ) -> MobilityOutcome {
+        // The narration tests only exercise the per-piece-type
+        // breakdown; per-piece tracking arrived for visual highlights
+        // and isn't consumed here.
         MobilityOutcome {
             ours_pre,
             ours_post,
             theirs_pre,
             theirs_post,
+            ours_per_piece_pre: Vec::new(),
+            ours_per_piece_post: Vec::new(),
+            theirs_per_piece_pre: Vec::new(),
+            theirs_per_piece_post: Vec::new(),
         }
     }
 

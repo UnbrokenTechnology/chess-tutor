@@ -504,7 +504,7 @@ fn render_current(
     manual_flip: bool,
 ) -> io::Result<()> {
     let last_move = history.last().map(|h| h.mv);
-    let view = BoardView::compose(pos, manual_flip, last_move, None, &[], None);
+    let view = BoardView::compose(pos, manual_flip, last_move, None, &[], None, Vec::new());
     writeln!(out)?;
     write!(
         out,

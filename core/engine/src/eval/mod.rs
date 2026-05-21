@@ -168,6 +168,15 @@ pub(crate) struct Evaluator<'a> {
     /// enemy (double-counted for pieces that attack more than one).
     /// Indexed by the attacker's colour.
     pub king_attacks_count: [i32; 2],
+
+    /// Opt-in per-piece mobility tracker. `None` in the hot search
+    /// path (default) — pieces::evaluate's mobility loop bypasses
+    /// the bookkeeping. `Some(vec)` when callers want per-piece
+    /// granularity (analysis snapshots used by the retrospective
+    /// "which bishop's activity improved?" highlight). Each entry is
+    /// `(square, color, piece_type, score)` for one minor/major
+    /// piece's mobility contribution.
+    pub per_piece_mobility: Option<Vec<(Square, Color, PieceType, Score)>>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -195,6 +204,7 @@ impl<'a> Evaluator<'a> {
             king_attackers_count: [0; 2],
             king_attackers_weight: [0; 2],
             king_attacks_count: [0; 2],
+            per_piece_mobility: None,
         }
     }
 
