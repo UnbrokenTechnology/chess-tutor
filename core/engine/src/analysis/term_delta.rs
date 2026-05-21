@@ -2,7 +2,7 @@
 //! cumulative-threshold prefix selector the retrospective uses to
 //! answer "which terms carried the swing?"
 
-use super::{TermId, Timing};
+use super::TermId;
 use crate::eval::EvalTrace;
 use crate::types::{Piece, Score};
 
@@ -32,33 +32,26 @@ pub struct TermDelta {
 }
 
 /// Compute the full tapered-cp breakdown between the pre-move trace
-/// and either the ply-1 or settled-ply post-move trace, picking per
-/// [`TermId::timing`]:
+/// and the ply-1 (immediately-after-user-move) trace.
 ///
-/// - Outcome terms ([`TermId::MaterialPieceValue`], [`TermId::Imbalance`])
-///   diff against `settled` — the line's eventual settled-ply trade.
-/// - State terms (everything else) diff against `ply1` — the board
-///   immediately after the user's move, with no opponent reply
-///   bundled in.
+/// Every term diffs against the same `post` snapshot — the board
+/// state right after the user's single move, with no opponent reply
+/// bundled in. This is the honest "what changed on the board" signal.
+/// Tactical questions ("does this move lead to a winning combination
+/// 10 plies deep?") are answered by the search's *score* and PV, not
+/// by per-term deltas at a leaf-trace — see [`super::MoveAnalysis`]'s
+/// `score`, the [`super::MaterialOutcome`] PV walker, and the
+/// surprise classifier ([`super::SurpriseKind`]).
 ///
-/// Each term's tapered cp uses the phase + scale factor of the trace
-/// it was diffed against, matching how the main evaluator would
-/// taper a swing in isolation.
+/// Each term's tapered cp uses the phase + scale factor of `post`,
+/// matching how the main evaluator would taper a swing in isolation.
 ///
 /// Returns a `Vec<TermDelta>` of length [`TermId::ALL`], sorted by
 /// `|delta_tapered|` descending. Ties preserve [`TermId::ALL`] order.
-pub fn compute_term_deltas(
-    pre: &EvalTrace,
-    ply1: &EvalTrace,
-    settled: &EvalTrace,
-) -> Vec<TermDelta> {
+pub fn compute_term_deltas(pre: &EvalTrace, post: &EvalTrace) -> Vec<TermDelta> {
     let mut deltas: Vec<TermDelta> = TermId::ALL
         .iter()
         .map(|&term| {
-            let post = match term.timing() {
-                Timing::Outcome => settled,
-                Timing::State => ply1,
-            };
             let pre_score = term.net_score(pre);
             let post_score = term.net_score(post);
             let diff = post_score - pre_score;
@@ -187,12 +180,10 @@ mod tests {
         let pre = trace_at(128, 64);
         let mut post = trace_at(128, 64);
 
-        // MobilityKnight is a State term — read from the ply1 trace.
         post.mobility[Color::White.index()].knight = Score::new(200, 0);
-        // ThreatsHanging is a State term too.
         post.threats[Color::White.index()].hanging = Score::new(20, 0);
 
-        let deltas = compute_term_deltas(&pre, &post, &post);
+        let deltas = compute_term_deltas(&pre, &post);
         assert_eq!(deltas.len(), TermId::ALL.len());
         assert_eq!(deltas[0].term, TermId::MobilityKnight);
         assert_eq!(deltas[0].delta_mg, 200);
@@ -202,45 +193,29 @@ mod tests {
     }
 
     #[test]
-    fn compute_term_deltas_outcome_terms_use_settled_state_terms_use_ply1() {
+    fn compute_term_deltas_material_diffs_against_post_not_some_deeper_trace() {
+        // Every term — Material included — reads from the same `post`
+        // snapshot. The teaching surface uses the immediate ply-1
+        // state; tactical projections deeper in the PV are surfaced
+        // through `MoveAnalysis.score` / `MaterialOutcome` / the
+        // surprise classifier, not through term deltas.
         let pre = trace_at(128, 64);
-        let mut ply1 = trace_at(128, 64);
-        let mut settled = trace_at(128, 64);
+        let mut post = trace_at(128, 64);
+        post.material.piece_value = Score::new(80, 80);
 
-        // MaterialPieceValue is Outcome → reads from `settled`. A
-        // ply-1 value should be ignored.
-        ply1.material.piece_value = Score::new(999, 999);
-        settled.material.piece_value = Score::new(80, 80);
-
-        // ThreatsHanging is State → reads from `ply1`. A settled
-        // value should be ignored.
-        ply1.threats[Color::White.index()].hanging = Score::new(40, 40);
-        settled.threats[Color::White.index()].hanging = Score::new(999, 999);
-
-        let deltas = compute_term_deltas(&pre, &ply1, &settled);
+        let deltas = compute_term_deltas(&pre, &post);
         let mat = deltas
             .iter()
             .find(|d| d.term == TermId::MaterialPieceValue)
             .unwrap();
-        let hanging = deltas
-            .iter()
-            .find(|d| d.term == TermId::ThreatsHanging)
-            .unwrap();
-        assert_eq!(
-            mat.delta_mg, 80,
-            "MaterialPieceValue must read from settled trace"
-        );
-        assert_eq!(
-            hanging.delta_mg, 40,
-            "ThreatsHanging must read from ply1 trace, not settled"
-        );
+        assert_eq!(mat.delta_mg, 80);
     }
 
     #[test]
     fn compute_term_deltas_zero_trace_yields_all_zeros() {
         let pre = trace_at(128, 64);
         let post = trace_at(128, 64);
-        let deltas = compute_term_deltas(&pre, &post, &post);
+        let deltas = compute_term_deltas(&pre, &post);
         assert!(deltas.iter().all(|d| d.delta_tapered == 0));
         assert_eq!(deltas.len(), TermId::ALL.len());
     }
@@ -252,7 +227,7 @@ mod tests {
         post.pawns[Color::Black.index()].isolated = Score::new(-5, -15);
         let mut pre_with_pawn = pre;
         pre_with_pawn.pawns[Color::Black.index()].isolated = Score::new(-20, -60);
-        let deltas = compute_term_deltas(&pre_with_pawn, &post, &post);
+        let deltas = compute_term_deltas(&pre_with_pawn, &post);
         let d = deltas
             .iter()
             .find(|d| d.term == TermId::PawnsIsolated)

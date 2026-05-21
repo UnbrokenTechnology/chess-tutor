@@ -150,7 +150,7 @@ pub use pieces_positional_outcome::{compute_pieces_positional_outcome, PiecesPos
 pub use space_outcome::{compute_space_outcome, SpaceOutcome};
 pub use surprise::{detect_surprise, SurpriseKind};
 pub use term_delta::{compute_term_deltas, cumulative_prefix, TermDelta};
-pub use term_id::{TermId, Timing};
+pub use term_id::TermId;
 pub use threats_outcome::{
     compute_threats_outcome, filter_guaranteed_targets, HangingPiece, PieceLocation, PressureKind,
     PressuredPiece, ThreatsOutcome,

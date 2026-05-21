@@ -14,28 +14,6 @@
 use crate::eval::EvalTrace;
 use crate::types::Score;
 
-/// Which trace a term's delta should diff against.
-///
-/// - **Outcome** terms ([`TermId::Material`], [`TermId::Imbalance`])
-///   read at the **settled ply** because they describe the line's
-///   eventual outcome — captures along the PV and the piece-pair
-///   shifts that follow. Pairs with the material-narrator's
-///   capture-sequence framing.
-/// - **State** terms read at **ply 1** (immediately after the user's
-///   move). Threats / king safety / pawn structure / mobility / piece
-///   placement / passed pawns / space / initiative all describe the
-///   board state right after the user's single move, *not* what the
-///   engine's projected continuation produces several plies later.
-///   This avoids attributing distant-future hangs or distant-future
-///   bishop reach to the user's one move.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Timing {
-    /// Diff against the settled-ply trace.
-    Outcome,
-    /// Diff against the ply-1 (post-user-move) trace.
-    State,
-}
-
 /// One identifier per granular sub-term of an [`EvalTrace`]. Used by
 /// [`super::TermDelta`] so a UI can attribute a tapered cp swing to a
 /// named chess concept.
@@ -236,9 +214,12 @@ impl TermId {
         match self {
             // Colloquial chess "material" — piece counts only.
             TermId::MaterialPieceValue => "material",
-            // PSQT positional contribution — pieces ending up on
-            // better/worse squares per the piece-square tables.
-            TermId::MaterialPsqPositional => "piece placement",
+            // PSQT positional contribution — each piece's textbook
+            // "is this a good square for my type?" bonus from the
+            // pre-baked piece-square tables. Independent of any
+            // other piece on the board. "Development" is the
+            // chess-native label for this concept.
+            TermId::MaterialPsqPositional => "development",
             TermId::Imbalance => "piece imbalance",
             TermId::Initiative => "initiative",
             TermId::Space => "space",
@@ -282,27 +263,6 @@ impl TermId {
             TermId::ThreatsByPawnPush => "a pawn push would attack a piece",
             TermId::ThreatsKnightOnQueen => "knight one move from the queen",
             TermId::ThreatsSliderOnQueen => "rook/bishop lined up on the queen",
-        }
-    }
-
-    /// Whether this term's delta should diff against the settled-ply
-    /// trace (Outcome) or the ply-1 trace (State). See [`Timing`].
-    pub const fn timing(self) -> Timing {
-        match self {
-            // Both halves of the split material score are settled-ply
-            // outcomes — captures and PSQ shifts both describe the
-            // line's eventual landing, the same story the material
-            // narrator's capture sequence tells. Imbalance shifts
-            // when piece counts change and shares the same framing.
-            TermId::MaterialPieceValue
-            | TermId::MaterialPsqPositional
-            | TermId::Imbalance => Timing::Outcome,
-            // Everything else is state immediately after the user's
-            // move. Initiative is a complexity correction tied to the
-            // current position; surfacing it at settled-ply would
-            // misattribute downstream-PV complexity to the user's
-            // single move.
-            _ => Timing::State,
         }
     }
 
@@ -473,15 +433,16 @@ mod tests {
         assert_eq!(TermId::KingDanger.pretty_label(), "king safety");
         assert_eq!(TermId::PawnsWeakUnopposed.pretty_label(), "weak pawns");
         // The split material score: piece_value reads as colloquial
-        // "material" in prose, psq_positional reads as "piece
-        // placement" — pieces ending up on better/worse squares.
+        // "material" in prose, psq_positional reads as "development"
+        // — the chess-native term for "are your pieces on their
+        // textbook-good squares?"
         assert_eq!(
             TermId::MaterialPieceValue.pretty_label(),
             "material",
         );
         assert_eq!(
             TermId::MaterialPsqPositional.pretty_label(),
-            "piece placement",
+            "development",
         );
     }
 

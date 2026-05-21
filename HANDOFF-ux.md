@@ -83,7 +83,7 @@ What each card produces today, and what's still rough:
 | Mobility        | `SquareHighlight { GoodPiece / BadPiece }` on the **specific** piece(s) whose per-square mobility delta aligns with the card. Uses `Evaluator::per_piece_mobility` opt-in tracker; threshold + alignment filter. | ✅ Solid.    |
 | Pawn Structure  | None (text-only).                                                                                                         | Needs work. |
 | Passed Pawns    | None (Score-driven, no square list).                                                                                      | Needs work. |
-| Piece Placement | None (same shape as passed pawns).                                                                                        | Needs work. |
+| Piece Placement | None yet — one card per `PiecesBreakdown` sub-signal × side (outpost claimed, rook on open file, bishop blocked by own pawns, etc.) above 20 cp; bishop_pawns suppressed when geometry unchanged. Each card knows its target square type but doesn't yet emit highlights. | Needs spatial work; cards themselves are honest. |
 | Secondary       | None — it's the fallback "Helped / Hurt" list, not spatial.                                                              | OK as-is.   |
 
 ### How the mobility per-piece tracker works (engine-side)

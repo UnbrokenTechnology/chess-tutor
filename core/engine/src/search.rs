@@ -2231,9 +2231,14 @@ pub fn stm_after_ply(root_stm: crate::types::Color, ply: usize) -> crate::types:
 
 /// Compute the settled-ply index for a PV's per-ply trace sequence.
 ///
-/// The settled ply is the last index `i` (starting at `i = 2`) where
-/// the white-POV score differs from the score **two plies earlier** by
-/// at least [`SETTLED_THRESHOLD_CP`], or 0 if no such difference exists.
+/// Walks backward from the end of the PV looking for the latest
+/// index `i` (≥ 2) where the white-POV score differs from the score
+/// **two plies earlier** by at least [`SETTLED_THRESHOLD_CP`]. When
+/// such an `i` exists *and* the PV has at least one more ply, we
+/// return `i + 1` — the position right after the last shift has
+/// fully resolved. When the PV ends mid-shift (the unstable `i` is
+/// the leaf), we return `i` itself, since there's no post-resolution
+/// trace to land on. When the PV is uniformly quiet, we return 0.
 ///
 /// **Why 2 plies, not 1**: every move temporarily shifts the eval in
 /// the mover's favor — their choice is committed but the opponent
@@ -2243,6 +2248,14 @@ pub fn stm_after_ply(root_stm: crate::types::Color, ply: usize) -> crate::types:
 /// apart) represent complete exchanges, so the delta between them
 /// reflects what really changed — material swings, positional gains,
 /// etc. — not the artificial side-to-move asymmetry.
+///
+/// **Why land on `i + 1`**: with the 2-ply rule the largest
+/// same-side jump often lands on the peak of a mid-exchange position
+/// (e.g. white plays Bxe6, ply `i`'s trace shows white temporarily
+/// up a bishop, but black's recapture on ply `i + 1` is already
+/// part of the PV and restores parity). Consumers that walk the PV
+/// up to the settled ply want the *resolved* position, not the
+/// peak.
 ///
 /// `root_stm` is the side to move at the PV's root; the helper walks
 /// the alternation to pick the right sign for each ply's white-POV
@@ -2264,7 +2277,12 @@ fn compute_settled_ply(traces: &[EvalTrace], root_stm: crate::types::Color) -> O
     for i in (2..white_pov.len()).rev() {
         let delta = (white_pov[i] - white_pov[i - 2]).abs();
         if delta >= SETTLED_THRESHOLD_CP {
-            return Some(i);
+            // Prefer the post-resolution ply when one exists.
+            return if i + 1 < white_pov.len() {
+                Some(i + 1)
+            } else {
+                Some(i)
+            };
         }
     }
     Some(0)
@@ -2950,9 +2968,25 @@ mod tests {
         // 180), ply 5 = 480 (same side as ply 3 = 300, diff 180).
         // Under 2-ply comparison both plies 4 and 5 show big deltas
         // against their same-side predecessor; scanning backward
-        // finds the last one at ply 5.
+        // finds the last unstable at ply 5. PV ends mid-shift (no
+        // post-resolution ply available), so we land on 5 itself.
         use crate::types::Color;
         let traces = traces_from_white_pov(&[20, 300, 20, 300, 200, 480]);
+        assert_eq!(compute_settled_ply(&traces, Color::White), Some(5));
+    }
+
+    #[test]
+    fn settled_ply_lands_on_post_resolution_when_available() {
+        // Mid-exchange peak modelled on the Nf3 → Bxe6 fxe6 scenario:
+        // ply 4 (white-side) shows white temporarily up a bishop
+        // (white_pov 950, up from 50 two plies back — 900 cp jump,
+        // unstable). Ply 5 (black-side post-recapture) restores
+        // parity (white_pov 60, 10 cp from ply 3's 50 — stable).
+        // Walking backward, the loop finds ply 4 unstable; with a
+        // post-resolution ply available (5), settle there rather
+        // than on the peak (4).
+        use crate::types::Color;
+        let traces = traces_from_white_pov(&[0, 0, 50, 50, 950, 60]);
         assert_eq!(compute_settled_ply(&traces, Color::White), Some(5));
     }
 
