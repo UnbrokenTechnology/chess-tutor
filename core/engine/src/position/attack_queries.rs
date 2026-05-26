@@ -3,7 +3,9 @@
 //! move's origin.
 
 use super::Position;
-use crate::attacks::{aligned, king_attacks, knight_attacks, pawn_attacks_from, rook_pseudo_attacks};
+use crate::attacks::{
+    aligned, between_bb, king_attacks, knight_attacks, pawn_attacks_from, rook_pseudo_attacks,
+};
 use crate::bitboard::{square_bb, Bitboard};
 use crate::magics::{bishop_attacks, queen_attacks, rook_attacks};
 use crate::types::{Color, Move, MoveKind, Piece, PieceType, Square};
@@ -134,6 +136,77 @@ impl Position {
                 let (rfrom, rto) = super::make_move::castling_rook_squares(us, to);
                 let occ_after = (occ ^ from_bb ^ square_bb(rfrom)) | square_bb(to) | square_bb(rto);
                 rook_pseudo_attacks(rto).contains(ksq) && rook_attacks(rto, occ_after).contains(ksq)
+            }
+        }
+    }
+
+    /// Tests whether the pseudo-legal move `mv` is **legal** (leaves our
+    /// own king unattacked) **without making the move**. Mirrors
+    /// Stockfish 11's `Position::legal` (position.cpp:492-549): the
+    /// en-passant and castling special cases, the king-destination-safety
+    /// test, and the pin test (`!blockers ∨ aligned`). This is the
+    /// pre-`do_move` legality oracle that lets the search loop prune
+    /// before making a move (B1) and reuse cached check info (B3).
+    ///
+    /// **Adaptation to our architecture:** for king moves SF tests
+    /// `attackers_to(to)` against the *current* occupancy (the king still
+    /// on `from`), relying on its evasion *generator* to exclude moves
+    /// that slide along a checking ray. We generate the full pseudo-legal
+    /// set instead, so a king sliding away along a checker's ray would be
+    /// mis-judged safe (the king on `from` masks the slider). We therefore
+    /// vacate `from` from the occupancy (`occ ^ from`) before the
+    /// attackers test — revealing exactly that slider. Removing the king
+    /// can only expose a *real* attacker (one it was blocking on its way
+    /// to `to`), never invent a false one, so this is strictly correct.
+    pub fn legal(&self, mv: Move) -> bool {
+        let us = self.side_to_move;
+        let them = !us;
+        let from = mv.from();
+        let to = mv.to();
+        let occ = self.occupied();
+        let enemy = self.pieces_by_color(them);
+
+        match mv.kind() {
+            MoveKind::EnPassant => {
+                // Make the captures-and-move occupancy explicitly and test
+                // the king for a freshly-uncovered rook/bishop ray — the
+                // one legality case make/unmake is genuinely simplest for
+                // (two pawns leave the same rank, possibly opening a pin).
+                let ksq = self.king_square(us);
+                let capsq = Square::new(to.file(), from.rank());
+                let occ_after = (occ ^ square_bb(from) ^ square_bb(capsq)) | square_bb(to);
+                let rq =
+                    self.pieces_of(them, PieceType::Rook) | self.pieces_of(them, PieceType::Queen);
+                let bq =
+                    self.pieces_of(them, PieceType::Bishop) | self.pieces_of(them, PieceType::Queen);
+                (rook_attacks(ksq, occ_after) & rq).is_empty()
+                    && (bishop_attacks(ksq, occ_after) & bq).is_empty()
+            }
+            MoveKind::Castling => {
+                // The king's path (destination + the square it steps over)
+                // must be free of enemy attack. Path *emptiness* and the
+                // not-in-check precondition are enforced by pseudo-legal
+                // generation; here we re-verify path *safety* (SF
+                // position.cpp:523-532). Current occupancy is correct: the
+                // king on `from` never masks an attacker of a path square
+                // in standard chess.
+                let path = between_bb(from, to) | square_bb(to);
+                for sq in path {
+                    if (self.attackers_to(sq, occ) & enemy).any() {
+                        return false;
+                    }
+                }
+                true
+            }
+            MoveKind::Normal | MoveKind::Promotion => {
+                if self.moved_piece(mv).kind() == PieceType::King {
+                    (self.attackers_to(to, occ ^ square_bb(from)) & enemy).is_empty()
+                } else {
+                    // A non-king move is legal iff the piece isn't pinned,
+                    // or it stays on the king↔piece ray.
+                    let ksq = self.king_square(us);
+                    !self.blockers_for_king(us).contains(from) || aligned(from, to, ksq)
+                }
             }
         }
     }
@@ -322,5 +395,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- legal ------------------------------------------------------
+
+    /// `legal()` must agree with the authoritative legal-move generator:
+    /// for every *pseudo-legal* move, `legal(m)` is true iff the fully-
+    /// legal generator includes it. This covers pins, king-into-attack,
+    /// king-sliding-along-a-checking-ray (the `occ ^ from` adaptation),
+    /// en passant that opens a pin, and ordinary evasions.
+    #[test]
+    fn legal_matches_legal_move_generator() {
+        use crate::movegen::{generate_legal_moves, generate_pseudo_legal_moves, MoveList};
+        let fens = [
+            // Start position.
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            // Kiwipete: castling both sides, multiple pins.
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R b KQkq - 0 1",
+            // Position 3 (Roycroft): slider geometry, a pinned pawn.
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            // En passant that would expose the white king to a rank pin
+            // (the classic illegal-ep: K, two pawns, and a black rook on
+            // the 5th rank). exd6 e.p. removes both the e5 and d5 pawns
+            // from rank 5, uncovering the h5 rook.
+            "8/8/8/K1pP3r/8/8/8/7k w - c6 0 1",
+            // White king in check from a rook along rank 1; king-slide-
+            // along-ray must be rejected (needs the occ^from reveal).
+            "k7/8/8/8/8/8/8/4K2r w - - 0 1",
+            // Pinned knight (cannot move off the pin ray).
+            "4rk2/8/8/8/8/8/4N3/4K3 w - - 0 1",
+        ];
+        for fen in fens {
+            let mut p = Position::from_fen(fen).unwrap();
+            let mut pseudo = MoveList::new();
+            generate_pseudo_legal_moves(&p, &mut pseudo);
+            let mut legal = MoveList::new();
+            generate_legal_moves(&mut p, &mut legal);
+            for &m in &pseudo {
+                let in_legal_set = legal.iter().any(|&x| x == m);
+                assert_eq!(
+                    p.legal(m),
+                    in_legal_set,
+                    "legal({m:?}) disagreed with generator (expected {in_legal_set}) in FEN {fen}"
+                );
+            }
+        }
+    }
+
+    /// Castling path safety: a king passing over an attacked square is
+    /// illegal even though its destination square is safe (the make/unmake
+    /// filter alone can't see this — the king jumps).
+    #[test]
+    fn legal_rejects_castling_over_attacked_square() {
+        // Black rook on d8 rakes the d-file; white queenside castling steps
+        // the king over d1 → illegal. Kingside (over f1, g1 — unattacked)
+        // stays legal.
+        let p = Position::from_fen("3rk3/8/8/8/8/8/8/R3K2R w KQ - 0 1").unwrap();
+        assert!(
+            !p.legal(Move::castling(Square::E1, Square::C1)),
+            "queenside castling over attacked d1 must be illegal"
+        );
+        assert!(
+            p.legal(Move::castling(Square::E1, Square::G1)),
+            "kingside castling (f1/g1 unattacked) must be legal"
+        );
     }
 }
