@@ -172,7 +172,7 @@ Current magic bitboards (`core/engine/src/magics.rs`) find magics at first use v
 Prefer many small focused files over grab-bag ones. A file that does one thing is easier to review, test, and reason about. Specifically:
 - Each evaluation term in its own file (`eval/mobility.rs`, `eval/king_safety.rs`, `eval/passed_pawns.rs`, ...).
 - Each search heuristic in its own file where it's self-contained.
-- Tests live in sibling `<name>_tests.rs` files (or `<name>/tests.rs` for directory modules), declared `#[cfg(test)] mod tests;` from the parent module. Keeps private-symbol access for the test module while keeping the source file readable. Cargo's crate-root `tests/` directory is allowed for tests that only need the public API, but is not the default — most of our tests reach into private surfaces.
+- Tests live in sibling `<name>_tests.rs` files — declared *inside the source file* as `#[cfg(test)] #[path = "<name>_tests.rs"] mod tests;` (the `#[path]` is what points a flat sibling at the `tests` child module; without it `mod tests;` would look for a `<name>/tests.rs` subdirectory). Directory modules use `<name>/tests.rs` declared `#[cfg(test)] mod tests;` from `mod.rs`. Either way the test module stays a child of its source module, so it keeps `super::*` private-symbol access while the source file stays readable. The sibling file holds the module *body* (starts with `use super::*;`), not a wrapping `mod tests { }`. Cargo's crate-root `tests/` directory is allowed for tests that only need the public API, but is not the default — most of our tests reach into private surfaces.
 
 ### Don't add features the task doesn't require
 
