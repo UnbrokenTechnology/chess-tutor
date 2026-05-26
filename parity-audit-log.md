@@ -276,6 +276,35 @@ Each is landed and benched individually (single-thread `bench 16 1 14` for turna
 
 ---
 
+## Faithful-port bundle phase (2026-05-26, session 2)
+
+Re-audit (3 subagents + direct verification) overturned the prior "faithful port, only balance-dependent pruning left" verdict. Found **latent tuning bugs the earlier audit rubber-stamped**, all verified against both source trees:
+
+- **LMR table `23.4` — SF11 is `24.8`** (search.cpp:197 single-thread). `23.4` appears nowhere in SF11; the code comment + a memory note both wrongly claimed it matched. Systematic under-reduction.
+- **LMR move-count gate `4` — SF reduces from move 2** (`moveCount > 1 + rootNode + …`, search.cpp:1118). We full-depthed 3 extra moves/node.
+- **Missing `d != newDepth` re-search guard** (search.cpp:1197).
+- Capture SEE-prune margin `200` vs SF `194` + an invented `depth ≤ 6` cap; NMP base wrong at depth 3 (`/200` vs `/192`); MP1 capture ordering subtracts attacker value where SF subtracts nothing.
+- **Structural NPS leak the prior audit missed:** we `do_move` *before* pruning then `undo_move` on a prune (SEE-surviving captures `do_move` twice); SF prunes before making the move. Node-neutral; ~half the runtime gap.
+
+**Key reframe:** these weren't independent — the LMR de-tuning (gate 4, table 23.4, no relaxers) was *compensation* for SF's LMR relaxers being absent. The prior A/Bs that "proved SF's values regress" ran on a tree already distorted by these bugs, so those conclusions were untrustworthy. The fix is the **complete balanced subsystem**, never tried before.
+
+### Landed (each A/B'd, warm-TT, 1T)
+
+| Commit | Change | d=14 nodes | d=20 nodes |
+|---|---|---:|---:|
+| (baseline `fbec20f`) | — | 12,390,837 | 191,634,106 |
+| `5a2a68a` | Quiet-LMR faithful bundle (gate→2, table→24.8, re-search guard, relaxers ttPv/oppMC/ttCapture/escape/ttHitAverage, didLMR feedback) | 11,806,689 (−4.7%) | 183,254,002 (−4.4%) |
+| `063266e` | Capture-LMR (SF 4-condition gate + late-capture r++) | 10,361,130 (−12.2%) | 152,970,498 (−16.5%) |
+| `4c40c1d` | Refined `eval` vs raw `staticEval` for pruning gates (S4) | 10,227,018 (−1.3%) | 147,316,914 (−3.7%) |
+
+**Cumulative: d=14 −17.5% (1.89× → 1.56× SF), d=20 −23.1% (2.82× → 2.17× SF). All 726 engine tests pass.** Capture-LMR — which regressed +23% *in isolation* in the prior audit — is a −16.5% win once the relaxers are present, decisively confirming SF's pruning is a balanced set that cannot be A/B'd piece-by-piece.
+
+### Attempted, regressed, reverted
+
+- **Faithful NMP (refined-eval gate + `(854+68·depth)/258` reduction + depth≥13 verification w/ nmpMinPly/nmpColor).** A/B at d=14: +4.3% with our old R, +12.4% with SF's R. SF's aggressive NMP is balanced by companions not yet ported (qsearch ttValue refinement Q3/Q4, razoring S6, after-null eval S5). Reverted; retry as part of the qsearch/eval-balance bundle. (The eval-refinement S4 it rode on was kept — it's a standalone win.)
+
+---
+
 ## Bench output archive
 
 ### `bench 16 1 13` — ours, warm-TT (2026-05-25)
