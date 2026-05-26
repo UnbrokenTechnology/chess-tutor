@@ -1087,9 +1087,18 @@ fn partial_insertion_sort(buf: &mut [ScoredMove], limit: i32) {
     }
 }
 
-/// Simplified MVV-LVA capture scoring: the victim's mid-game value scaled
-/// by 6 (MVV) minus the attacker's mid-game value (LVA). High = big
-/// victim captured cheaply.
+/// MVV-LVA capture scoring: the victim's mid-game value scaled by 6 (MVV)
+/// minus the attacker's mid-game value (LVA). High = big victim captured
+/// cheaply.
+///
+/// NOTE: SF11 (`movepick.cpp:110-111`) uses pure MVV (`victim*6`) with no
+/// static LVA term, relying on the learned capture-history table for the
+/// attacker signal. We deliberately keep the `-attacker` LVA tiebreak: an
+/// A/B during the parity audit (2026-05-26) showed dropping it *regressed*
+/// our node count by 1.4% at d=14 1T (12.39M → 12.56M). Our capture
+/// history is less developed within short searches, so the static LVA
+/// still adds useful ordering signal that SF gets from its capture
+/// history. Justified deviation from SF.
 fn mvv_lva(pos: &Position, mv: Move) -> i32 {
     let victim = captured_piece_value(pos, mv).0;
     let attacker = Value::mg_of_piece(pos.moved_piece(mv).kind()).0;
