@@ -9,7 +9,7 @@ Branch: **main**. (W1 + the merged UX WIP + W2 all live on main now.)
 
 ---
 
-## Status: IN PROGRESS — 12 commits landed, ~3 files + 2 checkpoint files remain (movepick done; retrospective_view next)
+## Status: IN PROGRESS — 13 commits landed, ~2 files + 2 checkpoint files remain (pawns done; retrospective_view + main.rs next)
 
 **Done criteria (from ROADMAP):** every `.rs` *source* file ≤500 LOC (data
 tables like `psqt` and one cohesive eval term `pawns` are documented
@@ -101,7 +101,8 @@ Each split is small enough to also do by hand.
 | `e2a7649` | `analysis/threats_outcome.rs` (engine) | → `threats_outcome/{mod,types,lists,guaranteed,tests}.rs` (97/107/285/133/387). `list_pressured`→pub(super); `count_hanging` test helper moved into tests.rs. Bench 9,739,495; 728 engine tests. |
 | `395ce82` | `eval/mod.rs` (engine, HOT PATH) | → `eval/{mod,core,scale,trace,tests}.rs` (296/216/40/281/267). trace types (EvalTrace/MaterialBreakdown/MobilityBreakdown) → trace.rs; evaluate_inner + piece_value_balance → core.rs; scale_factor → scale.rs. PHASE_MAX/SCALE_NORMAL→pub(super); evaluate_inner/scale_factor→pub(super). `crate::eval::X` paths preserved via glob re-export. Bench 9,739,495, NPS within noise (no `#[inline]` needed — same-crate inlining holds); 728 engine tests. |
 | `7077c24` | `eval/pieces.rs` (engine, HOT PATH) | → `eval/pieces/{mod,tables,tests}.rs` (415/104/140). SF11 weight tables (MOBILITY_*, KING_ATTACK_WEIGHT, ROOK_ON_FILE, bonuses) → tables.rs as pub(super), imported via `use tables::*`. `crate::eval::pieces::{evaluate, PiecesBreakdown}` paths unchanged. Bench 9,739,495, NPS within noise (consts are compile-time, fully inlined); 728 engine tests. |
-| _pending_ | `movepick.rs` (engine, HOT PATH) | → `movepick/{mod,history,picker,helpers,tests}.rs` (266/359/456/88/578). history tables (Butterfly/Continuation/Capture/CounterMove) → history.rs; MovePicker FSM impl → picker.rs; pick_best_index/partial_insertion_sort/mvv_lva/captured_piece_value/is_pseudo_legal → helpers.rs (pub(super)). mod.rs keeps buffer pool + Stage + MovePicker struct + split_bufs. Sibling/child modules reach mod.rs privates (ScoredMove, split_bufs, consts) by descendant access; `pub use history::*` re-export keeps `crate::movepick::X` paths. Byte-faithful slice via /tmp script. Bench 9,739,495, NPS within noise; 728 engine tests. **NB: working-tree EOL is LF, not CRLF (git autocrlf stores LF; the log's earlier CRLF claim was a `grep $'\r'` quoting artifact).** |
+| _pending_ | `pawns.rs` (engine) | tests → `pawns_tests.rs` (335); source 679 LOC **kept whole** (documented >500 W2 exception — one cohesive eval term). Bench 9,739,495; 728 engine tests. |
+| `b71517f` | `movepick.rs` (engine, HOT PATH) | → `movepick/{mod,history,picker,helpers,tests}.rs` (266/359/456/88/578). history tables (Butterfly/Continuation/Capture/CounterMove) → history.rs; MovePicker FSM impl → picker.rs; pick_best_index/partial_insertion_sort/mvv_lva/captured_piece_value/is_pseudo_legal → helpers.rs (pub(super)). mod.rs keeps buffer pool + Stage + MovePicker struct + split_bufs. Sibling/child modules reach mod.rs privates (ScoredMove, split_bufs, consts) by descendant access; `pub use history::*` re-export keeps `crate::movepick::X` paths. Byte-faithful slice via /tmp script. Bench 9,739,495, NPS within noise; 728 engine tests. **NB: working-tree EOL is LF, not CRLF (git autocrlf stores LF; the log's earlier CRLF claim was a `grep $'\r'` quoting artifact).** |
 
 `CLAUDE.md` "Separation of concerns" bullet already updated (in `3a3d155`) to
 document the `#[path]` sibling-test convention precisely.
@@ -119,22 +120,18 @@ re-derive.
    (piece_name/article/capitalize/join_with_and/format_score_pawns/
    format_delta_pawns) → `helpers.rs` as `pub(crate)`. Each builder ≤380.
    No perf surface — build + ui tests (27).
-2. **`pawns.rs`** (engine, 1012) — **KEEP WHOLE** (user decision: one cohesive
-   eval term; splitting obscures the algorithm). Just extract its inline tests
-   to `pawns_tests.rs` and add a top-of-file note documenting the intentional
-   >500 source exception. Bench-neutral.
-3. **`main.rs`** (cli, 832). Mostly Clap arg-def boilerplate. Extract the
+2. **`main.rs`** (cli, 832). Mostly Clap arg-def boilerplate. Extract the
    `Cli`/`Command`/`EngineColor` clap definitions to a sibling (e.g.
    `cli_args.rs`) to get `main.rs` ≤500, OR document as a boilerplate
    exception. (Was flagged but not yet in the task list.)
 
 ### CHECKPOINT WITH USER before these two (per user, 2026-05-26):
 
-4. **`session.rs`** (ui, 2107, god-object). Plan: `session/{mod (struct +
+3. **`session.rs`** (ui, 2107, god-object). Plan: `session/{mod (struct +
    ctor + accessors), moves, game_flow, worker, event_dispatch, view_builders,
    game_state, learning}.rs`. Fields → `pub(crate)`. No inline tests. Risky —
    pause for review before starting.
-5. **`search.rs`** (engine, 3539, HOTTEST PATH). User chose **decompose +
+4. **`search.rs`** (engine, 3539, HOTTEST PATH). User chose **decompose +
    bench-lock**: file-split (qsearch, pruning helpers, history helpers,
    settled_ply, aspiration/run, SearchContext/state to siblings) AND decompose
    the ~1373-LOC `negamax` into sub-functions to hit ≤500 — node count
