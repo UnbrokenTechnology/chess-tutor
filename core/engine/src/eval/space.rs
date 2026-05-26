@@ -7,7 +7,7 @@
 //! the reference's `SpaceThreshold` gate.
 
 use super::Evaluator;
-use crate::bitboard::{CENTER_FILES, RANK_2, RANK_3, RANK_4, RANK_5, RANK_6, RANK_7};
+use crate::bitboard::{Bitboard, CENTER_FILES, RANK_2, RANK_3, RANK_4, RANK_5, RANK_6, RANK_7};
 use crate::types::{Color, Direction, PieceType, Score, Value};
 
 /// Below this amount of total non-pawn material the space term is not
@@ -15,12 +15,20 @@ use crate::types::{Color, Direction, PieceType, Score, Value};
 /// matter.
 const SPACE_THRESHOLD: Value = Value(12_222);
 
-pub(crate) fn evaluate(e: &Evaluator<'_>, us: Color) -> Score {
+/// The two bitboards that drive the space term for `us`:
+///
+/// - `safe`: the central c-f × ranks 2-4 (POV) box minus our own
+///   pawns minus squares attacked by enemy pawns. The "front" of our
+///   space.
+/// - `reinforced`: the subset of `safe` that lies on or behind our
+///   pawn (within three pushes) *and* is not attacked by any enemy
+///   piece. Doubly rewarded — it counts in both the bonus terms.
+///
+/// Always returns the bitboards regardless of the [`SPACE_THRESHOLD`]
+/// gate; callers that care about the gated score should consult
+/// [`evaluate`] instead.
+pub(crate) fn space_bitboards(e: &Evaluator<'_>, us: Color) -> (Bitboard, Bitboard) {
     let pos = e.pos;
-    if pos.non_pawn_material_total().0 < SPACE_THRESHOLD.0 {
-        return Score::ZERO;
-    }
-
     let them = !us;
     let them_idx = them.index();
 
@@ -30,20 +38,27 @@ pub(crate) fn evaluate(e: &Evaluator<'_>, us: Color) -> Score {
         Color::Black => CENTER_FILES & (RANK_7 | RANK_6 | RANK_5),
     };
 
-    // Safe squares inside the space mask: not our pawns, not attacked
-    // by enemy pawns.
     let safe = space_mask
         & !pos.pieces_of(us, PieceType::Pawn)
         & !e.attacked_by[them_idx][PieceType::Pawn.index()];
 
-    // "Behind" = squares within three pushes behind our pawns (pawns
-    // shifted back one, two, and three ranks).
     let mut behind = pos.pieces_of(us, PieceType::Pawn);
     behind |= behind.shift(down);
     behind |= behind.shift(Direction(down.0 + down.0));
 
-    let bonus =
-        safe.popcount() as i32 + (behind & safe & !e.attacked_by_all[them_idx]).popcount() as i32;
+    let reinforced = behind & safe & !e.attacked_by_all[them_idx];
+    (safe, reinforced)
+}
+
+pub(crate) fn evaluate(e: &Evaluator<'_>, us: Color) -> Score {
+    let pos = e.pos;
+    if pos.non_pawn_material_total().0 < SPACE_THRESHOLD.0 {
+        return Score::ZERO;
+    }
+
+    let (safe, reinforced) = space_bitboards(e, us);
+
+    let bonus = safe.popcount() as i32 + reinforced.popcount() as i32;
     let weight = pos.pieces_by_color(us).popcount() as i32 - 1;
 
     Score::new(bonus * weight * weight / 16, 0)

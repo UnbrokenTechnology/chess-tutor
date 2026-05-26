@@ -173,11 +173,19 @@ pub(crate) struct Evaluator<'a> {
     /// path (default) — pieces::evaluate's mobility loop bypasses
     /// the bookkeeping. `Some(vec)` when callers want per-piece
     /// granularity (analysis snapshots used by the retrospective
-    /// "which bishop's activity improved?" highlight). Each entry is
-    /// `(square, color, piece_type, score)` for one minor/major
-    /// piece's mobility contribution.
-    pub per_piece_mobility: Option<Vec<(Square, Color, PieceType, Score)>>,
+    /// "which bishop's activity improved?" highlight). Entries are
+    /// described by [`PerPieceMobilityRecord`].
+    pub per_piece_mobility: Option<Vec<PerPieceMobilityRecord>>,
 }
+
+/// One entry of the [`Evaluator::per_piece_mobility`] tracker —
+/// `(square, color, piece_type, score, mobility_squares)`. The
+/// `mobility_squares` bitboard is `attacks & mobility_area`, the
+/// precise set of squares that counted toward the mobility popcount;
+/// the retrospective UI diffs it pre vs post to highlight which
+/// squares a piece newly attacks (or no longer attacks) when its
+/// activity changes.
+pub type PerPieceMobilityRecord = (Square, Color, PieceType, Score, Bitboard);
 
 impl<'a> Evaluator<'a> {
     /// Build an evaluator that computes pawn structure on demand. Used

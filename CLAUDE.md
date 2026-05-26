@@ -60,12 +60,20 @@ Rationale:
 
 Stockfish 11 is GPLv3. The user has consulted a lawyer and the operating assumption is:
 
-> Copyright protects *expression*, not *ideas*. Algorithms, data structures, evaluation terms, weight tables, architectural patterns, and concepts are not copyrightable. A rewrite that carries over the ideas but independently authors every line of code — no copy/pasted comments, no copy/pasted identifiers, no mechanical translation of variable/function names — is its own copyrighted work and is **not a derivative work** that triggers GPL.
+> Copyright protects *expression*, not *ideas*. Algorithms, data structures, evaluation terms, weight tables, architectural patterns, and concepts are not copyrightable. A rewrite that carries over the ideas and authors every line of new code by hand — reading the reference, then typing the Rust ourselves — is its own copyrighted work and is **not a derivative work** that triggers GPL. Mechanical hand-transliteration (matching identifier names, mirroring statement order, adapting comments) is fine; what we cannot do is literally copy-paste source bytes, transpile the reference programmatically, link/wrap the reference binary, or distribute the reference source.
 
 This means when porting:
-- **DO** carry over: bitboard layout, magic-number move generation, alpha-beta w/ aspiration windows, null-move pruning, LMR, futility pruning, quiescence search, transposition table, late-move reduction formula, the evaluation term list, the weight tables (numerical weights are facts, not expression), the pawn hash, the material hash, the general module decomposition.
-- **DO NOT** carry over: variable names (`mobilityArea` → something else), function names, comment text, structural ordering of statements where a different order is equally natural, any copy-pasted code fragment. Read the reference to understand the concept, then close the file and implement from your head in Rust idiom.
-- **Weight tables** (like `MobilityBonus[][32]`) — these are numerical facts. Copy the numbers, give the array a different name, lay out the file differently. Cite the source in a top-of-file comment: *"Evaluation weights derived from Stockfish 11 (GPLv3), which is a published reference implementation of classical chess evaluation. Weights are factual numerical data and are used under fair use / idea-expression dichotomy."*
+- **DO** carry over: bitboard layout, magic-number move generation, alpha-beta w/ aspiration windows, null-move pruning, LMR, futility pruning, quiescence search, transposition table, late-move reduction formula, the evaluation term list, the weight tables (numerical weights are facts, not expression), the pawn hash, the material hash, the general module decomposition. **Hewing closely to the reference's structure, identifier names, and comments is fine and often preferable** — the goal is parity with what's known to work, not novelty. Default to "what does Stockfish do here" as the answer.
+- **DO NOT**: copy-paste C++ source bytes into the Rust file. Run a transpiler over the reference. Link or wrap the Stockfish binary. Distribute the reference source (the repo is private; `reference/` is kept locally for development and never shipped).
+- **Weight tables** (like `MobilityBonus[][32]`) — these are numerical facts. Carry over the numbers. Cite the source in a top-of-file comment: *"Evaluation weights derived from Stockfish 11 (GPLv3), which is a published reference implementation of classical chess evaluation. Weights are factual numerical data and are used under fair use / idea-expression dichotomy."*
+
+### Secondary reference: lichess-puzzler (AGPL-3.0)
+
+[`reference/lichess-puzzler/`](reference/lichess-puzzler/) is a clone of [github.com/ornicar/lichess-puzzler](https://github.com/ornicar/lichess-puzzler), the open-source pipeline lichess uses to generate and tag its puzzle database. **AGPL-3.0, never shipped, never modified** — same posture as the Stockfish reference.
+
+It's the load-bearing reference for tactic naming. The taxonomy (fork / pin / skewer / discovered-attack / removing-the-defender / etc.) and the per-pattern predicates in [`reference/lichess-puzzler/tagger/cook.py`](reference/lichess-puzzler/tagger/cook.py) have been validated against millions of real puzzles — porting the *ideas* gives us parity with the strongest open-source benchmark on the planet without re-deriving the heuristics. Tagger architecture: confirm a tactic exists by engine-eval swing (separate pass), *then* walk the solution PV to assign pattern tags. We follow the same split — `MoveVerdict ∈ {Inaccuracy, Mistake, Blunder}` plus a winning `best` line is our "tactic exists" gate; per-pattern detectors then label the PV.
+
+Same operating assumption as the Stockfish reference: hand-transliterate the predicates by reading `cook.py` and typing the Rust ourselves. Mirroring lichess's predicate shapes and naming is *encouraged* — those choices are validated against millions of puzzles, and we want parity with the strongest open-source benchmark, not novelty. What we cannot do is copy-paste the python, transpile it programmatically, or distribute the reference. Top-of-file citation comment goes on `tactic_outcome.rs` analogous to the Stockfish-derived weight files.
 
 The Stockfish 11 evaluation decomposes into these top-level terms (from `evaluate.cpp`): **Material, Imbalance, Mobility, Threat, Passed, Space, Initiative**, plus per-piece positional terms (King, Knight, Bishop, Rook, Queen), plus Pawn structure, plus King Safety. These are exactly the concepts a teaching tool needs.
 
@@ -164,7 +172,7 @@ Current magic bitboards (`core/engine/src/magics.rs`) find magics at first use v
 Prefer many small focused files over grab-bag ones. A file that does one thing is easier to review, test, and reason about. Specifically:
 - Each evaluation term in its own file (`eval/mobility.rs`, `eval/king_safety.rs`, `eval/passed_pawns.rs`, ...).
 - Each search heuristic in its own file where it's self-contained.
-- Per-file `#[cfg(test)] mod tests` blocks, not a separate `tests/` directory.
+- Tests live in sibling `<name>_tests.rs` files (or `<name>/tests.rs` for directory modules), declared `#[cfg(test)] mod tests;` from the parent module. Keeps private-symbol access for the test module while keeping the source file readable. Cargo's crate-root `tests/` directory is allowed for tests that only need the public API, but is not the default — most of our tests reach into private surfaces.
 
 ### Don't add features the task doesn't require
 

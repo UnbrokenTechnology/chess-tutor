@@ -105,6 +105,8 @@ pub mod king_safety_outcome;
 pub mod material_outcome;
 pub mod mobility_outcome;
 pub mod move_analysis;
+pub mod move_assessment;
+pub mod overlays;
 pub mod passed_pawns_outcome;
 pub mod pawn_structure_outcome;
 pub mod pieces_positional_outcome;
@@ -144,6 +146,11 @@ pub use king_safety_outcome::{compute_king_safety_outcome, KingSafetyOutcome, Ki
 pub use material_outcome::{compute_material_outcome, CaptureEvent, MaterialOutcome};
 pub use mobility_outcome::{compute_mobility_outcome, MobilityOutcome, PieceMobility};
 pub use move_analysis::{analyze_position, MoveAnalysis};
+pub use move_assessment::{
+    classify_user_move, BlunderInfo, GatingConfig, MoveAssessment, TeachingInfo, TermContribution,
+    TermFamily,
+};
+pub use overlays::{compute_overlays, OverlayData};
 pub use passed_pawns_outcome::{compute_passed_pawns_outcome, PassedPawnsOutcome};
 pub use pawn_structure_outcome::{compute_pawn_structure_outcome, PawnStructureOutcome};
 pub use pieces_positional_outcome::{compute_pieces_positional_outcome, PiecesPositionalOutcome};
@@ -152,7 +159,7 @@ pub use surprise::{detect_surprise, SurpriseKind};
 pub use term_delta::{compute_term_deltas, cumulative_prefix, TermDelta};
 pub use term_id::TermId;
 pub use threats_outcome::{
-    compute_threats_outcome, filter_guaranteed_targets, HangingPiece, PieceLocation, PressureKind,
-    PressuredPiece, ThreatsOutcome,
+    compute_threats_outcome, filter_guaranteed_targets, list_hanging, list_see_losing,
+    HangingPiece, PieceLocation, PressureKind, PressuredPiece, ThreatsOutcome,
 };
 pub use verdict::{classify_move, MoveVerdict};

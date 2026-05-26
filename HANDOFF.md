@@ -2,6 +2,8 @@
 
 State index for fresh contexts. **Read [`CLAUDE.md`](CLAUDE.md) first** for evergreen guidance (mission, legal/licensing, ground rules); this file and its split-outs are forward-looking only — git history covers what's been built, inline module docs (`//!`) cover design rationale.
 
+> **[`ROADMAP.md`](ROADMAP.md)** (temporary) — four sequenced big-rock workflows are queued: (1) SF11 parity audit to close the ~10x node-count gap, (2) non-functional refactor splitting files >500 LOC + extracting tests to sibling files, (3) lichess tactic-library port, (4) broader lichess feature audit. Order matters; read before starting any of them.
+
 ## What this app is
 
 A **chess tutor**, not a chess engine. The product surface is move-by-move teaching feedback for ~1200 ELO students climbing toward the 1600+ range. Strength is a means: 2000-ish ELO is enough to pose interesting positions; explainability is the actual product. Three pillars:
@@ -12,17 +14,25 @@ A **chess tutor**, not a chess engine. The product surface is move-by-move teach
 
 UIs: CLI (`chess-tutor`), egui desktop (`chess-tutor-desktop`), planned Apple + Android. FFI crate (`core/ffi/`) is the prerequisite for the platform apps and doesn't exist yet.
 
-Tests: **703 engine (+4 ignored) + 105 narration + 33 cli + 6 ui = 847 passing**, clippy clean.
+Tests: **723 engine (+4 ignored) + 105 narration + 33 cli + 27 ui = 888 passing**, clippy clean.
 
 ## Currently iterating on: teaching UX
 
 Engine perf is in a good place (sub-300 ms retrospective on hard positions, 43 s for the full d=20 bench at 8 threads). Further perf has diminishing returns relative to the UX work that is now the bottleneck on the actual product.
 
-The interactive retrospective landed: the desktop side panel now renders structured cards (heading, score-delta chip, sentiment-coloured strip, click-to-expand detail) instead of a monospace text blob. Clicking a card surfaces that item's spatial story on the board (square highlights + arrows) via a new `BoardView.annotations` overlay layer. View-model lives in [`core/ui/src/retrospective_view.rs`](core/ui/src/retrospective_view.rs); CLI keeps using the unchanged `format_retrospective` text path.
+The product has three teaching surfaces now, all card-based and all reading the same engine outcomes:
 
-→ **[`HANDOFF-ux.md`](HANDOFF-ux.md)** — teaching layer state, deferred Phase 2/4/5 work, narration tuning, UX platform tasks, live-play tuning loop. Read this when iterating on teaching UX.
+1. **Retrospective panel** — after-the-fact analysis of the user's last move. Cards per signal (material, threats, king safety, mobility, pawn structure, passed pawns, piece placement, secondary, **forced consequences of opponent's best reply**). Best-move reveal is opt-in (`LearningPreferences.reveal_best_moves`, default off).
+2. **Coaching panel** (live) — features-to-notice for the position the user is about to move from. Shown when `AssistanceLevel::Coached` is active. Surfaces hanging-piece opportunities (filtered through legal moves so in-check / pinned cases don't lie), en-passant captures, pawn weaknesses on either side, and a "your king is in check" card. Never names a move.
+3. **Game Review** (post-game / on-demand) — ranked list of significant moments derived from the same classifier that drives in-game intervention. Click any moment to jump the rest of the UI there.
+
+Plus the **intervention pause**: when `MistakeHandling::TeachingMoments` or blunder safety is on, the engine reply is held after a user move until the classifier decides whether to pause and surface a "you missed something / take back / continue" prompt. Gate is tight by design — single dominant eval-term family + share threshold + position-not-hopeless, so noise / engine subtlety don't interrupt play.
+
+→ **[`HANDOFF-ux.md`](HANDOFF-ux.md)** — teaching layer state, learning-mode design, deferred Phase 2/4/5 work, narration tuning, UX platform tasks, live-play tuning loop. Read this when iterating on teaching UX.
 
 → **[`HANDOFF-perf.md`](HANDOFF-perf.md)** — current bench numbers, levers tested + reverted, outlier breakdowns, deferred perf opportunities, engine-strength deferred. Read only when returning to engine perf / strength work; it is stable but noisy and would pollute a UX-focused context.
+
+**Open and most likely next:** persistence design — game history on disk so past games are reviewable across launches and the foundation for drills / per-concept mastery fading. Desktop and mobile storage models differ (filesystem vs platform storage); user erase / clear-history UX needs design before code lands. See HANDOFF-ux's "Persistence (deferred)" section.
 
 ## Build / dev commands
 

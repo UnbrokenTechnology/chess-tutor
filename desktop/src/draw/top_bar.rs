@@ -24,6 +24,21 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>
         {
             events.push(Event::ToggleHint);
         }
+        let review_label = if view.review_open {
+            "Close Review"
+        } else {
+            "Review Game"
+        };
+        if ui
+            .add_enabled(view.review_button_enabled, egui::Button::new(review_label))
+            .clicked()
+        {
+            events.push(if view.review_open {
+                Event::CloseGameReview
+            } else {
+                Event::OpenGameReview
+            });
+        }
         if !view.viewing_live && ui.button("▶ Live").clicked() {
             events.push(Event::JumpToLive);
         }

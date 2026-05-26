@@ -86,6 +86,25 @@ impl PieceType {
     pub const fn is_minor(self) -> bool {
         matches!(self, PieceType::Knight | PieceType::Bishop)
     }
+
+    /// Classical "point value" used in pedagogical contexts where the
+    /// student thinks in P:1 / N:3 / B:3 / R:5 / Q:9. Distinct from
+    /// the engine's tapered cp piece values (which differ by a few cp
+    /// between N and B, with phase-dependent endgame inflation). The
+    /// classical scale is what shows up in teaching prose, in the
+    /// "is this an even trade?" parity check, and in the
+    /// recapture-aware filters in the analysis crate. Returns 0 for
+    /// the King (kings are never captured; the result is unused but
+    /// has to be defined for exhaustiveness).
+    pub const fn classical_points(self) -> u8 {
+        match self {
+            PieceType::Pawn => 1,
+            PieceType::Knight | PieceType::Bishop => 3,
+            PieceType::Rook => 5,
+            PieceType::Queen => 9,
+            PieceType::King => 0,
+        }
+    }
 }
 
 // =========================================================================

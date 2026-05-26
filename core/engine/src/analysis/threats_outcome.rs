@@ -271,16 +271,31 @@ fn target_still_winnable(pos: &Position, target_sq: Square, our_color: Color) ->
         return false;
     }
     let occupied = pos.occupied();
-    let our_attackers = pos.attackers_to(target_sq, occupied) & pos.pieces_by_color(our_color);
+    let attackers_to_sq = pos.attackers_to(target_sq, occupied);
+    let our_attackers = attackers_to_sq & pos.pieces_by_color(our_color);
     if our_attackers == Bitboard::EMPTY {
         return false;
     }
     // SEE the cheapest-attacker capture. Threshold = 1 cp (any
     // strictly-positive material gain). Matches list_see_losing's
     // convention.
+    //
+    // Kings can only legally initiate the capture when the target
+    // has no defenders; against a defended piece the king would be
+    // moving into check. Without this filter, Value::mg_of_piece(King)
+    // == 0 makes the king look like a costless first captor and
+    // SEE returns a spurious "winnable" verdict for what's actually
+    // an illegal move.
+    let target_defended =
+        (attackers_to_sq & pos.pieces_by_color(!our_color)) != Bitboard::EMPTY;
+    let candidates = if target_defended {
+        our_attackers & !pos.pieces(PieceType::King)
+    } else {
+        our_attackers
+    };
     let mut cheapest_from: Option<Square> = None;
     let mut cheapest_value = i32::MAX;
-    for from in our_attackers {
+    for from in candidates {
         if let Some(p) = pos.piece_on(from) {
             let v = Value::mg_of_piece(p.kind()).0;
             if v < cheapest_value {
@@ -307,7 +322,12 @@ fn count_hanging(pos: &Position, root_stm: Color) -> (usize, usize) {
 /// Return every non-king piece of `side` that's under attack by the
 /// enemy and has no friendly defenders, annotated with the specific
 /// enemy pieces doing the attacking.
-fn list_hanging(pos: &Position, side: Color) -> Vec<HangingPiece> {
+/// List pieces of `side` that are attacked by at least one enemy
+/// piece *and* undefended by any friendly piece in `pos`. Public for
+/// the coaching surface (live, pre-user-move) — the analytical paths
+/// reach this via [`ThreatsOutcome::ours_hanging`] /
+/// [`ThreatsOutcome::theirs_hanging`].
+pub fn list_hanging(pos: &Position, side: Color) -> Vec<HangingPiece> {
     let mut out = Vec::new();
     let occupied = pos.occupied();
     let enemy = !side;
@@ -369,7 +389,10 @@ fn list_hanging(pos: &Position, side: Color) -> Vec<HangingPiece> {
 ///   doesn't represent the promotion. `see_ge` short-circuits
 ///   non-`Normal` moves to `Value::ZERO >= threshold`, so a
 ///   threshold of 1 returns false.
-fn list_see_losing(pos: &Position, side: Color) -> Vec<HangingPiece> {
+/// List pieces of `side` that are attacked, defended, but still lose
+/// material in an SEE-assessed exchange initiated by the enemy. Public
+/// for the same reason as [`list_hanging`].
+pub fn list_see_losing(pos: &Position, side: Color) -> Vec<HangingPiece> {
     let mut out = Vec::new();
     let occupied = pos.occupied();
     let enemy = !side;
@@ -387,10 +410,21 @@ fn list_see_losing(pos: &Position, side: Color) -> Vec<HangingPiece> {
             continue;
         }
 
-        // Cheapest enemy attacker = lowest midgame piece-value.
+        // Cheapest enemy attacker = lowest midgame piece-value. Kings
+        // are excluded from the SEE-initiator pool: a king can't
+        // legally capture a defended piece (it would move into
+        // check), and Value::mg_of_piece(King) == 0 would otherwise
+        // make the king look like a free-of-cost first captor and
+        // produce a phantom "you lose this trade" verdict (e.g. king
+        // takes queen, defender recaptures the king — physically
+        // impossible).
+        let non_king_attackers = enemy_attackers_bb & !pos.pieces(PieceType::King);
+        if non_king_attackers == Bitboard::EMPTY {
+            continue;
+        }
         let mut cheapest_from: Option<Square> = None;
         let mut cheapest_value = i32::MAX;
-        for from in enemy_attackers_bb {
+        for from in non_king_attackers {
             if let Some(p) = pos.piece_on(from) {
                 let v = Value::mg_of_piece(p.kind()).0;
                 if v < cheapest_value {
@@ -720,6 +754,46 @@ mod tests {
             "d7-d6 should create one SEE-losing piece on our side"
         );
         assert_eq!(outcome.theirs_see_losing_delta, 0);
+    }
+
+    #[test]
+    fn see_losing_skips_king_only_attacker_against_defended_target() {
+        // The Qxf5# scenario: black queen on f5 is "attacked" by the
+        // white king on f4 (only attacker), defended by the black
+        // knight on d4. The king can't legally take a defended piece,
+        // so the queen is NOT SEE-losing. Without the king-exclusion
+        // filter, Value::mg_of_piece(King) == 0 makes the king look
+        // like a free-of-cost first captor and SEE returns a phantom
+        // losing verdict.
+        let fen = "7k/8/8/5q2/3n1K2/8/8/8 w - - 0 1";
+        let pos = Position::from_fen(fen).unwrap();
+        let see_losing = list_see_losing(&pos, Color::Black);
+        assert!(
+            see_losing.iter().all(|p| p.location.square != Square::F5),
+            "queen on f5 must not be flagged as SEE-losing — only attacker is the king, which can't capture a defended piece; got {see_losing:?}"
+        );
+    }
+
+    #[test]
+    fn see_losing_still_fires_when_king_is_one_of_several_attackers() {
+        // Two attackers on the target: cheapest non-king should still
+        // drive the SEE call. Black queen on e5, attacked by white
+        // king on e4 AND white knight on g4 (knight reaches e5),
+        // defended by black knight on c4.
+        // Nxe5 — Nxe5 sequence: white wins queen for knight (+ ~6).
+        let fen = "7k/8/8/4q3/2n1K1N1/8/8/8 b - - 0 1";
+        let pos = Position::from_fen(fen).unwrap();
+        let see_losing = list_see_losing(&pos, Color::Black);
+        let entry = see_losing
+            .iter()
+            .find(|p| p.location.square == Square::E5)
+            .unwrap_or_else(|| {
+                panic!("queen on e5 should still be SEE-losing via the knight attacker, got {see_losing:?}")
+            });
+        // The displayed attackers list intentionally still includes
+        // the king — it's a geometric attacker even though it can't
+        // legally initiate.
+        assert_eq!(entry.attackers.len(), 2);
     }
 
     // ---- list_pressured ---------------------------------------------

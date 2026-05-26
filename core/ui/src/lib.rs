@@ -11,12 +11,18 @@
 //! `egui::Context::request_repaint`, CLI passes a no-op, mobile shells
 //! post to their native run loop. There's no other platform coupling.
 
+pub mod coaching_view;
 pub mod event;
+pub mod learning_mode;
+pub mod overlays_view;
 pub mod retrospective_view;
 pub mod session;
 pub mod view;
 mod worker;
 
+pub use learning_mode::{
+    AssistanceLevel, BlunderSafety, LearningPreferences, LearningPreset, MistakeHandling,
+};
 pub use retrospective_view::build_retrospective_view;
 pub use session::{RepaintFn, Session};
 pub use worker::NoisePickInfo;
