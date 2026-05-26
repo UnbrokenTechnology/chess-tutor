@@ -296,13 +296,28 @@ Re-audit (3 subagents + direct verification) overturned the prior "faithful port
 | `5a2a68a` | Quiet-LMR faithful bundle (gate→2, table→24.8, re-search guard, relaxers ttPv/oppMC/ttCapture/escape/ttHitAverage, didLMR feedback) | 11,806,689 (−4.7%) | 183,254,002 (−4.4%) |
 | `063266e` | Capture-LMR (SF 4-condition gate + late-capture r++) | 10,361,130 (−12.2%) | 152,970,498 (−16.5%) |
 | `4c40c1d` | Refined `eval` vs raw `staticEval` for pruning gates (S4) | 10,227,018 (−1.3%) | 147,316,914 (−3.7%) |
+| `45be8a7` | Faithful NMP bundle (NMP refined-eval gate + `(854+68·depth)/258` R + depth≥13 verification w/ nmpMinPly/nmpColor + parent-not-null via `was_null` + Q3/Q4 qsearch stand-pat refinement + razoring S6 + S5/C2 negamax after-null/−statScore eval) | 9,739,495 (−4.8%) | 138,713,681 (−5.8%) |
 
-**Cumulative: d=14 −17.5% (1.89× → 1.56× SF), d=20 −23.1% (2.82× → 2.17× SF). All 726 engine tests pass.** Capture-LMR — which regressed +23% *in isolation* in the prior audit — is a −16.5% win once the relaxers are present, decisively confirming SF's pruning is a balanced set that cannot be A/B'd piece-by-piece.
+**Cumulative: d=14 −21.4% (1.89× → 1.48× SF), d=20 −27.6% (2.82× → 2.04× SF). 704 engine lib tests pass; clippy clean.** Capture-LMR — which regressed +23% *in isolation* in the prior audit — is a −16.5% win once the relaxers are present, decisively confirming SF's pruning is a balanced set that cannot be A/B'd piece-by-piece. The faithful NMP bundle is the same lesson again: NMP regressed +4–12% *alone* but is a −5–6% win bundled with its eval-balance companions (Q3/Q4 + razoring + S5/C2).
 
 ### Attempted, regressed, reverted
 
-- **Faithful NMP (refined-eval gate + `(854+68·depth)/258` reduction + depth≥13 verification w/ nmpMinPly/nmpColor).** A/B at d=14: +4.3% with our old R, +12.4% with SF's R. SF's aggressive NMP is balanced by companions not yet ported (qsearch ttValue refinement Q3/Q4, razoring S6, after-null eval S5). Reverted; retry as part of the qsearch/eval-balance bundle. (The eval-refinement S4 it rode on was kept — it's a standalone win.)
-- **qsearch stand-pat ttValue refinement (Q3) alone:** +0.4% (neutral/noise). Reverted; belongs in the qsearch bundle, not solo.
+- **Faithful NMP (refined-eval gate + `(854+68·depth)/258` reduction + depth≥13 verification w/ nmpMinPly/nmpColor).** A/B at d=14: +4.3% with our old R, +12.4% with SF's R. SF's aggressive NMP is balanced by companions not yet ported (qsearch ttValue refinement Q3/Q4, razoring S6, after-null eval S5). Reverted at the time. **✅ LANDED 2026-05-26 (commit `45be8a7`)** once bundled with exactly those companions — see the Landed table above (d=14 −4.8%, d=20 −5.8%). Confirms the prediction: NMP needed its eval-balance companions, not a different reduction formula.
+- **qsearch stand-pat ttValue refinement (Q3) alone:** +0.4% (neutral/noise). Reverted as a solo lever; **landed inside the NMP bundle** (`45be8a7`) where it belongs.
+
+### Faithful NMP bundle (Phase B) — LANDED (2026-05-26, commit `45be8a7`)
+
+The full SF11 NMP family, landed and benched as one balanced bundle (per [[feedback_pruning_bundles]] / [[feedback_lmr_base_divergence]] — never A/B a single lever of a balanced set against our tree). Components:
+
+1. **NMP** (search.cpp:838-885): gate on the *refined* `eval` (`eval ≥ beta` **and** `eval ≥ staticEval`; floor `staticEval ≥ beta − 32·depth + 292 − 30·improving`); skip when the parent itself nulled (new `StackEntry.was_null`, set true only in the NMP block, false at every real-move recursion site incl. ProbCut); reduction `R = (854+68·depth)/258 + min((eval−beta)/192, 3)` (fixes the depth-3 base + `/200`→`/192`); `reduced = depth − R` with **no `.max(1)` clamp** (faithful — lets the null child dive into qsearch, which makes Q4 reachable); depth≥13 **verification** re-search at the same ply with NMP suspended for the cutting side via `Search.nmp_min_ply`/`nmp_color` (the `nmp_min_ply != 0` guard forbids recursive verification, matching SF's `assert(!nmpMinPly)`).
+2. **S5/C2** (search.cpp:808-820): on a TT-miss out of check, `raw = evaluate + (−parentStatScore/512)` for a real-move parent, or `raw = −(parent raw staticEval) + 2·Tempo` after a null move. Kept contempt-free via a new `StackEntry.raw_static_eval` (the after-null negate reads the parent's *raw* value, so the TT-persisted eval stays clean).
+3. **Q3** (search.cpp:1422-1425): qsearch stand-pat ttValue refinement (mirror of S4).
+4. **Q4** (search.cpp:1428-1430): qsearch after-null stand-pat (reads parent `raw_static_eval`).
+5. **Razoring / S6** (search.cpp:822-826, `RAZOR_MARGIN = 531`): `!root && depth < 2 && eval ≤ alpha − 531 → qsearch`.
+
+**Kept divergences** (deliberate, documented in code): `NULL_MIN_DEPTH = 3` floor retained (SF nulls at any depth; low depths are covered by razoring `<2` + RFP `<6`) — a follow-up lever if more is wanted. The verification ply-offset `(3·reduced/4).max(0)` saturates at 0 to keep the usize arithmetic safe in shallow mate-territory verifications (SF uses signed plies where a negative floor is simply always-satisfied — equivalent).
+
+A/B result in the Landed table. NPS rose at both depths (after-null skips `evaluate()` calls; razoring trims shallow nodes) — a rare node-*and*-NPS win.
 
 ### Structural NPS (Phase A) — finding: B1 and B3 are coupled
 
