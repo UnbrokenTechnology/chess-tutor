@@ -110,6 +110,9 @@ impl Position {
             pawn_key: 0,
             psq: Score::ZERO,
             non_pawn_material: [Value::ZERO; 2],
+            checkers: Bitboard::EMPTY,
+            king_blockers: [Bitboard::EMPTY; 2],
+            king_pinners: [Bitboard::EMPTY; 2],
         };
 
         // Exactly one king per color is a hard prerequisite for any of the
@@ -142,6 +145,7 @@ impl Position {
         position.pawn_key = position.compute_pawn_key_from_scratch();
         position.psq = position.compute_psq_from_scratch();
         position.non_pawn_material = position.compute_non_pawn_material_from_scratch();
+        position.compute_check_info();
         Ok(position)
     }
 

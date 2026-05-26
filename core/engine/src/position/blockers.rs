@@ -66,11 +66,44 @@ impl Position {
     }
 
     /// Our pieces pinned against our own king by any enemy slider.
+    /// Reads the B3 cache (maintained by [`compute_check_info`]); falls
+    /// back to nothing only in the transient kingless positions the
+    /// move-generation legality filter can create.
     pub fn blockers_for_king(&self, us: Color) -> Bitboard {
-        let enemy = self.pieces_by_color(!us);
-        let king_sq = self.king_square(us);
-        let (blockers, _pinners) = self.slider_blockers(enemy, king_sq);
-        blockers
+        self.king_blockers[us.index()]
+    }
+
+    /// Recompute the cached check info (B3): the side-to-move's checkers
+    /// and each king's blockers + pinners. Called once per `do_move` /
+    /// `do_null_move` / `from_fen`, so the per-move `checkers()` /
+    /// `blockers_for_king()` / SEE / `legal()` / `gives_check()` reads are
+    /// O(1) lookups instead of repeated `attackers_to` / `slider_blockers`.
+    ///
+    /// Guards against a missing king: the move-generation do/undo legality
+    /// filter can make a pseudo-legal move that captures a king, leaving a
+    /// transient kingless side. Such a position is never searched (it is
+    /// immediately undone), so an empty cache for it is harmless.
+    pub(crate) fn compute_check_info(&mut self) {
+        let stm = self.side_to_move;
+        // Probe the king *bitboard* first: an empty one means a transient
+        // kingless side, and `king_square` would `lsb()` an empty board
+        // (index 64, which `Square::from_index` debug-asserts against).
+        let stm_kings = self.pieces_of(stm, PieceType::King);
+        self.checkers = if stm_kings.is_empty() {
+            Bitboard::EMPTY
+        } else {
+            self.attackers_to(stm_kings.lsb(), self.occupied()) & self.pieces_by_color(!stm)
+        };
+        for color in Color::both() {
+            let kings = self.pieces_of(color, PieceType::King);
+            let (blockers, pinners) = if kings.is_empty() {
+                (Bitboard::EMPTY, Bitboard::EMPTY)
+            } else {
+                self.slider_blockers(self.pieces_by_color(!color), kings.lsb())
+            };
+            self.king_blockers[color.index()] = blockers;
+            self.king_pinners[color.index()] = pinners;
+        }
     }
 }
 

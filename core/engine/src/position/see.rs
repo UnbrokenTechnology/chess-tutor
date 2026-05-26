@@ -5,7 +5,7 @@
 use super::Position;
 use crate::bitboard::{square_bb, Bitboard};
 use crate::magics::{bishop_attacks, rook_attacks};
-use crate::types::{Color, Move, MoveKind, PieceType, Square, Value};
+use crate::types::{Move, MoveKind, PieceType, Square, Value};
 
 impl Position {
     /// Tests whether the static exchange evaluation of `mv` is greater
@@ -65,19 +65,15 @@ impl Position {
         // this depth" state in the reference.
         let mut res = 1i32;
 
-        // Pre-compute pinners/blockers for both sides. During SEE the
-        // position evolves (attackers leave the board), but pinners
-        // don't leave via the `to` square, so snapshotting once and
-        // checking "does this pinner still sit in `occupancy`?" each
-        // iteration is sufficient.
-        let mut pinners = [Bitboard::EMPTY; 2];
-        let mut blockers = [Bitboard::EMPTY; 2];
-        for color in Color::both() {
-            let (b, p) =
-                self.slider_blockers(self.pieces_by_color(!color), self.king_square(color));
-            blockers[color.index()] = b;
-            pinners[color.index()] = p;
-        }
+        // Pinners/blockers for both sides. During SEE the position
+        // evolves (attackers leave the board), but pinners don't leave
+        // via the `to` square, so the position's cached snapshot (B3,
+        // maintained by `compute_check_info`) is exactly what the loop
+        // needs — checking "does this pinner still sit in `occupancy`?"
+        // each iteration is sufficient. These are identical to the
+        // `slider_blockers(pieces(!c), king(c))` this used to recompute.
+        let blockers = self.king_blockers;
+        let pinners = self.king_pinners;
 
         loop {
             stm = !stm;

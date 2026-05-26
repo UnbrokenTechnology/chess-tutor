@@ -71,6 +71,19 @@ pub struct Position {
     /// each color. Drives game-phase interpolation (lots of non-pawn
     /// material = middlegame; little = endgame). Maintained incrementally.
     pub(crate) non_pawn_material: [Value; 2],
+
+    // --- Cached check info (B3) -----------------------------------------
+    // Recomputed once per `do_move` / `do_null_move` / `from_fen` by
+    // `compute_check_info`, saved/restored across undo via `StateInfo`.
+    // Lets the per-move `checkers()` / `blockers_for_king()` / SEE /
+    // `legal()` / `gives_check()` reads be O(1) instead of recomputing
+    // `attackers_to` / `slider_blockers` each call.
+    /// Enemy pieces giving check to the side-to-move's king.
+    pub(crate) checkers: Bitboard,
+    /// Per color: that color's own pieces pinned/blocking against its king.
+    pub(crate) king_blockers: [Bitboard; 2],
+    /// Per color: the enemy sliders pinning a `king_blockers` piece.
+    pub(crate) king_pinners: [Bitboard; 2],
 }
 
 impl Default for Position {

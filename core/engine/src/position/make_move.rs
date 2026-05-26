@@ -6,7 +6,7 @@
 //! maintained in lockstep.
 
 use super::Position;
-use crate::bitboard::square_bb;
+use crate::bitboard::{square_bb, Bitboard};
 use crate::psqt::psq_score;
 use crate::types::{
     CastlingRights, Color, Direction, Move, MoveKind, Piece, PieceType, Rank, Square, Value,
@@ -30,6 +30,11 @@ pub struct StateInfo {
     pub key: u64,
     /// Pawn-only Zobrist key as it was *before* the move.
     pub pawn_key: u64,
+    /// B3 check-info cache as it was *before* the move, restored on undo
+    /// (cheaper than recomputing). See [`Position::compute_check_info`].
+    pub(crate) checkers: Bitboard,
+    pub(crate) king_blockers: [Bitboard; 2],
+    pub(crate) king_pinners: [Bitboard; 2],
 }
 
 /// Per-square mask of castling rights that are cleared when any piece moves
@@ -68,6 +73,9 @@ impl Position {
             halfmove_clock: self.halfmove_clock,
             key: self.key,
             pawn_key: self.pawn_key,
+            checkers: self.checkers,
+            king_blockers: self.king_blockers,
+            king_pinners: self.king_pinners,
         };
 
         // Start updating the key by XOR-ing out the pre-move state pieces
@@ -178,6 +186,9 @@ impl Position {
         }
         self.key = key;
 
+        // B3: refresh the check-info cache for the new side to move.
+        self.compute_check_info();
+
         StateInfo { captured, ..saved }
     }
 
@@ -235,6 +246,10 @@ impl Position {
         self.halfmove_clock = state.halfmove_clock;
         self.key = state.key;
         self.pawn_key = state.pawn_key;
+        // B3: restore the pre-move check-info cache.
+        self.checkers = state.checkers;
+        self.king_blockers = state.king_blockers;
+        self.king_pinners = state.king_pinners;
 
         // Roll back the fullmove number (incremented only after a black move).
         if us == Color::Black {
@@ -255,6 +270,9 @@ impl Position {
             halfmove_clock: self.halfmove_clock,
             key: self.key,
             pawn_key: self.pawn_key,
+            checkers: self.checkers,
+            king_blockers: self.king_blockers,
+            king_pinners: self.king_pinners,
         };
 
         if let Some(ep) = self.en_passant {
@@ -264,6 +282,12 @@ impl Position {
         self.side_to_move = !self.side_to_move;
         self.key ^= zobrist::side_to_move_key();
         self.halfmove_clock = self.halfmove_clock.saturating_add(1);
+
+        // B3: the board is unchanged but the side to move flipped, so the
+        // checkers (against the new mover's king) must be refreshed; the
+        // per-color king_blockers are board-only and unchanged, but
+        // recomputing both is simplest and still O(1)-per-node.
+        self.compute_check_info();
 
         saved
     }
@@ -276,6 +300,10 @@ impl Position {
         self.en_passant = state.en_passant;
         self.halfmove_clock = state.halfmove_clock;
         self.key = state.key;
+        // B3: restore the pre-null check-info cache.
+        self.checkers = state.checkers;
+        self.king_blockers = state.king_blockers;
+        self.king_pinners = state.king_pinners;
     }
 
     // ----- private bitboard/mailbox mutation helpers -----------------------

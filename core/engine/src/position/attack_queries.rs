@@ -34,9 +34,9 @@ impl Position {
 
     /// Bitboard of every enemy piece that is currently checking the
     /// side-to-move's king. Empty when the side to move is not in check.
+    /// Reads the B3 cache maintained by [`Position::compute_check_info`].
     pub fn checkers(&self) -> Bitboard {
-        let us = self.side_to_move;
-        self.attackers_to(self.king_square(us), self.occupied()) & self.pieces_by_color(!us)
+        self.checkers
     }
 
     /// True when the side to move is currently in check.
@@ -455,8 +455,9 @@ mod tests {
             // legal — every non-king move must be rejected.
             "4r2k/8/8/b7/8/8/4P3/4K3 w - - 0 1",
             // Knight check (uninterposable): only capturing the knight or
-            // a king move resolves it.
-            "7k/8/8/8/8/5n2/8/4K2R w - - 0 1",
+            // a king move resolves it. Black king parked on a8 (off the
+            // h1 rook's file/rank) so the position is legal.
+            "k7/8/8/8/8/5n2/8/4K2R w - - 0 1",
         ];
         for fen in fens {
             let mut p = Position::from_fen(fen).unwrap();
