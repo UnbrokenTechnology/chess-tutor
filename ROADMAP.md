@@ -7,7 +7,7 @@
 | Workflow | State |
 |---|---|
 | **W1 — SF11 parity audit** | ✅ **Complete.** Done-criteria met (d=14 1.48× SF, d=20 2.04× SF). Full log in [`parity-audit-log.md`](parity-audit-log.md). |
-| **W2 — Non-functional refactor** | ⬜ **Next up.** Not started. |
+| **W2 — Non-functional refactor** | 🔶 **IN PROGRESS** — 8 commits landed (Tier A + view/learning_mode/side_panel/play/types/traps/tt). ~6 files + 2 checkpoint files remain. Full state in [`w2-refactor-log.md`](w2-refactor-log.md). |
 | **W3 — Tactic library port** | ⬜ Not started. |
 | **W4 — Broader lichess audit** | ⬜ Not started. |
 
@@ -107,6 +107,14 @@ The bench is **the** reference instrument for this workflow. SF11's own `benchma
 ---
 
 ## Workflow 2: Non-functional refactor
+
+> 🔶 **IN PROGRESS (2026-05-26).** Live state, recipe, conventions, gotchas,
+> the done/remaining worklist, and per-file seam plans are in
+> **[`w2-refactor-log.md`](w2-refactor-log.md)** — read it before resuming. In
+> short: Tier A (test extraction) + 7 structural splits done across 8 commits;
+> engine bench held node-neutral (d=14 = 9,739,495). Remaining: threats_outcome,
+> eval(+pieces), movepick, retrospective_view, pawns (keep-whole), main.rs;
+> then **checkpoint with the user before session.rs and search.rs**.
 
 ### Goal
 

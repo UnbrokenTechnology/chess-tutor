@@ -18,7 +18,7 @@ Tests: **728 engine (+4 ignored) + 105 narration + 33 cli + 27 ui = 893 passing*
 
 ## Current focus: executing the ROADMAP (teaching UX parked)
 
-We are partway through the four-workflow [`ROADMAP.md`](ROADMAP.md) detour. **W1 (SF11 parity audit) is ✅ complete** — done-criteria met (d=14 1.48× SF, d=20 2.04× SF), two correctness bugs fixed plus the SF11 pruning stack landed as balanced bundles; full log in [`parity-audit-log.md`](parity-audit-log.md). **W2 (non-functional refactor) is next** — every `.rs` source file ≤500 LOC, tests to sibling `_tests.rs` files, no logic/perf/test-count change. W3 (lichess tactic port) + W4 (broader audit) follow. The teaching UX is **parked until W4 completes**; the rest of this section is the state to resume from.
+We are partway through the four-workflow [`ROADMAP.md`](ROADMAP.md) detour. **W1 (SF11 parity audit) is ✅ complete** — done-criteria met (d=14 1.48× SF, d=20 2.04× SF), two correctness bugs fixed plus the SF11 pruning stack landed as balanced bundles; full log in [`parity-audit-log.md`](parity-audit-log.md). **W2 (non-functional refactor) is 🔶 IN PROGRESS** — every `.rs` source file ≤500 LOC, tests to sibling `_tests.rs` files, no logic/perf/test-count change. 8 commits landed (Tier A + view/learning_mode/side_panel/play/types/traps/tt); engine bench held node-neutral (d=14 = 9,739,495). **Resume from [`w2-refactor-log.md`](w2-refactor-log.md)** (recipe, conventions, gotchas, remaining worklist; checkpoint with the user before session.rs and search.rs). W3 (lichess tactic port) + W4 (broader audit) follow. The teaching UX is **parked until W4 completes**; the rest of this section is the state to resume from.
 
 ### Parked: the teaching UX (resume post-W4)
 
