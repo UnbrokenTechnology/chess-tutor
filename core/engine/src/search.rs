@@ -258,6 +258,20 @@ struct RootMove {
     prev_score: Value,
 }
 
+/// Result of [`Search::negamax_moves`] — the move-loop body lifted out of
+/// `negamax`. `Aborted` means the shared stop flag fired mid-loop and the
+/// caller must return `Value::ZERO`; `Done` carries the loop's outcome for
+/// the caller's terminal-position check and TT save.
+enum MovesOutcome {
+    Aborted,
+    Done {
+        best_score: Value,
+        best_move: Move,
+        raised_alpha: bool,
+        move_count: usize,
+    },
+}
+
 // =========================================================================
 // Per-search state
 // =========================================================================
@@ -1014,122 +1028,12 @@ impl<'a> Search<'a> {
             return eval;
         }
 
-        // --- Step 9. Null-move pruning with verification (SF11
-        // search.cpp:838-885, ~40 Elo) ---
-        //
-        // Gate (search.cpp:839-847): the refined `eval` must clear beta
-        // *and* not undershoot the raw static eval, the raw static eval
-        // must clear a depth-scaled floor (loosened 30 cp when
-        // improving — a rising eval is trusted more), the parent must
-        // not itself have played a null move, its last quiet must not
-        // have scored hugely (`statScore < 23397`), the side to move
-        // must hold non-pawn material (zugzwang guard), and NMP must
-        // not be suspended for us by an active verification search.
-        let nmp_eval_floor = beta.0 - 32 * depth + 292 - if improving { 30 } else { 0 };
-        let parent_stat_score = self.stack[STACK_SENTINEL + ply - 1].stat_score;
-        let us = pos.side_to_move();
-        if !is_pv
-            && !in_check
-            && !parent_was_null
-            && depth >= NULL_MIN_DEPTH
-            && eval != Value::NONE
-            && eval >= beta
-            && eval >= static_eval
-            && static_eval.0 >= nmp_eval_floor
-            && parent_stat_score < 23397
-            && pos.non_pawn_material(us).0 > 0
-            && (ply >= self.nmp_min_ply || us != self.nmp_color)
-        {
-            // SF11 search.cpp:852 — dynamic reduction from depth and how
-            // far the eval clears beta. `eval >= beta` is guaranteed by
-            // the gate, so the margin term is already non-negative.
-            let r = (854 + 68 * depth) / 258 + ((eval.0 - beta.0) / 192).min(3);
-            // Faithful to SF: `depth - R` (no clamp). When it lands at
-            // or below zero the child dives straight into quiescence,
-            // which is what makes the qsearch after-null refinement (Q4)
-            // reachable.
-            let reduced = depth - r;
-
-            // Mark this ply as the null move: cont-hist "1 ply ago"
-            // resolves to the sentinel slot (moved_piece_idx == 0 reads
-            // zero, mirroring SF's `continuationHistory[0][0][NO_PIECE]
-            // [0]`), and `was_null` tells the child to skip NMP and take
-            // the after-null eval path.
-            self.stack[STACK_SENTINEL + ply].moved_piece_idx = 0;
-            self.stack[STACK_SENTINEL + ply].to_idx = 0;
-            self.stack[STACK_SENTINEL + ply].was_capture = false;
-            self.stack[STACK_SENTINEL + ply].in_check = false;
-            self.stack[STACK_SENTINEL + ply].captured_piece_kind = None;
-            self.stack[STACK_SENTINEL + ply].was_null = true;
-
-            let saved = pos.do_null_move();
-            self.tt.prefetch(pos.key());
-            self.path_keys.push(pos.key());
-            let null_score = -self.negamax(
-                pos,
-                -beta,
-                Value(-beta.0 + 1),
-                reduced,
-                ply + 1,
-                false,
-                false,
-                None,
-                !cut_node,
-            );
-            self.path_keys.pop();
-            pos.undo_null_move(saved);
-
-            if self.is_aborted() {
-                return Value::ZERO;
-            }
-
-            if null_score >= beta {
-                // Don't return unproven mate scores (search.cpp:866-867).
-                let clamped = if null_score.0 >= Value::MATE.0 - Value::MAX_PLY {
-                    beta
-                } else {
-                    null_score
-                };
-
-                // Trust the cutoff directly when a verification is
-                // already running (no recursive verification) or when
-                // the depth is shallow and beta isn't in mate territory.
-                // Otherwise re-search at `depth - R` with NMP suspended
-                // for us until `ply` passes `nmp_min_ply`, and only
-                // accept the cutoff if the verification also fails high.
-                if self.nmp_min_ply != 0
-                    || (beta.0.abs() < Value::KNOWN_WIN.0 && depth < NMP_VERIFY_MIN_DEPTH)
-                {
-                    return clamped;
-                }
-
-                // `depth - reduced` can be non-positive at shallow,
-                // mate-territory verifications; saturate the resulting
-                // ply offset at zero (SF uses signed plies, where a
-                // negative floor is simply always-satisfied).
-                let verify_offset = (3 * reduced / 4).max(0) as usize;
-                self.nmp_min_ply = ply + verify_offset;
-                self.nmp_color = us;
-                let v = self.negamax(
-                    pos,
-                    Value(beta.0 - 1),
-                    beta,
-                    reduced,
-                    ply,
-                    false,
-                    false,
-                    prev,
-                    false,
-                );
-                self.nmp_min_ply = 0;
-
-                if self.is_aborted() {
-                    return Value::ZERO;
-                }
-                if v >= beta {
-                    return clamped;
-                }
-            }
+        // Null-move pruning with verification — see [`try_null_move`].
+        if let Some(v) = self.try_null_move(
+            pos, beta, depth, ply, in_check, is_pv, cut_node, prev, eval, static_eval, improving,
+            parent_was_null,
+        ) {
+            return v;
         }
 
         // Build the four cont-hist keys identifying the parent
@@ -1143,158 +1047,93 @@ impl<'a> Search<'a> {
             cont_key_at(&self.stack, ply, 6),
         ];
 
-        // --- ProbCut (SF11 search.cpp:888-929, claimed ~10 Elo) ---
-        //
-        // If a "good enough" capture (SEE clearing a raised-beta
-        // margin) returns a reduced search value above raisedBeta,
-        // we can prune the whole node — the parent move that led
-        // here is refuted by a capture we wouldn't even need to
-        // search deeply.
-        //
-        // Two-phase verification: first a zero-window qsearch (cheap
-        // — bails on stand-pat / quick recapture); only if that
-        // holds do we run a `depth - 4` regular search. The qsearch
-        // gate kills most candidates before the expensive recurse.
-        //
-        // Capture budget = `2 + 2 * cut_node`: at cut nodes (where a
-        // fail-high is expected) we try up to 4 captures; elsewhere
-        // only 2. This formula was the load-bearing piece our prior
-        // (2026-05-12) ProbCut attempt lacked — no flat budget
-        // worked across position types.
-        if !is_pv
-            && !in_check
-            && depth >= 5
-            && static_eval != Value::NONE
-            && beta.0.abs() < Value::MATE.0 - Value::MAX_PLY
-        {
-            let raised_beta = (beta.0 + 189 - 45 * improving as i32).min(Value::INFINITE.0);
-            let raised_beta_v = Value(raised_beta);
-            let see_threshold = Value(raised_beta - static_eval.0);
-            let budget = 2 + 2 * cut_node as i32;
-            let mut probcut_count: i32 = 0;
-
-            // TT move only enters via the picker if it's a capture
-            // /promotion — otherwise the picker's first emission
-            // would be a quiet move that we'd then skip.
-            let tt_is_cap_or_promo = tt_move != Move::NONE
-                && (pos.is_capture(tt_move)
-                    || tt_move.kind() == crate::types::MoveKind::Promotion);
-            let pc_tt = if tt_is_cap_or_promo {
-                tt_move
-            } else {
-                Move::NONE
-            };
-            let mut pc_picker = MovePicker::new_qs(
-                pos,
-                pc_tt,
-                Depth::QS_NO_CHECKS,
-                None,
-                crate::movepick::NO_CONT_HIST,
-            );
-
-            let mut pc_value = Value::NONE;
-            while probcut_count < budget {
-                let mv = pc_picker.next_move(
-                    pos,
-                    Some(self.history),
-                    Some(self.cont_history),
-                    Some(self.capture_history),
-                    true, // qsearch picker emits captures only anyway
-                );
-                if mv == Move::NONE {
-                    break;
-                }
-
-                // Captures/promotions only, and only those whose SEE
-                // clears the raised-beta margin. Bad captures and
-                // moves not clearing the threshold are skipped — we
-                // keep iterating until we exhaust the picker or hit
-                // the budget.
-                let is_cap_or_promo =
-                    pos.is_capture(mv) || mv.kind() == crate::types::MoveKind::Promotion;
-                if !is_cap_or_promo {
-                    continue;
-                }
-                if !pos.see_ge(mv, see_threshold) {
-                    continue;
-                }
-
-                let moved_piece = pos.moved_piece(mv);
-                let state = pos.do_move(mv);
-                self.tt.prefetch(pos.key());
-                let us_was = !pos.side_to_move();
-                let our_king = pos.king_square(us_was);
-                let still_attacked = (pos.attackers_to(our_king, pos.occupied())
-                    & pos.pieces_by_color(!us_was))
-                    .any();
-                if still_attacked {
-                    pos.undo_move(mv, state);
-                    continue;
-                }
-
-                probcut_count += 1;
-
-                // Record on the per-ply stack so the recursive
-                // search reads the right parent (in_check,
-                // was_capture, moved_piece, to) for cont-hist
-                // lookups.
-                self.stack[STACK_SENTINEL + ply].moved_piece_idx = moved_piece.index() as u8;
-                self.stack[STACK_SENTINEL + ply].to_idx = mv.to().index() as u8;
-                self.stack[STACK_SENTINEL + ply].in_check = in_check;
-                self.stack[STACK_SENTINEL + ply].was_capture = true;
-                self.stack[STACK_SENTINEL + ply].captured_piece_kind =
-                    state.captured.map(|p| p.kind());
-                self.stack[STACK_SENTINEL + ply].was_null = false;
-
-                self.path_keys.push(pos.key());
-                let child_prev = Some((moved_piece.kind(), mv.to()));
-
-                // Phase 1: zero-window qsearch — cheap rejection.
-                // SF11 search.cpp:918 calls qsearch with the default
-                // depth (DEPTH_ZERO = QS_CHECKS), so the probcut
-                // qsearch starts at the same "include checks" depth
-                // as a fresh entry from negamax.
-                let mut value = -self.qsearch(
-                    pos,
-                    Value(-raised_beta),
-                    Value(-raised_beta + 1),
-                    ply + 1,
-                    Depth::QS_CHECKS.0,
-                );
-
-                // Phase 2: regular search at depth-4 if qsearch held.
-                if value >= raised_beta_v {
-                    value = -self.negamax(
-                        pos,
-                        Value(-raised_beta),
-                        Value(-raised_beta + 1),
-                        depth - 4,
-                        ply + 1,
-                        false,
-                        false,
-                        child_prev,
-                        !cut_node,
-                    );
-                }
-
-                self.path_keys.pop();
-                pos.undo_move(mv, state);
-
-                if self.is_aborted() {
-                    return Value::ZERO;
-                }
-
-                if value >= raised_beta_v {
-                    pc_value = value;
-                    break;
-                }
-            }
-
-            if pc_value != Value::NONE {
-                return pc_value;
-            }
+        // ProbCut pre-loop pruning phase — see [`try_probcut`].
+        if let Some(v) = self.try_probcut(
+            pos, beta, depth, ply, in_check, is_pv, cut_node, static_eval, improving, tt_move,
+        ) {
+            return v;
         }
 
+        // Iterate the legal moves with the full SF11 ordering/pruning
+        // stack — see [`negamax_moves`].
+        let (best_score, best_move, raised_alpha, move_count) = match self.negamax_moves(
+            pos, alpha, beta, depth, ply, is_root, is_pv, cut_node, prev, in_check, static_eval,
+            tt_move, tt_pv, improving, cont_keys,
+        ) {
+            MovesOutcome::Aborted => return Value::ZERO,
+            MovesOutcome::Done {
+                best_score,
+                best_move,
+                raised_alpha,
+                move_count,
+            } => (best_score, best_move, raised_alpha, move_count),
+        };
+
+        if move_count == 0 {
+            return if in_check {
+                Value::mated_in(ply as i32)
+            } else {
+                Value::DRAW
+            };
+        }
+
+        // Skip TT save at the root for secondary PV slots — otherwise
+        // the search for pv_idx > 0 would clobber the root's best-move
+        // entry with a deliberately-second-best pick, polluting future
+        // probes. The primary slot still writes normally.
+        let skip_tt_save = is_root && self.pv_idx > 0;
+
+        let bound = if best_score >= beta {
+            Bound::Lower
+        } else if is_pv && raised_alpha {
+            Bound::Exact
+        } else {
+            Bound::Upper
+        };
+        if skip_tt_save {
+            return best_score;
+        }
+        probe.save(
+            key,
+            value_to_tt(best_score, ply as i32),
+            tt_pv,
+            bound,
+            Depth(depth),
+            best_move,
+            raw_static_eval,
+        );
+
+        best_score
+    }
+
+    // ------------------------------------------------------------------
+    // Main move loop
+    // ------------------------------------------------------------------
+
+    /// The move-loop body of `negamax`: iterate the legal moves (root
+    /// MultiPV filter, Step-13 prunes, extension chain, LMR/PVS search via
+    /// [`Search::search_made_move`], and the β-cutoff stats via
+    /// [`Search::update_all_stats`]) and return the loop outcome. The
+    /// caller (`negamax`) handles the terminal-position check and TT save.
+    #[allow(clippy::too_many_arguments)]
+    fn negamax_moves(
+        &mut self,
+        pos: &mut Position,
+        mut alpha: Value,
+        beta: Value,
+        depth: i32,
+        ply: usize,
+        is_root: bool,
+        is_pv: bool,
+        cut_node: bool,
+        prev: Option<(PieceType, Square)>,
+        in_check: bool,
+        static_eval: Value,
+        tt_move: Move,
+        tt_pv: bool,
+        improving: bool,
+        cont_keys: ContHistKeys,
+    ) -> MovesOutcome {
         // --- Main move loop ---
         let counter_move = match prev {
             Some((pt, sq)) => self.counter_moves.get(pt, sq),
@@ -1506,28 +1345,7 @@ impl<'a> Search<'a> {
                 && !gives_check
                 && best_score > Value::MATED_IN_MAX_PLY
                 && npm_us_after_positive
-                && {
-                    let lmr_r = lmr_reduction(depth, move_count, improving);
-                    // SF11 search.cpp:1008 — `lmrDepth = max(newDepth -
-                    // reduction, 0)`, where `newDepth = depth - 1` at
-                    // this point (extensions are computed *after*
-                    // pruning step 13). Using `depth - 1` directly
-                    // keeps the gate independent of whichever
-                    // extension we later assign.
-                    let lmr_d = ((depth - 1) - lmr_r).max(0);
-                    let parent_stat = self.stack[STACK_SENTINEL + ply - 1].stat_score;
-                    let parent_mc = self.stack[STACK_SENTINEL + ply - 1].move_count;
-                    let widen = (parent_stat > 0 || parent_mc == 1) as i32;
-                    if lmr_d >= 4 + widen {
-                        false
-                    } else {
-                        let mvp = moved_piece.index() as usize;
-                        let mvt = mv.to().index() as usize;
-                        let ch0 = cmp_cont_hist_read(self.cont_history, cont_keys[0], mvp, mvt);
-                        let ch1 = cmp_cont_hist_read(self.cont_history, cont_keys[1], mvp, mvt);
-                        ch0 < 0 && ch1 < 0
-                    }
-                };
+                && self.cmp_cont_negative(depth, move_count, improving, ply, moved_piece, mv, cont_keys);
             if cmp_prune {
                 // CMP-pruned moves are never searched, so (per SF's
                 // `quietsSearched`, line 1300) they don't join the
@@ -1564,39 +1382,10 @@ impl<'a> Search<'a> {
                 // side that just moved (== `us` in SF's sense) is the
                 // negated side. Pure-pawn endgames skip Step 13.
                 && npm_us_after_positive
-                && {
-                    let lmr_r = lmr_reduction(depth, move_count, improving);
-                    // newDepth = depth - 1 here; extensions are computed
-                    // *after* Step 13 in SF11, so the gate is keyed on
-                    // pre-extension depth (search.cpp:994, 1008).
-                    let lmr_d = ((depth - 1) - lmr_r).max(0);
-                    if lmr_d >= 6 {
-                        false
-                    } else if static_eval.0 + 235 + 172 * lmr_d > alpha.0 {
-                        false
-                    } else {
-                        // Post-`do_move` this read was `pos.side_to_move()`
-                        // (the opponent); pre-move we reproduce that exact
-                        // value as `!us_at_node` to stay node-neutral.
-                        let stm = !us_at_node;
-                        let mvp_idx = moved_piece.index() as usize;
-                        let mvt_idx = mv.to().index() as usize;
-                        let main_h = self.history.get(stm, mv.from(), mv.to()) as i32;
-                        let ch0 = self
-                            .cont_history
-                            .sub_for_key(cont_keys[0])[mvp_idx][mvt_idx]
-                            as i32;
-                        let ch1 = self
-                            .cont_history
-                            .sub_for_key(cont_keys[1])[mvp_idx][mvt_idx]
-                            as i32;
-                        let ch3 = self
-                            .cont_history
-                            .sub_for_key(cont_keys[2])[mvp_idx][mvt_idx]
-                            as i32;
-                        (main_h + ch0 + ch1 + ch3) < 25000
-                    }
-                };
+                && self.quiet_futility_inner(
+                    depth, move_count, improving, static_eval, alpha, us_at_node, moved_piece, mv,
+                    cont_keys,
+                );
             if do_futility_prune {
                 quiets_tried.push(mv);
                 continue;
@@ -1631,64 +1420,21 @@ impl<'a> Search<'a> {
                 }
             }
 
-            // --- Extension chain (SF11 search.cpp:1072-1090) ---
-            //
-            // Four predicates, mutually-exclusive `else if` for the
-            // first three; castling is a separate `if` at the bottom
-            // that overrides any prior result. Each fires `+1 ply`.
-            // Singular extensions belong here too in SF's full
-            // structure but aren't ported yet (see HANDOFF).
-            //
-            // CHECK EXTENSION: previously blanket — every check got
-            // +1 ply. SF's gate is tighter: only extend when the
-            // check is either a discovery (moving piece was a
-            // blocker for the enemy king, so its departure unblocks
-            // a slider check) OR has SEE >= 0 (the checking piece
-            // won't simply lose material to a recapture). The
-            // filtered-out moves are SEE-negative sac-checks that
-            // were noise.
-            //
-            // ISOLATED-ADDITION CAVEAT: A/B isolation (same session)
-            // showed each of the other three extensions (passed-pawn,
-            // last-captures, castling) is net-negative in isolation
-            // on top of check-gating, sometimes catastrophically so
-            // (last-captures alone on pawn-race endgames runs >20 min
-            // because every capture drops NPM below 2*ROOK_MG and
-            // extends the whole subtree). But all four *together*
-            // are net-positive at depth 13 (9× vs blanket-check
-            // baseline) and depth 14 (6×). The interaction matters:
-            // when only one extension fires per node, its over-
-            // extension on pathological positions isn't crowded out
-            // by competing extensions firing elsewhere. Don't try to
-            // simplify by removing one — the per-extension results
-            // are misleading.
-            let mut extension: i32 = 0;
-            if gives_check && (from_was_enemy_blocker || see_nonneg) {
-                extension = 1;
-            } else if is_first_killer
-                && is_advanced_pawn_push
-                && pos.pawn_passed(us_at_node, mv.to())
-            {
-                // Passed-pawn extension: ply's killer is an advanced
-                // passed-pawn push. Killers are the ply-stable
-                // refutation moves; if the move that already worked
-                // is itself a race-changing pawn push, +1 ply is
-                // worth confirming the race.
-                extension = 1;
-            } else if last_captures_node_eligible {
-                // Last-captures: parent's move was a heavy capture
-                // and we're in thin material (≤ 2 rooks). Every move
-                // at this node gets +1 to find concrete endgame
-                // technique. Node-level (computed once outside the
-                // loop), not move-level.
-                extension = 1;
-            }
-            // Castling override: SF's bottom-of-chain `if` (line 1089)
-            // — castling is a one-shot structural move that re-shapes
-            // king safety; an extra ply of verification is worth it.
-            if mv.kind() == crate::types::MoveKind::Castling {
-                extension = 1;
-            }
+            // Extension chain (SF11 search.cpp:1072-1090) — see
+            // [`compute_extension`] for the per-predicate rationale and
+            // the isolated-addition caveat (don't remove any one of the
+            // four; they're net-positive only together).
+            let extension = compute_extension(
+                pos,
+                mv,
+                us_at_node,
+                gives_check,
+                from_was_enemy_blocker,
+                see_nonneg,
+                is_first_killer,
+                is_advanced_pawn_push,
+                last_captures_node_eligible,
+            );
             let new_depth = depth - 1 + extension;
 
             // B1: only now — for the moves that survived legality and
@@ -1713,246 +1459,42 @@ impl<'a> Search<'a> {
 
             let child_prev = Some((moved_pt, mv.to()));
 
-            let mut score: Value;
-            let mut full_depth = true;
-            let did_lmr;
-
-            // --- LMR: zero-window reduced-depth search on late moves ---
-            // SF11 search.cpp:1117-1217. Faithful reduction plus the full
-            // relaxer/adjuster stack. The move-count gate matches SF: at a
-            // non-root node LMR begins on the 2nd move (`move_count > 1`),
-            // and at the root it begins later (`> 2`, or `> 3` once a move
-            // has already failed to beat alpha). Captures and promotions
-            // are eligible too, under SF's 4-condition gate below.
-            //
-            // (Root divergence: SF additionally guards root LMR with
-            // `best_move_count(move) == 0` to protect a previously-best
-            // root move from reduction. We omit that guard — the root gate
-            // already excludes the first 2-3 moves and the full-depth
-            // re-search recovers any fail-high, so the effect is negligible
-            // and root nodes are a tiny fraction of the tree.)
-            let lmr_move_gate =
-                1 + (is_root as usize) + ((is_root && best_score < alpha) as usize);
-            // SF11 search.cpp:1120-1124 — captures/promotions are eligible
-            // for LMR only when one of these holds; otherwise they are
-            // searched at full depth. (`captured_eg` is the EG value of the
-            // captured piece, 0 for a non-capturing promotion.)
-            let captured_eg = state
-                .captured
-                .map(|p| Value::eg_of_piece(p.kind()).0)
-                .unwrap_or(0);
-            let lmr_eligible = !is_cap_or_promo
-                || move_count_pruning
-                || static_eval.0 + captured_eg <= alpha.0
-                || cut_node
-                || self.tt_hit_average
-                    < 375 * TT_HIT_AVERAGE_RESOLUTION * TT_HIT_AVERAGE_WINDOW / 1024;
-            if depth >= LMR_MIN_DEPTH
-                && move_count > lmr_move_gate
-                && lmr_eligible
-                && !in_check
-                && !gives_check
-            {
-                let mut r = lmr_reduction(depth, move_count, improving);
-
-                // SF11 search.cpp:1129 — decrease reduction when the
-                // running TT-hit average is high (transposition-rich
-                // region; the ordering is trustworthy, reduce less).
-                if self.tt_hit_average
-                    > 500 * TT_HIT_AVERAGE_RESOLUTION * TT_HIT_AVERAGE_WINDOW / 1024
-                {
-                    r -= 1;
-                }
-
-                // (SF11 search.cpp:1133 breadcrumb `r++` is multi-thread
-                // only; single-threaded it never fires, so it is omitted.)
-
-                // SF11 search.cpp:1137 — decrease reduction for nodes that
-                // are, or have been, on the PV.
-                if tt_pv {
-                    r -= 2;
-                }
-
-                // SF11 search.cpp:1141 — decrease reduction when the
-                // opponent's previous move count was high.
-                if self.stack[STACK_SENTINEL + ply - 1].move_count > 14 {
-                    r -= 1;
-                }
-
-                // (SF11 search.cpp:1145 `singularLMR → r -= 2` omitted: no
-                // singular extensions yet, so the flag is always false.)
-
-                // SF11 search.cpp:1148-1191 — the ttCapture/cutNode/escape/
-                // statScore adjusters apply to quiet moves only; captures
-                // and promotions instead get a flat late-move bump.
-                if !is_cap_or_promo {
-                    // SF11 search.cpp:1151 — increase reduction if the
-                    // ttMove is a capture/promotion (a tactical alternative
-                    // exists; reduce this quiet more).
-                    let tt_capture = tt_move != Move::NONE
-                        && (pos.is_capture(tt_move)
-                            || tt_move.kind() == crate::types::MoveKind::Promotion);
-                    if tt_capture {
-                        r += 1;
-                    }
-
-                    if cut_node {
-                        // SF11 search.cpp:1155 — increase reduction at cut
-                        // nodes; the parent expects a fail-high.
-                        r += 2;
-                    } else if mv.kind() == crate::types::MoveKind::Normal
-                        && !pos.see_ge(Move::normal(mv.to(), mv.from()), Value::ZERO)
-                    {
-                        // SF11 search.cpp:1161 — decrease reduction for
-                        // moves that escape a capture: a (now-quiet) reverse
-                        // move from `to` back to `from` losing material
-                        // means the from-square was unsafe for this piece,
-                        // so moving away was useful. Castling is excluded by
-                        // the NORMAL gate.
-                        r -= 2;
-                    }
-
-                    // SF11 statScore: blend main + cont-history into a
-                    // single quality estimate for the move we're about to
-                    // search, compare against the parent's statScore to
-                    // nudge `r` in {-1, 0, +1}, then gravity-scale by
-                    // `statScore / 16384`.
-                    let us = !pos.side_to_move(); // side-to-move *before* do_move
-                    let mvp_idx = moved_piece.index() as u8;
-                    let mvt_idx = mv.to().index() as u8;
-                    let main_h = self.history.get(us, mv.from(), mv.to()) as i32;
-                    // SF11 reads contHist[0], [1], [3] = 1-, 2-, 4-plies-ago.
-                    // Our `cont_keys` packs those at indices [0], [1], [2].
-                    let ch0 = self
-                        .cont_history
-                        .sub_for_key(cont_keys[0])[mvp_idx as usize][mvt_idx as usize]
-                        as i32;
-                    let ch1 = self
-                        .cont_history
-                        .sub_for_key(cont_keys[1])[mvp_idx as usize][mvt_idx as usize]
-                        as i32;
-                    let ch3 = self
-                        .cont_history
-                        .sub_for_key(cont_keys[2])[mvp_idx as usize][mvt_idx as usize]
-                        as i32;
-
-                    let mut stat_score = main_h + ch0 + ch1 + ch3 - 4926;
-                    // The flat `-4926` offset can pull an "all-good"
-                    // move slightly negative; clip those false
-                    // negatives so the gravity scaling doesn't reduce
-                    // a move whose sub-components all say "fine".
-                    if stat_score < 0 && ch0 >= 0 && ch1 >= 0 && main_h >= 0 {
-                        stat_score = 0;
-                    }
-                    self.stack[STACK_SENTINEL + ply].stat_score = stat_score;
-
-                    let parent_stat = self.stack[STACK_SENTINEL + ply - 1].stat_score;
-                    if stat_score >= -102 && parent_stat < -114 {
-                        r -= 1;
-                    } else if parent_stat >= -116 && stat_score < -154 {
-                        r += 1;
-                    }
-                    r -= stat_score / 16384;
-                } else if depth < 8 && move_count > 2 {
-                    // SF11 search.cpp:1190 — increase reduction for late
-                    // captures/promotions at low depth.
-                    r += 1;
-                }
-
-                // SF clamps the resulting depth to `[1, new_depth]`
-                // — a negative `r` would otherwise extend, which LMR
-                // is not supposed to do.
-                let reduced = (new_depth - r).clamp(1, new_depth);
-
-                let reduced_score = -self.negamax(
-                    pos,
-                    Value(-alpha.0 - 1),
-                    -alpha,
-                    reduced,
-                    ply + 1,
-                    false,
-                    false,
-                    child_prev,
-                    // LMR's reduced search treats the child as a cut
-                    // node (we expect it to fail low quickly).
-                    true,
-                );
-                // SF11 search.cpp:1197 — `doFullDepthSearch = (value >
-                // alpha && d != newDepth)`. The `d != newDepth` guard
-                // matters: when the relaxers drive `r <= 0` the clamp gives
-                // `reduced == new_depth`, so the reduced search WAS a
-                // full-depth search; re-running it would be pure waste. In
-                // that case the reduced value is the move's value.
-                full_depth = reduced_score > alpha && reduced != new_depth;
-                if !full_depth {
-                    score = reduced_score;
-                } else {
-                    score = Value::NONE;
-                }
-                did_lmr = true;
-            } else {
-                score = Value::NONE;
-                did_lmr = false;
-            }
-
-            if full_depth && !(is_pv && move_count == 1) {
-                score = -self.negamax(
-                    pos,
-                    Value(-alpha.0 - 1),
-                    -alpha,
-                    new_depth,
-                    ply + 1,
-                    false,
-                    false,
-                    child_prev,
-                    !cut_node,
-                );
-
-                // SF11 search.cpp:1207-1216 — after an LMR move is
-                // re-searched at full depth, feed the result back into
-                // continuation history: positive bonus if it beat alpha,
-                // negative otherwise, with a +¼ kicker for the first
-                // killer. Quiet moves only (`!captureOrPromotion`).
-                if did_lmr && !is_cap_or_promo {
-                    let mut bonus = if score > alpha {
-                        stat_bonus(new_depth)
-                    } else {
-                        -stat_bonus(new_depth)
-                    };
-                    if mv == self.killers[ply][0] {
-                        bonus += bonus / 4;
-                    }
-                    update_cont_histories(
-                        self.cont_history,
-                        &cont_keys,
-                        moved_piece.index() as u8,
-                        mv.to().index() as u8,
-                        bonus,
-                    );
-                }
-            }
-
-            if is_pv && (move_count == 1 || (score > alpha && (is_root || score < beta))) {
-                score = -self.negamax(
-                    pos,
-                    -beta,
-                    -alpha,
-                    new_depth,
-                    ply + 1,
-                    false,
-                    true,
-                    child_prev,
-                    // PV-search children are themselves PV (so never
-                    // cut nodes).
-                    false,
-                );
-            }
+            // Search the made move at the right depth/window: the LMR
+            // reduced zero-window search, the full-depth re-search (with
+            // its continuation-history feedback), and the PV re-search —
+            // see [`search_made_move`].
+            let score = self.search_made_move(
+                pos,
+                mv,
+                moved_piece,
+                child_prev,
+                &state,
+                alpha,
+                beta,
+                depth,
+                new_depth,
+                ply,
+                move_count,
+                best_score,
+                is_root,
+                is_pv,
+                cut_node,
+                in_check,
+                gives_check,
+                is_cap_or_promo,
+                move_count_pruning,
+                improving,
+                static_eval,
+                tt_move,
+                tt_pv,
+                cont_keys,
+            );
 
             self.path_keys.pop();
             pos.undo_move(mv, state);
 
             if self.is_aborted() {
-                return Value::ZERO;
+                return MovesOutcome::Aborted;
             }
 
             // Root bookkeeping: before the alpha/best_score update
@@ -1993,105 +1535,19 @@ impl<'a> Search<'a> {
                     self.update_pv(ply, mv);
 
                     if score >= beta {
-                        // Stockfish's `update_all_stats`:
-                        //   bonus1 = stat_bonus(depth + 1) — used for
-                        //     the cutoff capture's bump and the
-                        //     decrement of every losing capture tried.
-                        //   For quiets we keep our existing
-                        //     `history_bonus`/`stat_bonus(depth)` mix.
-                        let bonus1 = stat_bonus(depth + 1).clamp(
-                            -CAPTURE_HISTORY_BOUND,
-                            CAPTURE_HISTORY_BOUND,
+                        // β-cutoff history updates — see [`update_all_stats`].
+                        self.update_all_stats(
+                            pos,
+                            mv,
+                            moved_piece,
+                            is_capture,
+                            depth,
+                            ply,
+                            prev,
+                            &quiets_tried,
+                            &captures_tried,
+                            cont_keys,
                         );
-
-                        if !is_capture {
-                            if self.killers[ply][0] != mv {
-                                self.killers[ply][1] = self.killers[ply][0];
-                                self.killers[ply][0] = mv;
-                            }
-                            if let Some((pt, sq)) = prev {
-                                self.counter_moves.set(pt, sq, mv);
-                            }
-                            let bonus = history_bonus(depth);
-                            let us = pos.side_to_move();
-                            self.history.update(us, mv.from(), mv.to(), bonus);
-                            for q in &quiets_tried {
-                                self.history.update(us, q.from(), q.to(), -bonus);
-                            }
-
-                            // Continuation history: bump our move's
-                            // slot in each parent table at offsets
-                            // {1, 2, 4, 6} ply ago, and decrement the
-                            // same slot for every quiet tried before
-                            // the cutoff. Mirrors Stockfish's
-                            // `update_continuation_histories(...)`
-                            // applied via `update_quiet_stats`.
-                            let cont_bonus = stat_bonus(depth);
-                            let mv_piece_idx = moved_piece.index() as u8;
-                            let mv_to_idx = mv.to().index() as u8;
-                            update_cont_histories(
-                                self.cont_history,
-                                &cont_keys,
-                                mv_piece_idx,
-                                mv_to_idx,
-                                cont_bonus,
-                            );
-                            for q in &quiets_tried {
-                                let q_piece = pos.moved_piece(*q);
-                                update_cont_histories(
-                                    self.cont_history,
-                                    &cont_keys,
-                                    q_piece.index() as u8,
-                                    q.to().index() as u8,
-                                    -cont_bonus,
-                                );
-                            }
-                        } else {
-                            // Cutoff move was a capture: bump its
-                            // capture-history slot. `pos.piece_on(to)`
-                            // reads the captured piece because the
-                            // search has already undone the move; for
-                            // en passant the to-square is empty so the
-                            // captured-pt slot collapses to 0 — matches
-                            // Stockfish's `piece_on(to_sq(bestMove))`.
-                            let captured_pt = pos
-                                .piece_on(mv.to())
-                                .map(|p| p.kind().index() as u8)
-                                .unwrap_or(0);
-                            self.capture_history.update(
-                                moved_piece.index() as u8,
-                                mv.to().index() as u8,
-                                captured_pt,
-                                bonus1,
-                            );
-                        }
-
-                        // Decrement every losing capture's slot,
-                        // regardless of whether the cutoff move was a
-                        // capture or a quiet. Mirrors Stockfish's
-                        // unconditional capture-loser decrement.
-                        for cap in &captures_tried {
-                            let cap_piece = pos.moved_piece(*cap);
-                            let cap_captured_pt = pos
-                                .piece_on(cap.to())
-                                .map(|p| p.kind().index() as u8)
-                                .unwrap_or(0);
-                            self.capture_history.update(
-                                cap_piece.index() as u8,
-                                cap.to().index() as u8,
-                                cap_captured_pt,
-                                -bonus1,
-                            );
-                        }
-
-                        // SF11 search.cpp:1288 zeros this ply's
-                        // statScore on a fail-high so that, if this
-                        // frame is reached again via a sibling at a
-                        // higher ply, the LMR parent-comparison reads
-                        // a clean baseline rather than the cutoff
-                        // move's (possibly very large) value.
-                        self.stack[STACK_SENTINEL + ply].stat_score = 0;
-
                         break;
                     }
                 }
@@ -2104,41 +1560,827 @@ impl<'a> Search<'a> {
             }
         }
 
-        if move_count == 0 {
-            return if in_check {
-                Value::mated_in(ply as i32)
-            } else {
-                Value::DRAW
-            };
-        }
-
-        // Skip TT save at the root for secondary PV slots — otherwise
-        // the search for pv_idx > 0 would clobber the root's best-move
-        // entry with a deliberately-second-best pick, polluting future
-        // probes. The primary slot still writes normally.
-        let skip_tt_save = is_root && self.pv_idx > 0;
-
-        let bound = if best_score >= beta {
-            Bound::Lower
-        } else if is_pv && raised_alpha {
-            Bound::Exact
-        } else {
-            Bound::Upper
-        };
-        if skip_tt_save {
-            return best_score;
-        }
-        probe.save(
-            key,
-            value_to_tt(best_score, ply as i32),
-            tt_pv,
-            bound,
-            Depth(depth),
+        MovesOutcome::Done {
+            best_score,
             best_move,
-            raw_static_eval,
+            raised_alpha,
+            move_count,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Null-move pruning
+    // ------------------------------------------------------------------
+
+    /// Null-move pruning with verification (SF11 search.cpp:838-885), a
+    /// pre-loop pruning phase. Returns `Some(value)` when the node can be
+    /// pruned (a passing move still fails high) or the search was aborted
+    /// mid-phase; `None` when the gate doesn't fire and the search should
+    /// proceed. Extracted verbatim from `negamax`; mutates
+    /// `nmp_min_ply` / `nmp_color` only transiently around the
+    /// verification search.
+    #[allow(clippy::too_many_arguments)]
+    fn try_null_move(
+        &mut self,
+        pos: &mut Position,
+        beta: Value,
+        depth: i32,
+        ply: usize,
+        in_check: bool,
+        is_pv: bool,
+        cut_node: bool,
+        prev: Option<(PieceType, Square)>,
+        eval: Value,
+        static_eval: Value,
+        improving: bool,
+        parent_was_null: bool,
+    ) -> Option<Value> {
+        // --- Step 9. Null-move pruning with verification (SF11
+        // search.cpp:838-885, ~40 Elo) ---
+        //
+        // Gate (search.cpp:839-847): the refined `eval` must clear beta
+        // *and* not undershoot the raw static eval, the raw static eval
+        // must clear a depth-scaled floor (loosened 30 cp when
+        // improving — a rising eval is trusted more), the parent must
+        // not itself have played a null move, its last quiet must not
+        // have scored hugely (`statScore < 23397`), the side to move
+        // must hold non-pawn material (zugzwang guard), and NMP must
+        // not be suspended for us by an active verification search.
+        let nmp_eval_floor = beta.0 - 32 * depth + 292 - if improving { 30 } else { 0 };
+        let parent_stat_score = self.stack[STACK_SENTINEL + ply - 1].stat_score;
+        let us = pos.side_to_move();
+        if !is_pv
+            && !in_check
+            && !parent_was_null
+            && depth >= NULL_MIN_DEPTH
+            && eval != Value::NONE
+            && eval >= beta
+            && eval >= static_eval
+            && static_eval.0 >= nmp_eval_floor
+            && parent_stat_score < 23397
+            && pos.non_pawn_material(us).0 > 0
+            && (ply >= self.nmp_min_ply || us != self.nmp_color)
+        {
+            // SF11 search.cpp:852 — dynamic reduction from depth and how
+            // far the eval clears beta. `eval >= beta` is guaranteed by
+            // the gate, so the margin term is already non-negative.
+            let r = (854 + 68 * depth) / 258 + ((eval.0 - beta.0) / 192).min(3);
+            // Faithful to SF: `depth - R` (no clamp). When it lands at
+            // or below zero the child dives straight into quiescence,
+            // which is what makes the qsearch after-null refinement (Q4)
+            // reachable.
+            let reduced = depth - r;
+
+            // Mark this ply as the null move: cont-hist "1 ply ago"
+            // resolves to the sentinel slot (moved_piece_idx == 0 reads
+            // zero, mirroring SF's `continuationHistory[0][0][NO_PIECE]
+            // [0]`), and `was_null` tells the child to skip NMP and take
+            // the after-null eval path.
+            self.stack[STACK_SENTINEL + ply].moved_piece_idx = 0;
+            self.stack[STACK_SENTINEL + ply].to_idx = 0;
+            self.stack[STACK_SENTINEL + ply].was_capture = false;
+            self.stack[STACK_SENTINEL + ply].in_check = false;
+            self.stack[STACK_SENTINEL + ply].captured_piece_kind = None;
+            self.stack[STACK_SENTINEL + ply].was_null = true;
+
+            let saved = pos.do_null_move();
+            self.tt.prefetch(pos.key());
+            self.path_keys.push(pos.key());
+            let null_score = -self.negamax(
+                pos,
+                -beta,
+                Value(-beta.0 + 1),
+                reduced,
+                ply + 1,
+                false,
+                false,
+                None,
+                !cut_node,
+            );
+            self.path_keys.pop();
+            pos.undo_null_move(saved);
+
+            if self.is_aborted() {
+                return Some(Value::ZERO);
+            }
+
+            if null_score >= beta {
+                // Don't return unproven mate scores (search.cpp:866-867).
+                let clamped = if null_score.0 >= Value::MATE.0 - Value::MAX_PLY {
+                    beta
+                } else {
+                    null_score
+                };
+
+                // Trust the cutoff directly when a verification is
+                // already running (no recursive verification) or when
+                // the depth is shallow and beta isn't in mate territory.
+                // Otherwise re-search at `depth - R` with NMP suspended
+                // for us until `ply` passes `nmp_min_ply`, and only
+                // accept the cutoff if the verification also fails high.
+                if self.nmp_min_ply != 0
+                    || (beta.0.abs() < Value::KNOWN_WIN.0 && depth < NMP_VERIFY_MIN_DEPTH)
+                {
+                    return Some(clamped);
+                }
+
+                // `depth - reduced` can be non-positive at shallow,
+                // mate-territory verifications; saturate the resulting
+                // ply offset at zero (SF uses signed plies, where a
+                // negative floor is simply always-satisfied).
+                let verify_offset = (3 * reduced / 4).max(0) as usize;
+                self.nmp_min_ply = ply + verify_offset;
+                self.nmp_color = us;
+                let v = self.negamax(
+                    pos,
+                    Value(beta.0 - 1),
+                    beta,
+                    reduced,
+                    ply,
+                    false,
+                    false,
+                    prev,
+                    false,
+                );
+                self.nmp_min_ply = 0;
+
+                if self.is_aborted() {
+                    return Some(Value::ZERO);
+                }
+                if v >= beta {
+                    return Some(clamped);
+                }
+            }
+        }
+
+        None
+    }
+
+    // ------------------------------------------------------------------
+    // ProbCut
+    // ------------------------------------------------------------------
+
+    /// ProbCut pre-loop pruning phase (SF11 search.cpp:888-929). Returns
+    /// `Some(value)` when the node can be pruned (a "good enough" capture
+    /// refutes the parent move) or the search was aborted mid-phase;
+    /// `None` when the gate doesn't fire and the main move loop should
+    /// proceed. Extracted verbatim from `negamax`; see the inline comment
+    /// for the heuristic.
+    #[allow(clippy::too_many_arguments)]
+    fn try_probcut(
+        &mut self,
+        pos: &mut Position,
+        beta: Value,
+        depth: i32,
+        ply: usize,
+        in_check: bool,
+        is_pv: bool,
+        cut_node: bool,
+        static_eval: Value,
+        improving: bool,
+        tt_move: Move,
+    ) -> Option<Value> {
+        // --- ProbCut (SF11 search.cpp:888-929, claimed ~10 Elo) ---
+        //
+        // If a "good enough" capture (SEE clearing a raised-beta
+        // margin) returns a reduced search value above raisedBeta,
+        // we can prune the whole node — the parent move that led
+        // here is refuted by a capture we wouldn't even need to
+        // search deeply.
+        //
+        // Two-phase verification: first a zero-window qsearch (cheap
+        // — bails on stand-pat / quick recapture); only if that
+        // holds do we run a `depth - 4` regular search. The qsearch
+        // gate kills most candidates before the expensive recurse.
+        //
+        // Capture budget = `2 + 2 * cut_node`: at cut nodes (where a
+        // fail-high is expected) we try up to 4 captures; elsewhere
+        // only 2. This formula was the load-bearing piece our prior
+        // (2026-05-12) ProbCut attempt lacked — no flat budget
+        // worked across position types.
+        if !is_pv
+            && !in_check
+            && depth >= 5
+            && static_eval != Value::NONE
+            && beta.0.abs() < Value::MATE.0 - Value::MAX_PLY
+        {
+            let raised_beta = (beta.0 + 189 - 45 * improving as i32).min(Value::INFINITE.0);
+            let raised_beta_v = Value(raised_beta);
+            let see_threshold = Value(raised_beta - static_eval.0);
+            let budget = 2 + 2 * cut_node as i32;
+            let mut probcut_count: i32 = 0;
+
+            // TT move only enters via the picker if it's a capture
+            // /promotion — otherwise the picker's first emission
+            // would be a quiet move that we'd then skip.
+            let tt_is_cap_or_promo = tt_move != Move::NONE
+                && (pos.is_capture(tt_move)
+                    || tt_move.kind() == crate::types::MoveKind::Promotion);
+            let pc_tt = if tt_is_cap_or_promo {
+                tt_move
+            } else {
+                Move::NONE
+            };
+            let mut pc_picker = MovePicker::new_qs(
+                pos,
+                pc_tt,
+                Depth::QS_NO_CHECKS,
+                None,
+                crate::movepick::NO_CONT_HIST,
+            );
+
+            let mut pc_value = Value::NONE;
+            while probcut_count < budget {
+                let mv = pc_picker.next_move(
+                    pos,
+                    Some(self.history),
+                    Some(self.cont_history),
+                    Some(self.capture_history),
+                    true, // qsearch picker emits captures only anyway
+                );
+                if mv == Move::NONE {
+                    break;
+                }
+
+                // Captures/promotions only, and only those whose SEE
+                // clears the raised-beta margin. Bad captures and
+                // moves not clearing the threshold are skipped — we
+                // keep iterating until we exhaust the picker or hit
+                // the budget.
+                let is_cap_or_promo =
+                    pos.is_capture(mv) || mv.kind() == crate::types::MoveKind::Promotion;
+                if !is_cap_or_promo {
+                    continue;
+                }
+                if !pos.see_ge(mv, see_threshold) {
+                    continue;
+                }
+
+                let moved_piece = pos.moved_piece(mv);
+                let state = pos.do_move(mv);
+                self.tt.prefetch(pos.key());
+                let us_was = !pos.side_to_move();
+                let our_king = pos.king_square(us_was);
+                let still_attacked = (pos.attackers_to(our_king, pos.occupied())
+                    & pos.pieces_by_color(!us_was))
+                    .any();
+                if still_attacked {
+                    pos.undo_move(mv, state);
+                    continue;
+                }
+
+                probcut_count += 1;
+
+                // Record on the per-ply stack so the recursive
+                // search reads the right parent (in_check,
+                // was_capture, moved_piece, to) for cont-hist
+                // lookups.
+                self.stack[STACK_SENTINEL + ply].moved_piece_idx = moved_piece.index() as u8;
+                self.stack[STACK_SENTINEL + ply].to_idx = mv.to().index() as u8;
+                self.stack[STACK_SENTINEL + ply].in_check = in_check;
+                self.stack[STACK_SENTINEL + ply].was_capture = true;
+                self.stack[STACK_SENTINEL + ply].captured_piece_kind =
+                    state.captured.map(|p| p.kind());
+                self.stack[STACK_SENTINEL + ply].was_null = false;
+
+                self.path_keys.push(pos.key());
+                let child_prev = Some((moved_piece.kind(), mv.to()));
+
+                // Phase 1: zero-window qsearch — cheap rejection.
+                // SF11 search.cpp:918 calls qsearch with the default
+                // depth (DEPTH_ZERO = QS_CHECKS), so the probcut
+                // qsearch starts at the same "include checks" depth
+                // as a fresh entry from negamax.
+                let mut value = -self.qsearch(
+                    pos,
+                    Value(-raised_beta),
+                    Value(-raised_beta + 1),
+                    ply + 1,
+                    Depth::QS_CHECKS.0,
+                );
+
+                // Phase 2: regular search at depth-4 if qsearch held.
+                if value >= raised_beta_v {
+                    value = -self.negamax(
+                        pos,
+                        Value(-raised_beta),
+                        Value(-raised_beta + 1),
+                        depth - 4,
+                        ply + 1,
+                        false,
+                        false,
+                        child_prev,
+                        !cut_node,
+                    );
+                }
+
+                self.path_keys.pop();
+                pos.undo_move(mv, state);
+
+                if self.is_aborted() {
+                    return Some(Value::ZERO);
+                }
+
+                if value >= raised_beta_v {
+                    pc_value = value;
+                    break;
+                }
+            }
+
+            if pc_value != Value::NONE {
+                return Some(pc_value);
+            }
+        }
+
+        None
+    }
+
+    // ------------------------------------------------------------------
+    // Move-loop helpers
+    // ------------------------------------------------------------------
+
+    /// CMP inner test (SF11 search.cpp:1008-1014): the move's 1- and
+    /// 2-plies-ago continuation-history scores are both negative at a
+    /// shallow `lmrDepth`. The outer Step-13 gate stays at the call
+    /// site; this is the trailing `&&` operand, so it runs only when
+    /// the gate already passed. See [`cmp_cont_hist_read`] for the
+    /// sentinel handling.
+    #[allow(clippy::too_many_arguments)]
+    fn cmp_cont_negative(
+        &self,
+        depth: i32,
+        move_count: usize,
+        improving: bool,
+        ply: usize,
+        moved_piece: crate::types::Piece,
+        mv: Move,
+        cont_keys: ContHistKeys,
+    ) -> bool {
+        let lmr_r = lmr_reduction(depth, move_count, improving);
+        // SF11 search.cpp:1008 — `lmrDepth = max(newDepth -
+        // reduction, 0)`, where `newDepth = depth - 1` at
+        // this point (extensions are computed *after*
+        // pruning step 13). Using `depth - 1` directly
+        // keeps the gate independent of whichever
+        // extension we later assign.
+        let lmr_d = ((depth - 1) - lmr_r).max(0);
+        let parent_stat = self.stack[STACK_SENTINEL + ply - 1].stat_score;
+        let parent_mc = self.stack[STACK_SENTINEL + ply - 1].move_count;
+        let widen = (parent_stat > 0 || parent_mc == 1) as i32;
+        if lmr_d >= 4 + widen {
+            false
+        } else {
+            let mvp = moved_piece.index();
+            let mvt = mv.to().index();
+            let ch0 = cmp_cont_hist_read(self.cont_history, cont_keys[0], mvp, mvt);
+            let ch1 = cmp_cont_hist_read(self.cont_history, cont_keys[1], mvp, mvt);
+            ch0 < 0 && ch1 < 0
+        }
+    }
+
+    /// Quiet futility inner test (SF11 search.cpp:1016-1024, "Lever 2b").
+    /// The outer Step-13 gate stays at the call site; this computes the
+    /// `lmrDepth`-based margin check plus the negative-composite-history
+    /// gate. `stm` is reproduced from `us_at_node` to match the post-
+    /// `do_move` side-to-move read without making the move.
+    #[allow(clippy::too_many_arguments)]
+    fn quiet_futility_inner(
+        &self,
+        depth: i32,
+        move_count: usize,
+        improving: bool,
+        static_eval: Value,
+        alpha: Value,
+        us_at_node: Color,
+        moved_piece: crate::types::Piece,
+        mv: Move,
+        cont_keys: ContHistKeys,
+    ) -> bool {
+        let lmr_r = lmr_reduction(depth, move_count, improving);
+        // newDepth = depth - 1 here; extensions are computed
+        // *after* Step 13 in SF11, so the gate is keyed on
+        // pre-extension depth (search.cpp:994, 1008).
+        let lmr_d = ((depth - 1) - lmr_r).max(0);
+        if lmr_d >= 6 {
+            false
+        } else if static_eval.0 + 235 + 172 * lmr_d > alpha.0 {
+            false
+        } else {
+            // Post-`do_move` this read was `pos.side_to_move()`
+            // (the opponent); pre-move we reproduce that exact
+            // value as `!us_at_node` to stay node-neutral.
+            let stm = !us_at_node;
+            let mvp_idx = moved_piece.index();
+            let mvt_idx = mv.to().index();
+            let main_h = self.history.get(stm, mv.from(), mv.to()) as i32;
+            let ch0 = self
+                .cont_history
+                .sub_for_key(cont_keys[0])[mvp_idx][mvt_idx]
+                as i32;
+            let ch1 = self
+                .cont_history
+                .sub_for_key(cont_keys[1])[mvp_idx][mvt_idx]
+                as i32;
+            let ch3 = self
+                .cont_history
+                .sub_for_key(cont_keys[2])[mvp_idx][mvt_idx]
+                as i32;
+            (main_h + ch0 + ch1 + ch3) < 25000
+        }
+    }
+
+    /// Stockfish's `update_all_stats` (search.cpp:1255-1301), run on a
+    /// β-cutoff. Bumps the cutoff move's history (killer/counter-move +
+    /// butterfly + continuation for quiets, capture-history for
+    /// captures), decrements every quiet tried before it, decrements
+    /// every losing capture tried (regardless of the cutoff move's
+    /// kind), and zeroes this ply's `statScore` (search.cpp:1288). The
+    /// `if score >= beta` gate and the `break` stay at the call site.
+    #[allow(clippy::too_many_arguments)]
+    fn update_all_stats(
+        &mut self,
+        pos: &Position,
+        mv: Move,
+        moved_piece: crate::types::Piece,
+        is_capture: bool,
+        depth: i32,
+        ply: usize,
+        prev: Option<(PieceType, Square)>,
+        quiets_tried: &crate::movegen::MoveList,
+        captures_tried: &crate::movegen::MoveList,
+        cont_keys: ContHistKeys,
+    ) {
+        // Stockfish's `update_all_stats`:
+        //   bonus1 = stat_bonus(depth + 1) — used for
+        //     the cutoff capture's bump and the
+        //     decrement of every losing capture tried.
+        //   For quiets we keep our existing
+        //     `history_bonus`/`stat_bonus(depth)` mix.
+        let bonus1 = stat_bonus(depth + 1).clamp(
+            -CAPTURE_HISTORY_BOUND,
+            CAPTURE_HISTORY_BOUND,
         );
 
-        best_score
+        if !is_capture {
+            if self.killers[ply][0] != mv {
+                self.killers[ply][1] = self.killers[ply][0];
+                self.killers[ply][0] = mv;
+            }
+            if let Some((pt, sq)) = prev {
+                self.counter_moves.set(pt, sq, mv);
+            }
+            let bonus = history_bonus(depth);
+            let us = pos.side_to_move();
+            self.history.update(us, mv.from(), mv.to(), bonus);
+            for q in quiets_tried {
+                self.history.update(us, q.from(), q.to(), -bonus);
+            }
+
+            // Continuation history: bump our move's
+            // slot in each parent table at offsets
+            // {1, 2, 4, 6} ply ago, and decrement the
+            // same slot for every quiet tried before
+            // the cutoff. Mirrors Stockfish's
+            // `update_continuation_histories(...)`
+            // applied via `update_quiet_stats`.
+            let cont_bonus = stat_bonus(depth);
+            let mv_piece_idx = moved_piece.index() as u8;
+            let mv_to_idx = mv.to().index() as u8;
+            update_cont_histories(
+                self.cont_history,
+                &cont_keys,
+                mv_piece_idx,
+                mv_to_idx,
+                cont_bonus,
+            );
+            for q in quiets_tried {
+                let q_piece = pos.moved_piece(*q);
+                update_cont_histories(
+                    self.cont_history,
+                    &cont_keys,
+                    q_piece.index() as u8,
+                    q.to().index() as u8,
+                    -cont_bonus,
+                );
+            }
+        } else {
+            // Cutoff move was a capture: bump its
+            // capture-history slot. `pos.piece_on(to)`
+            // reads the captured piece because the
+            // search has already undone the move; for
+            // en passant the to-square is empty so the
+            // captured-pt slot collapses to 0 — matches
+            // Stockfish's `piece_on(to_sq(bestMove))`.
+            let captured_pt = pos
+                .piece_on(mv.to())
+                .map(|p| p.kind().index() as u8)
+                .unwrap_or(0);
+            self.capture_history.update(
+                moved_piece.index() as u8,
+                mv.to().index() as u8,
+                captured_pt,
+                bonus1,
+            );
+        }
+
+        // Decrement every losing capture's slot,
+        // regardless of whether the cutoff move was a
+        // capture or a quiet. Mirrors Stockfish's
+        // unconditional capture-loser decrement.
+        for cap in captures_tried {
+            let cap_piece = pos.moved_piece(*cap);
+            let cap_captured_pt = pos
+                .piece_on(cap.to())
+                .map(|p| p.kind().index() as u8)
+                .unwrap_or(0);
+            self.capture_history.update(
+                cap_piece.index() as u8,
+                cap.to().index() as u8,
+                cap_captured_pt,
+                -bonus1,
+            );
+        }
+
+        // SF11 search.cpp:1288 zeros this ply's
+        // statScore on a fail-high so that, if this
+        // frame is reached again via a sibling at a
+        // higher ply, the LMR parent-comparison reads
+        // a clean baseline rather than the cutoff
+        // move's (possibly very large) value.
+        self.stack[STACK_SENTINEL + ply].stat_score = 0;
+    }
+
+    /// Search one already-made move at the right depth/window and return
+    /// its score (from this node's POV, i.e. the negated child value).
+    /// Encapsulates SF11 search.cpp:1117-1217: the LMR reduced
+    /// zero-window search, the full-depth zero-window re-search (with the
+    /// continuation-history feedback that follows it), and the PV
+    /// re-search for PV nodes. `pos` is already past `do_move` for `mv`;
+    /// the caller does `undo_move` after this returns.
+    #[allow(clippy::too_many_arguments)]
+    fn search_made_move(
+        &mut self,
+        pos: &mut Position,
+        mv: Move,
+        moved_piece: crate::types::Piece,
+        child_prev: Option<(PieceType, Square)>,
+        state: &StateInfo,
+        alpha: Value,
+        beta: Value,
+        depth: i32,
+        new_depth: i32,
+        ply: usize,
+        move_count: usize,
+        best_score: Value,
+        is_root: bool,
+        is_pv: bool,
+        cut_node: bool,
+        in_check: bool,
+        gives_check: bool,
+        is_cap_or_promo: bool,
+        move_count_pruning: bool,
+        improving: bool,
+        static_eval: Value,
+        tt_move: Move,
+        tt_pv: bool,
+        cont_keys: ContHistKeys,
+    ) -> Value {
+        let mut score: Value;
+        let mut full_depth = true;
+        let did_lmr;
+
+        // --- LMR: zero-window reduced-depth search on late moves ---
+        // SF11 search.cpp:1117-1217. Faithful reduction plus the full
+        // relaxer/adjuster stack. The move-count gate matches SF: at a
+        // non-root node LMR begins on the 2nd move (`move_count > 1`),
+        // and at the root it begins later (`> 2`, or `> 3` once a move
+        // has already failed to beat alpha). Captures and promotions
+        // are eligible too, under SF's 4-condition gate below.
+        //
+        // (Root divergence: SF additionally guards root LMR with
+        // `best_move_count(move) == 0` to protect a previously-best
+        // root move from reduction. We omit that guard — the root gate
+        // already excludes the first 2-3 moves and the full-depth
+        // re-search recovers any fail-high, so the effect is negligible
+        // and root nodes are a tiny fraction of the tree.)
+        let lmr_move_gate =
+            1 + (is_root as usize) + ((is_root && best_score < alpha) as usize);
+        // SF11 search.cpp:1120-1124 — captures/promotions are eligible
+        // for LMR only when one of these holds; otherwise they are
+        // searched at full depth. (`captured_eg` is the EG value of the
+        // captured piece, 0 for a non-capturing promotion.)
+        let captured_eg = state
+            .captured
+            .map(|p| Value::eg_of_piece(p.kind()).0)
+            .unwrap_or(0);
+        let lmr_eligible = !is_cap_or_promo
+            || move_count_pruning
+            || static_eval.0 + captured_eg <= alpha.0
+            || cut_node
+            || self.tt_hit_average
+                < 375 * TT_HIT_AVERAGE_RESOLUTION * TT_HIT_AVERAGE_WINDOW / 1024;
+        if depth >= LMR_MIN_DEPTH
+            && move_count > lmr_move_gate
+            && lmr_eligible
+            && !in_check
+            && !gives_check
+        {
+            let mut r = lmr_reduction(depth, move_count, improving);
+
+            // SF11 search.cpp:1129 — decrease reduction when the
+            // running TT-hit average is high (transposition-rich
+            // region; the ordering is trustworthy, reduce less).
+            if self.tt_hit_average
+                > 500 * TT_HIT_AVERAGE_RESOLUTION * TT_HIT_AVERAGE_WINDOW / 1024
+            {
+                r -= 1;
+            }
+
+            // (SF11 search.cpp:1133 breadcrumb `r++` is multi-thread
+            // only; single-threaded it never fires, so it is omitted.)
+
+            // SF11 search.cpp:1137 — decrease reduction for nodes that
+            // are, or have been, on the PV.
+            if tt_pv {
+                r -= 2;
+            }
+
+            // SF11 search.cpp:1141 — decrease reduction when the
+            // opponent's previous move count was high.
+            if self.stack[STACK_SENTINEL + ply - 1].move_count > 14 {
+                r -= 1;
+            }
+
+            // (SF11 search.cpp:1145 `singularLMR → r -= 2` omitted: no
+            // singular extensions yet, so the flag is always false.)
+
+            // SF11 search.cpp:1148-1191 — the ttCapture/cutNode/escape/
+            // statScore adjusters apply to quiet moves only; captures
+            // and promotions instead get a flat late-move bump.
+            if !is_cap_or_promo {
+                // SF11 search.cpp:1151 — increase reduction if the
+                // ttMove is a capture/promotion (a tactical alternative
+                // exists; reduce this quiet more).
+                let tt_capture = tt_move != Move::NONE
+                    && (pos.is_capture(tt_move)
+                        || tt_move.kind() == crate::types::MoveKind::Promotion);
+                if tt_capture {
+                    r += 1;
+                }
+
+                if cut_node {
+                    // SF11 search.cpp:1155 — increase reduction at cut
+                    // nodes; the parent expects a fail-high.
+                    r += 2;
+                } else if mv.kind() == crate::types::MoveKind::Normal
+                    && !pos.see_ge(Move::normal(mv.to(), mv.from()), Value::ZERO)
+                {
+                    // SF11 search.cpp:1161 — decrease reduction for
+                    // moves that escape a capture: a (now-quiet) reverse
+                    // move from `to` back to `from` losing material
+                    // means the from-square was unsafe for this piece,
+                    // so moving away was useful. Castling is excluded by
+                    // the NORMAL gate.
+                    r -= 2;
+                }
+
+                // SF11 statScore: blend main + cont-history into a
+                // single quality estimate for the move we're about to
+                // search, compare against the parent's statScore to
+                // nudge `r` in {-1, 0, +1}, then gravity-scale by
+                // `statScore / 16384`.
+                let us = !pos.side_to_move(); // side-to-move *before* do_move
+                let mvp_idx = moved_piece.index() as u8;
+                let mvt_idx = mv.to().index() as u8;
+                let main_h = self.history.get(us, mv.from(), mv.to()) as i32;
+                // SF11 reads contHist[0], [1], [3] = 1-, 2-, 4-plies-ago.
+                // Our `cont_keys` packs those at indices [0], [1], [2].
+                let ch0 = self
+                    .cont_history
+                    .sub_for_key(cont_keys[0])[mvp_idx as usize][mvt_idx as usize]
+                    as i32;
+                let ch1 = self
+                    .cont_history
+                    .sub_for_key(cont_keys[1])[mvp_idx as usize][mvt_idx as usize]
+                    as i32;
+                let ch3 = self
+                    .cont_history
+                    .sub_for_key(cont_keys[2])[mvp_idx as usize][mvt_idx as usize]
+                    as i32;
+
+                let mut stat_score = main_h + ch0 + ch1 + ch3 - 4926;
+                // The flat `-4926` offset can pull an "all-good"
+                // move slightly negative; clip those false
+                // negatives so the gravity scaling doesn't reduce
+                // a move whose sub-components all say "fine".
+                if stat_score < 0 && ch0 >= 0 && ch1 >= 0 && main_h >= 0 {
+                    stat_score = 0;
+                }
+                self.stack[STACK_SENTINEL + ply].stat_score = stat_score;
+
+                let parent_stat = self.stack[STACK_SENTINEL + ply - 1].stat_score;
+                if stat_score >= -102 && parent_stat < -114 {
+                    r -= 1;
+                } else if parent_stat >= -116 && stat_score < -154 {
+                    r += 1;
+                }
+                r -= stat_score / 16384;
+            } else if depth < 8 && move_count > 2 {
+                // SF11 search.cpp:1190 — increase reduction for late
+                // captures/promotions at low depth.
+                r += 1;
+            }
+
+            // SF clamps the resulting depth to `[1, new_depth]`
+            // — a negative `r` would otherwise extend, which LMR
+            // is not supposed to do.
+            let reduced = (new_depth - r).clamp(1, new_depth);
+
+            let reduced_score = -self.negamax(
+                pos,
+                Value(-alpha.0 - 1),
+                -alpha,
+                reduced,
+                ply + 1,
+                false,
+                false,
+                child_prev,
+                // LMR's reduced search treats the child as a cut
+                // node (we expect it to fail low quickly).
+                true,
+            );
+            // SF11 search.cpp:1197 — `doFullDepthSearch = (value >
+            // alpha && d != newDepth)`. The `d != newDepth` guard
+            // matters: when the relaxers drive `r <= 0` the clamp gives
+            // `reduced == new_depth`, so the reduced search WAS a
+            // full-depth search; re-running it would be pure waste. In
+            // that case the reduced value is the move's value.
+            full_depth = reduced_score > alpha && reduced != new_depth;
+            if !full_depth {
+                score = reduced_score;
+            } else {
+                score = Value::NONE;
+            }
+            did_lmr = true;
+        } else {
+            score = Value::NONE;
+            did_lmr = false;
+        }
+
+        if full_depth && !(is_pv && move_count == 1) {
+            score = -self.negamax(
+                pos,
+                Value(-alpha.0 - 1),
+                -alpha,
+                new_depth,
+                ply + 1,
+                false,
+                false,
+                child_prev,
+                !cut_node,
+            );
+
+            // SF11 search.cpp:1207-1216 — after an LMR move is
+            // re-searched at full depth, feed the result back into
+            // continuation history: positive bonus if it beat alpha,
+            // negative otherwise, with a +¼ kicker for the first
+            // killer. Quiet moves only (`!captureOrPromotion`).
+            if did_lmr && !is_cap_or_promo {
+                let mut bonus = if score > alpha {
+                    stat_bonus(new_depth)
+                } else {
+                    -stat_bonus(new_depth)
+                };
+                if mv == self.killers[ply][0] {
+                    bonus += bonus / 4;
+                }
+                update_cont_histories(
+                    self.cont_history,
+                    &cont_keys,
+                    moved_piece.index() as u8,
+                    mv.to().index() as u8,
+                    bonus,
+                );
+            }
+        }
+
+        if is_pv && (move_count == 1 || (score > alpha && (is_root || score < beta))) {
+            score = -self.negamax(
+                pos,
+                -beta,
+                -alpha,
+                new_depth,
+                ply + 1,
+                false,
+                true,
+                child_prev,
+                // PV-search children are themselves PV (so never
+                // cut nodes).
+                false,
+            );
+        }
+
+        score
     }
 
     // ------------------------------------------------------------------
@@ -2693,6 +2935,80 @@ fn late_move_prune(depth: i32, move_count: usize, improving: bool) -> bool {
 /// (parent-level) check ("we're already past beta, skip the subtree").
 fn futility_margin(depth: i32, improving: bool) -> i32 {
     217 * (depth - improving as i32)
+}
+
+/// SF11 extension chain (search.cpp:1072-1090). Returns the `+ply`
+/// extension this move earns at the current node.
+///
+/// Four predicates, mutually-exclusive `else if` for the
+/// first three; castling is a separate `if` at the bottom
+/// that overrides any prior result. Each fires `+1 ply`.
+/// Singular extensions belong here too in SF's full
+/// structure but aren't ported yet (see HANDOFF).
+///
+/// CHECK EXTENSION: previously blanket — every check got
+/// +1 ply. SF's gate is tighter: only extend when the
+/// check is either a discovery (moving piece was a
+/// blocker for the enemy king, so its departure unblocks
+/// a slider check) OR has SEE >= 0 (the checking piece
+/// won't simply lose material to a recapture). The
+/// filtered-out moves are SEE-negative sac-checks that
+/// were noise.
+///
+/// ISOLATED-ADDITION CAVEAT: A/B isolation (same session)
+/// showed each of the other three extensions (passed-pawn,
+/// last-captures, castling) is net-negative in isolation
+/// on top of check-gating, sometimes catastrophically so
+/// (last-captures alone on pawn-race endgames runs >20 min
+/// because every capture drops NPM below 2*ROOK_MG and
+/// extends the whole subtree). But all four *together*
+/// are net-positive at depth 13 (9× vs blanket-check
+/// baseline) and depth 14 (6×). The interaction matters:
+/// when only one extension fires per node, its over-
+/// extension on pathological positions isn't crowded out
+/// by competing extensions firing elsewhere. Don't try to
+/// simplify by removing one — the per-extension results
+/// are misleading.
+#[allow(clippy::too_many_arguments)]
+fn compute_extension(
+    pos: &Position,
+    mv: Move,
+    us_at_node: Color,
+    gives_check: bool,
+    from_was_enemy_blocker: bool,
+    see_nonneg: bool,
+    is_first_killer: bool,
+    is_advanced_pawn_push: bool,
+    last_captures_node_eligible: bool,
+) -> i32 {
+    let mut extension: i32 = 0;
+    if gives_check && (from_was_enemy_blocker || see_nonneg) {
+        extension = 1;
+    } else if is_first_killer
+        && is_advanced_pawn_push
+        && pos.pawn_passed(us_at_node, mv.to())
+    {
+        // Passed-pawn extension: ply's killer is an advanced
+        // passed-pawn push. Killers are the ply-stable
+        // refutation moves; if the move that already worked
+        // is itself a race-changing pawn push, +1 ply is
+        // worth confirming the race.
+        extension = 1;
+    } else if last_captures_node_eligible {
+        // Last-captures: parent's move was a heavy capture
+        // and we're in thin material (≤ 2 rooks). Every move
+        // at this node gets +1 to find concrete endgame
+        // technique. Node-level (computed once outside the
+        // loop), not move-level.
+        extension = 1;
+    }
+    // Castling override: SF's bottom-of-chain `if` (line 1089)
+    // — castling is a one-shot structural move that re-shapes
+    // king safety; an extra ply of verification is worth it.
+    if mv.kind() == crate::types::MoveKind::Castling {
+        extension = 1;
+    }
+    extension
 }
 
 /// Stockfish 11's `update_continuation_histories`: bumps the
