@@ -9,7 +9,7 @@ Branch: **main**. (W1 + the merged UX WIP + W2 all live on main now.)
 
 ---
 
-## Status: IN PROGRESS — 8 commits landed, ~6 files + 2 checkpoint files remain
+## Status: IN PROGRESS — 9 commits landed, ~5 files + 2 checkpoint files remain
 
 **Done criteria (from ROADMAP):** every `.rs` *source* file ≤500 LOC (data
 tables like `psqt` and one cohesive eval term `pawns` are documented
@@ -84,7 +84,7 @@ Each split is small enough to also do by hand.
 
 ---
 
-## Landed (8 commits, all on main, tests green, engine bench node-neutral)
+## Landed (9 commits, all on main, tests green, engine bench node-neutral)
 
 | Commit | File | Result |
 |---|---|---|
@@ -96,6 +96,7 @@ Each split is small enough to also do by hand.
 | `a1820b5` | `types.rs` (engine) | → `types/{color,piece,square,direction,value,misc,moves,tests}.rs`. `Square.0`→pub(crate). Bench 9,739,495. |
 | `e9b9357` | `traps/mod.rs` (engine) | → `traps/{mod,logic,tests}.rs` (360/445/...). damiano.rs (470) untouched. Bench 9,739,495. |
 | `f40c050` | `tt.rs` (engine) | → `tt/{mod,storage,tests}.rs` (356/154/...). Entry/Cluster internals pub(super). Bench 9,739,495. |
+| _pending_ | `analysis/threats_outcome.rs` (engine) | → `threats_outcome/{mod,types,lists,guaranteed,tests}.rs` (97/107/285/133/387). `list_pressured`→pub(super); `count_hanging` test helper moved into tests.rs. Bench 9,739,495; 728 engine tests. |
 
 `CLAUDE.md` "Separation of concerns" bullet already updated (in `3a3d155`) to
 document the `#[path]` sibling-test convention precisely.
@@ -105,19 +106,14 @@ document the `#[path]` sibling-test convention precisely.
 Seam plans below are from a prior structural analysis — trust them, no need to
 re-derive.
 
-1. **`threats_outcome.rs`** (engine, 976; ~590 src). Has a mid-file
-   `#[cfg(test)] fn count_hanging` test helper (keep it `#[cfg(test)]`, it can
-   stay in source or move with tests). Split the public surface
-   (`list_hanging` + the outcome compute fns) from the rest; extract tests.
-   Bench-neutral (analysis layer, not search path) but still verify.
-2. **`eval/mod.rs` (1059) + `eval/pieces.rs` (655)** (engine, HOT PATH). Plan:
+1. **`eval/mod.rs` (1059) + `eval/pieces.rs` (655)** (engine, HOT PATH). Plan:
    `eval/mod.rs` → keep `Evaluator` + constants + public `evaluate*` entry
    points (~330); move `EvalTrace`/`MaterialBreakdown`/per-piece trace types →
    `eval/trace.rs` (~228); `evaluate_inner` orchestration → `eval/core.rs`
    (~177); `scale_factor` → `eval/scale.rs` (~37). `pieces.rs` is 512 src after
    test extraction — needs a small trim/sub-split. **Bench-lock; `#[inline]`
    on any hot fn moved across a module boundary.**
-3. **`movepick.rs`** (engine, 1718, HOT PATH). Plan: `movepick/mod.rs` =
+2. **`movepick.rs`** (engine, 1718, HOT PATH). Plan: `movepick/mod.rs` =
    history data structs (ButterflyHistory, ContinuationHistory, ContHistStore,
    CaptureHistory, CounterMoveTable, ScoredMove/MoveBufs pool, Stage enum,
    constants) ~660 — **still >500, split history tables into a second file**;
@@ -126,7 +122,7 @@ re-derive.
    partial_insertion_sort, mvv_lva, captured_piece_value, is_pseudo_legal ~80.
    Shared `stat_bonus`/`lmr_reduction`/`cont_key_at` come from search — keep
    `#[inline]`. Bench-lock.
-4. **`retrospective_view.rs`** (ui, 2797 — THE BIG ONE). Plan: directory
+3. **`retrospective_view.rs`** (ui, 2797 — THE BIG ONE). Plan: directory
    module, one file per `build_*_item`: `retrospective_view/{mod (orchestrator
    `build_retrospective_view` + re-exports), headline, material, threats,
    king_safety, mobility, pawn_structure, passed_pawns, space, pieces,
@@ -134,22 +130,22 @@ re-derive.
    (piece_name/article/capitalize/join_with_and/format_score_pawns/
    format_delta_pawns) → `helpers.rs` as `pub(crate)`. Each builder ≤380.
    No perf surface — build + ui tests (27).
-5. **`pawns.rs`** (engine, 1012) — **KEEP WHOLE** (user decision: one cohesive
+4. **`pawns.rs`** (engine, 1012) — **KEEP WHOLE** (user decision: one cohesive
    eval term; splitting obscures the algorithm). Just extract its inline tests
    to `pawns_tests.rs` and add a top-of-file note documenting the intentional
    >500 source exception. Bench-neutral.
-6. **`main.rs`** (cli, 832). Mostly Clap arg-def boilerplate. Extract the
+5. **`main.rs`** (cli, 832). Mostly Clap arg-def boilerplate. Extract the
    `Cli`/`Command`/`EngineColor` clap definitions to a sibling (e.g.
    `cli_args.rs`) to get `main.rs` ≤500, OR document as a boilerplate
    exception. (Was flagged but not yet in the task list.)
 
 ### CHECKPOINT WITH USER before these two (per user, 2026-05-26):
 
-7. **`session.rs`** (ui, 2107, god-object). Plan: `session/{mod (struct +
+6. **`session.rs`** (ui, 2107, god-object). Plan: `session/{mod (struct +
    ctor + accessors), moves, game_flow, worker, event_dispatch, view_builders,
    game_state, learning}.rs`. Fields → `pub(crate)`. No inline tests. Risky —
    pause for review before starting.
-8. **`search.rs`** (engine, 3539, HOTTEST PATH). User chose **decompose +
+7. **`search.rs`** (engine, 3539, HOTTEST PATH). User chose **decompose +
    bench-lock**: file-split (qsearch, pruning helpers, history helpers,
    settled_ply, aspiration/run, SearchContext/state to siblings) AND decompose
    the ~1373-LOC `negamax` into sub-functions to hit ≤500 — node count
