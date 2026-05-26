@@ -133,6 +133,16 @@ impl Position {
             self.castling_rights & !(CASTLING_CLEAR[from.index()] | CASTLING_CLEAR[to.index()]);
 
         // --- New en-passant target (pawn double push only) -------------
+        // SF11 (position.cpp:792-794) records the ep square — and folds
+        // it into the Zobrist key — ONLY when an enemy pawn can actually
+        // capture en passant. Recording it unconditionally diverges
+        // `key()` from SF for every double push with no capturer, and
+        // because both the transposition table and repetition detection
+        // key off `key()`, two genuinely-identical positions reached via
+        // different move orders get different keys — suppressing legit
+        // TT/repetition hits. A `us` pawn standing on `ep_sq` attacks
+        // exactly the squares an enemy pawn would occupy to capture it,
+        // so intersect that set with their pawns.
         if moving_kind == PieceType::Pawn {
             let rank_from = from.rank();
             let rank_to = to.rank();
@@ -142,7 +152,10 @@ impl Position {
             };
             if is_double_push {
                 let ep_sq = from + Direction::pawn_push(us);
-                self.en_passant = Some(ep_sq);
+                let their_pawns = self.pieces_of(them, PieceType::Pawn);
+                if (crate::attacks::pawn_attacks_from(us, ep_sq) & their_pawns).any() {
+                    self.en_passant = Some(ep_sq);
+                }
             }
         }
 
@@ -337,11 +350,27 @@ mod tests {
     fn do_move_e2_e4_produces_expected_position() {
         let mut p = Position::startpos();
         p.do_move(Move::normal(Square::E2, Square::E4));
+        // No black pawn can capture on e3, so (matching SF11) the ep
+        // square is NOT recorded — the canonical FEN has "-" in the ep
+        // field, not "e3". Recording a non-capturable ep would diverge
+        // key() from SF and break TT/repetition matching.
         assert_eq!(
             p.to_fen(),
-            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
         );
+        assert_eq!(p.en_passant(), None);
         // The key must be the same as computing from scratch.
+        assert_eq!(p.key(), p.compute_key_from_scratch());
+    }
+
+    #[test]
+    fn do_move_double_push_sets_ep_only_when_capturable() {
+        // Black pawn on d4; white plays e2-e4. A black pawn on d4 attacks
+        // e3, so en passant (exd... dxe3) is possible → e3 IS recorded.
+        let mut p =
+            Position::from_fen("4k3/8/8/8/3p4/8/4P3/4K3 w - - 0 1").unwrap();
+        p.do_move(Move::normal(Square::E2, Square::E4));
+        assert_eq!(p.en_passant(), Some(Square::E3));
         assert_eq!(p.key(), p.compute_key_from_scratch());
     }
 

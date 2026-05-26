@@ -259,8 +259,8 @@ impl<'a> Evaluator<'a> {
         // King ring: clamp the king square into the b2..g7 interior so a
         // corner king still has an 8-square neighbourhood, then take the
         // king-attack set of the clamped square plus the square itself.
-        // Finally, subtract squares the enemy double-attacks with pawns
-        // — we already know those aren't worth attacking.
+        // Finally, subtract the squares our own pawns doubly defend —
+        // those are safe and don't belong in the king-danger zone.
         let clamped_file = king_sq
             .file()
             .index()
@@ -275,13 +275,16 @@ impl<'a> Evaluator<'a> {
         );
         let mut ring = king_attacks(clamped) | crate::bitboard::square_bb(clamped);
 
-        // Count enemy pawns that immediately pressure our king ring,
-        // then remove enemy double-attack squares from the ring so the
-        // king-safety aggregator doesn't double-count them with safer
-        // checks further out.
+        // Count enemy pawns that immediately pressure our king ring
+        // (computed on the full ring, before the removal below — matches
+        // SF11's ordering at evaluate.cpp:243 then :247), then remove
+        // from the ring the squares defended by two of OUR OWN pawns:
+        // those are safe, so the king-safety aggregator shouldn't treat
+        // them as part of the danger zone. Mirrors SF11 evaluate.cpp:247
+        // (`kingRing[Us] &= ~dblAttackByPawn`, where dblAttackByPawn is
+        // `pawn_double_attacks_bb<Us>` over our own pawns — see :223).
         self.king_attackers_count[them.index()] = (ring & their_pawn_attacks).popcount() as i32;
-        let their_pawns = self.pos.pieces_of(them, PieceType::Pawn);
-        ring &= !their_pawns.pawn_double_attacks(them);
+        ring &= !our_double_pawn;
         self.king_ring[us_idx] = ring;
     }
 }

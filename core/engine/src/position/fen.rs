@@ -121,6 +121,23 @@ impl Position {
             }
         }
 
+        // An en-passant square is only meaningful if a side-to-move pawn
+        // can actually capture onto it (SF11 position.cpp:262-273). Drop a
+        // "phantom" ep so `key()` matches SF and stays consistent with
+        // do_move's gated ep handling (P1) — otherwise a FEN-loaded
+        // position and the same position reached by playing moves would
+        // hash differently, breaking TT/repetition matches. The capturing
+        // side is the side to move; the pushed pawn is the opponent's, so
+        // a pusher-coloured pawn on ep_sq attacks exactly the squares the
+        // capturing pawns would sit on.
+        if let Some(ep_sq) = position.en_passant {
+            let capturer = position.side_to_move;
+            let capturer_pawns = position.pieces_of(capturer, PieceType::Pawn);
+            if (crate::attacks::pawn_attacks_from(!capturer, ep_sq) & capturer_pawns).is_empty() {
+                position.en_passant = None;
+            }
+        }
+
         position.key = position.compute_key_from_scratch();
         position.pawn_key = position.compute_pawn_key_from_scratch();
         position.psq = position.compute_psq_from_scratch();
@@ -424,12 +441,30 @@ mod tests {
     }
 
     #[test]
-    fn fen_roundtrips_en_passant_after_double_push() {
-        // After 1. e4, the e3 square becomes a legal en-passant target.
+    fn fen_roundtrips_en_passant_when_capturable() {
+        // En passant is only recorded when a side-to-move pawn can
+        // actually capture onto it (SF11 position.cpp:262-273). White's
+        // e5 pawn can play exd6, so d6 is a real ep target and survives
+        // the round-trip.
+        let fen = "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1";
+        let p = Position::from_fen(fen).unwrap();
+        assert_eq!(p.en_passant(), Some(Square::D6));
+        assert_eq!(p.to_fen(), fen);
+    }
+
+    #[test]
+    fn fen_drops_phantom_en_passant_with_no_capturer() {
+        // After 1. e4 from the start no black pawn can capture on e3, so
+        // the ep square is dropped — matching SF11 and keeping key() in
+        // sync with the do_move path (the same position reached by playing
+        // 1. e4 also has no ep square).
         let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
         let p = Position::from_fen(fen).unwrap();
-        assert_eq!(p.en_passant(), Some(Square::E3));
-        assert_eq!(p.to_fen(), fen);
+        assert_eq!(p.en_passant(), None);
+        assert_eq!(
+            p.to_fen(),
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        );
     }
 
     #[test]
