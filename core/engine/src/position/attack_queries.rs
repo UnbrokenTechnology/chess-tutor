@@ -3,9 +3,9 @@
 //! move's origin.
 
 use super::Position;
-use crate::attacks::{king_attacks, knight_attacks, pawn_attacks_from};
-use crate::bitboard::Bitboard;
-use crate::magics::{bishop_attacks, rook_attacks};
+use crate::attacks::{aligned, king_attacks, knight_attacks, pawn_attacks_from, rook_pseudo_attacks};
+use crate::bitboard::{square_bb, Bitboard};
+use crate::magics::{bishop_attacks, queen_attacks, rook_attacks};
 use crate::types::{Color, Move, MoveKind, Piece, PieceType, Square};
 
 impl Position {
@@ -58,6 +58,84 @@ impl Position {
     pub fn moved_piece(&self, mv: Move) -> Piece {
         self.piece_on(mv.from())
             .expect("moved_piece: no piece on from-square")
+    }
+
+    /// Tests whether the pseudo-legal move `mv` gives check to the
+    /// opponent king **without making the move**. Mirrors Stockfish 11's
+    /// `Position::gives_check` (position.cpp:627-678): direct check, then
+    /// discovered check, then the promotion / en-passant / castling
+    /// special cases. Used by qsearch futility pruning, which must skip
+    /// checking moves before pruning them. Computed on demand (no cached
+    /// `checkSquares`/`blockersForKing` — that caching is a possible NPS
+    /// follow-up).
+    pub fn gives_check(&self, mv: Move) -> bool {
+        let us = self.side_to_move;
+        let them = !us;
+        let from = mv.from();
+        let to = mv.to();
+        let ksq = self.king_square(them);
+        let from_bb = square_bb(from);
+        let occ = self.occupied();
+
+        // Direct check: the moved piece, arriving on `to`, attacks the
+        // enemy king. Sliders use the post-move occupancy (the from-square
+        // is vacated; the piece's own to-square never blocks its outgoing
+        // rays). Non-sliders are occupancy-independent.
+        let direct = match self.moved_piece(mv).kind() {
+            PieceType::Pawn => pawn_attacks_from(us, to).contains(ksq),
+            PieceType::Knight => knight_attacks(to).contains(ksq),
+            PieceType::King => false,
+            PieceType::Bishop => bishop_attacks(to, occ ^ from_bb).contains(ksq),
+            PieceType::Rook => rook_attacks(to, occ ^ from_bb).contains(ksq),
+            PieceType::Queen => queen_attacks(to, occ ^ from_bb).contains(ksq),
+        };
+        if direct {
+            return true;
+        }
+
+        // Discovered check: `from` blocks one of OUR sliders from the
+        // enemy king, and the move leaves that line. `blockers_for_king`
+        // for the enemy is exactly the set of pieces blocking our sliders
+        // from their king (snipers = our pieces), so a blocker on `from`
+        // means moving it uncovers our slider's check — unless `to` stays
+        // collinear with the slider's ray (`aligned`).
+        if self.blockers_for_king(them).contains(from) && !aligned(from, to, ksq) {
+            return true;
+        }
+
+        match mv.kind() {
+            MoveKind::Normal => false,
+            MoveKind::Promotion => {
+                // The promoted piece, on `to` with `from` vacated, attacks ksq.
+                let occ_after = occ ^ from_bb;
+                match mv.promoted_to() {
+                    PieceType::Knight => knight_attacks(to).contains(ksq),
+                    PieceType::Bishop => bishop_attacks(to, occ_after).contains(ksq),
+                    PieceType::Rook => rook_attacks(to, occ_after).contains(ksq),
+                    PieceType::Queen => queen_attacks(to, occ_after).contains(ksq),
+                    _ => false,
+                }
+            }
+            MoveKind::EnPassant => {
+                // Direct and ordinary discovered checks are handled above;
+                // the only extra case is a discovered check opened by
+                // removing the captured pawn (on the to-file, from-rank).
+                let capsq = Square::new(to.file(), from.rank());
+                let b = (occ ^ from_bb ^ square_bb(capsq)) | square_bb(to);
+                let rq = self.pieces_of(us, PieceType::Rook) | self.pieces_of(us, PieceType::Queen);
+                let bq =
+                    self.pieces_of(us, PieceType::Bishop) | self.pieces_of(us, PieceType::Queen);
+                (rook_attacks(ksq, b) & rq).any() || (bishop_attacks(ksq, b) & bq).any()
+            }
+            MoveKind::Castling => {
+                // Only the rook can give check after castling (a king never
+                // does). In our encoding `to` is the king's destination;
+                // the rook hops `rfrom`→`rto`.
+                let (rfrom, rto) = super::make_move::castling_rook_squares(us, to);
+                let occ_after = (occ ^ from_bb ^ square_bb(rfrom)) | square_bb(to) | square_bb(rto);
+                rook_pseudo_attacks(rto).contains(ksq) && rook_attacks(rto, occ_after).contains(ksq)
+            }
+        }
     }
 }
 
@@ -201,5 +279,48 @@ mod tests {
         let p = Position::startpos();
         let m = Move::normal(Square::G1, Square::F3);
         assert_eq!(p.moved_piece(m), Piece::WhiteKnight);
+    }
+
+    // ---- gives_check ------------------------------------------------
+
+    /// The authoritative check for `gives_check`: for every legal move in
+    /// a diverse set of positions, the no-make prediction must equal the
+    /// make/unmake ground truth (`do_move; in_check; undo`). Covers direct
+    /// checks, discovered checks, promotions, en passant, and castling.
+    #[test]
+    fn gives_check_matches_make_unmake_oracle() {
+        use crate::movegen::{generate_legal_moves, MoveList};
+        let fens = [
+            // Start position.
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            // Kiwipete: castling both sides, pins, many captures/checks.
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            // Same, black to move.
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R b KQkq - 0 1",
+            // En passant capturable (white e5 x d6) — exercises the ep
+            // discovered-check branch.
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+            // Pawn one step from promotion; g7-g8=Q/R checks the e8 king
+            // along the back rank (B/N do not). Legal: the g7 pawn attacks
+            // f8/h8, not e8, so black isn't already in check.
+            "4k3/6P1/8/8/8/8/8/4K3 w - - 0 1",
+            // Position 3 (Roycroft) — sliders, discovered-check geometry.
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ];
+        for fen in fens {
+            let mut p = Position::from_fen(fen).unwrap();
+            let mut moves = MoveList::new();
+            generate_legal_moves(&mut p, &mut moves);
+            for &m in &moves {
+                let predicted = p.gives_check(m);
+                let st = p.do_move(m);
+                let actual = p.in_check();
+                p.undo_move(m, st);
+                assert_eq!(
+                    predicted, actual,
+                    "gives_check({m:?}) = {predicted} but make/unmake oracle = {actual} in FEN {fen}"
+                );
+            }
+        }
     }
 }

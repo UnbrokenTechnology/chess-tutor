@@ -321,7 +321,7 @@ impl Position {
 
 /// Given the castling king's destination square, return the rook's
 /// (from, to) pair. Assumes standard chess, not Chess960.
-fn castling_rook_squares(color: Color, king_to: Square) -> (Square, Square) {
+pub(crate) fn castling_rook_squares(color: Color, king_to: Square) -> (Square, Square) {
     match (color, king_to) {
         (Color::White, Square::G1) => (Square::H1, Square::F1),
         (Color::White, Square::C1) => (Square::A1, Square::D1),
