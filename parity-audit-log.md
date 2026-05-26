@@ -302,6 +302,20 @@ Re-audit (3 subagents + direct verification) overturned the prior "faithful port
 ### Attempted, regressed, reverted
 
 - **Faithful NMP (refined-eval gate + `(854+68·depth)/258` reduction + depth≥13 verification w/ nmpMinPly/nmpColor).** A/B at d=14: +4.3% with our old R, +12.4% with SF's R. SF's aggressive NMP is balanced by companions not yet ported (qsearch ttValue refinement Q3/Q4, razoring S6, after-null eval S5). Reverted; retry as part of the qsearch/eval-balance bundle. (The eval-refinement S4 it rode on was kept — it's a standalone win.)
+- **qsearch stand-pat ttValue refinement (Q3) alone:** +0.4% (neutral/noise). Reverted; belongs in the qsearch bundle, not solo.
+
+### Structural NPS (Phase A) — finding: B1 and B3 are coupled
+
+Built **B3** (`set_check_info` caching: cache `king_blockers`/`king_pinners`/`checkers` in Position, save/restore in StateInfo, maintained in do_move/do_null_move/from_fen; SEE + `checkers()` + `blockers_for_king()` read the cache). It is **correct and node-neutral** (bench node count stayed byte-identical at 10,227,018; all 726 tests pass after a robustness guard for transient kingless positions in the do/undo legality filter). **But it regressed NPS ~7% at d=14 and was reverted**, because:
+
+`compute_check_info` runs on *every* `do_move`, but our move loop currently `do_move`s **before** pruning (CMP/futility/SEE all `do_move` then `undo`). So every pruned-move do/undo pays a full `compute_check_info` (2× `slider_blockers`) whose result is never consumed. The cache only pays off once pruning moves **before** `do_move` (**B1**), so that one `compute_check_info` per *node* serves that node's `in_check` + all its moves' `legal()`/`gives_check`/SEE.
+
+**So the structural NPS win requires the full B1+B3 bundle, landed together:**
+1. Port `Position::legal(mv)` (pin-aware, pre-move) — reads cached `king_blockers` + `aligned()` (exists) + king-move-safety + ep/castling special cases. Add a do/undo oracle test (like `gives_check`).
+2. Restructure the negamax move loop to SF's pre-`do_move` order (search.cpp:962-1113): `legal()` → `gives_check` (cached) → extensions → Step-13 pruning, then a single `do_move` for survivors only. Must preserve exact prune semantics, `quiets_tried`, `move_count`, and node-neutrality (node count must remain 10,227,018).
+3. Re-add B3 caching; SEE/checkers/blockers read the cache; B4 falls out.
+
+This is a large, correctness-critical restructure of the hottest path — deferred to a focused session rather than rushed. The B3 code is straightforward to reconstruct (see git reflog / this entry).
 
 ---
 
