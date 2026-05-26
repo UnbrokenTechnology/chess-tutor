@@ -332,6 +332,28 @@ Built **B3** (`set_check_info` caching: cache `king_blockers`/`king_pinners`/`ch
 
 This is a large, correctness-critical restructure of the hottest path — deferred to a focused session rather than rushed. The B3 code is straightforward to reconstruct (see git reflog / this entry).
 
+### Structural NPS (Phase B) — B1+B3 LANDED (2026-05-26, session 3)
+
+The full bundle landed, node-neutral, across three commits:
+
+| Commit | Change |
+|---|---|
+| `e1cc2f5` | Port `Position::legal` (pin-aware, pre-move; in-check resolution since our picker emits the full pseudo-legal set even in check). Oracle-tested vs the legal-move generator (pins, ep-opens-pin, king-slide-along-ray, double/knight/single check). |
+| `698a79b` | **B1** — negamax move loop restructured to SF order: `legal()` → `gives_check` → extensions → Step-13 prune, all pre-move; single `do_move` for survivors. Every post-`do_move` value reproduced pre-move (npm `\|\| Promotion`, futility `stm = !us_at_node`, `pawn_passed` invariant). |
+| `4cfd1c7` | **B3** — cache `checkers`/`king_blockers`/`king_pinners` in `Position`, save/restore in `StateInfo`, maintain in `do_move`/`do_null_move`/`from_fen`; `checkers()`/`blockers_for_king()`/SEE/`legal()`/`gives_check()` read the cache. Kingless-guard probes the king bitboard before `lsb()`. |
+
+**Node-neutral throughout: d=14 = 9,739,495, d=20 = 138,713,681 (byte-identical to the post-NMP baseline at every stage).** All 706 engine tests pass; clippy clean.
+
+**NPS result — the audit's "~half the runtime gap" estimate was WRONG.** B1+B3 nets only **+0.8% (d=20) / +1.1% (d=14)** over the post-NMP baseline:
+
+| Stage | d=14 NPS | d=20 NPS |
+|---|---:|---:|
+| post-NMP baseline | 2,453,150 | 2,241,873 |
+| B1 alone | 2,384,360 (**−2.8%**) | — |
+| B1+B3 | 2,480,875 (+1.1%) | 2,260,185 (+0.8%) |
+
+Two findings: (1) B1 *alone* regresses NPS — `legal()`/`gives_check`/`checkers` recompute per move without the cache — so B1 is only landable bundled with B3 (confirms the coupling). (2) The structural do/undo-on-prune leak is **~1%, not half the gap**: make/unmake is cheap in our impl, and `compute_check_info`'s per-`do_move` cost (2 `slider_blockers` + 1 `attackers_to`) offsets most of the SEE/legality-cache savings. **The bulk of the ~0.65–0.75× NPS gap vs SF lies elsewhere** — candidates: full-pseudo-legal generation + filter (vs SF's targeted `generate<GenType>`), eval cost, the 16 B vs 10 B TT entry. Landed anyway: net-positive, more SF-faithful, and the cached `gives_check`/`legal` infra unblocks Q1 (qsearch futility) riding a real `gives_check`.
+
 ---
 
 ## Bench output archive
