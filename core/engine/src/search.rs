@@ -91,8 +91,24 @@ const CONTEMPT_CP: i32 = 2;
 /// regions where a ±1 cp tiebreak would only add noise.
 const DRAW_JITTER_MIN_DEPTH: i32 = 4;
 
-/// Minimum depth at which null-move pruning is considered.
+/// Minimum depth at which null-move pruning is considered. SF11 has no
+/// such floor (it nulls at any depth, diving straight to qsearch when
+/// `depth - R <= 0`); we keep a `depth >= 3` gate as a pre-existing,
+/// deliberate divergence — low-depth nodes are already covered by
+/// razoring (`depth < 2`) and reverse-futility (`depth < 6`).
 const NULL_MIN_DEPTH: i32 = 3;
+
+/// SF11 `RazorMargin` (search.cpp:68). At `depth < 2`, when even the
+/// refined eval is this far below alpha, the node almost certainly
+/// can't raise alpha — drop straight into quiescence.
+const RAZOR_MARGIN: i32 = 531;
+
+/// Depth (in plies) at and above which a successful null-move cutoff is
+/// re-checked by a verification search with NMP disabled for the
+/// cutting side (SF11 search.cpp:869). Below it, the cutoff is trusted
+/// directly. Guards against zugzwang where the null move is illusorily
+/// good.
+const NMP_VERIFY_MIN_DEPTH: i32 = 13;
 
 /// Minimum depth at which LMR activates; earlier moves below it play
 /// out at full depth.
@@ -168,6 +184,19 @@ pub(crate) struct StackEntry {
     /// Static evaluation at this ply, before any move was played.
     /// `Value::NONE` when the searcher was in check or for sentinels.
     pub static_eval: Value,
+    /// The *contempt-free* static evaluation at this ply — what we
+    /// persist to the TT, and what the after-null eval refinement
+    /// (SF11 search.cpp:817/1429) negates: a child reached via a null
+    /// move derives its eval as `-(ss-1)->staticEval + 2·Tempo`. Read
+    /// from this raw value so the result stays contempt-free.
+    /// `Value::NONE` when in check or for sentinels.
+    pub raw_static_eval: Value,
+    /// Was this ply's move the *null move* (SF11 `(ss-1)->currentMove
+    /// == MOVE_NULL`)? Set true only in the null-move-pruning block;
+    /// reset false at every real-move recursion site. Children read
+    /// `stack[ply-1].was_null` to gate NMP (don't null twice in a row)
+    /// and to select the after-null eval refinement.
+    pub was_null: bool,
     /// Stockfish's per-ply `statScore`: blended main + cont-history
     /// score for the *most recent quiet move iterated at this ply*.
     /// Read by children for LMR comparison (`(ss-1)->statScore`) and
@@ -198,6 +227,8 @@ impl StackEntry {
         in_check: false,
         was_capture: false,
         static_eval: Value::NONE,
+        raw_static_eval: Value::NONE,
+        was_null: false,
         stat_score: 0,
         move_count: 0,
         captured_piece_kind: None,
@@ -327,6 +358,18 @@ pub(crate) struct Search<'a> {
     /// after the probe; read by the LMR relaxer/capture-gate. Reset to
     /// half-window at every `run()`.
     tt_hit_average: i64,
+
+    /// SF11's `Thread::nmpMinPly` (search.cpp:876). While a null-move
+    /// *verification* search is active, NMP is disabled for the
+    /// verifying side ([`nmp_color`]) until `ply` reaches this value —
+    /// this forbids recursive verification. `0` means no verification
+    /// is active (NMP allowed everywhere, since `ply >= 0` always
+    /// holds). Reset to `0` at every `run()`.
+    nmp_min_ply: usize,
+    /// SF11's `Thread::nmpColor` (search.cpp:877). The side for which
+    /// NMP is suspended during an active verification search. Only
+    /// consulted when [`nmp_min_ply`] is non-zero.
+    nmp_color: Color,
 }
 
 impl<'a> Search<'a> {
@@ -377,6 +420,8 @@ impl<'a> Search<'a> {
             root_stm: Color::White,
             eval_mask: EvalMask::EMPTY,
             tt_hit_average: TT_HIT_AVERAGE_INIT,
+            nmp_min_ply: 0,
+            nmp_color: Color::White,
         }
     }
 
@@ -419,6 +464,8 @@ impl<'a> Search<'a> {
         self.max_nodes = params.max_nodes;
         self.eval_mask = params.eval_mask;
         self.tt_hit_average = TT_HIT_AVERAGE_INIT;
+        self.nmp_min_ply = 0;
+        self.nmp_color = Color::White;
         self.next_stop_check = STOP_CHECK_INTERVAL;
         self.verbose_progress = params.verbose_progress;
         self.verbose_next_tick = VERBOSE_TICK_INTERVAL;
@@ -852,26 +899,47 @@ impl<'a> Search<'a> {
         // widening does *not* fire on a stale sibling-search value.
         self.stack[STACK_SENTINEL + ply].move_count = 0;
 
-        // --- Static eval ---
+        // Did the parent reach this node via a null move? Governs both
+        // the after-null eval refinement below and the NMP "don't null
+        // twice" gate (SF11 `(ss-1)->currentMove == MOVE_NULL`).
+        let parent_was_null = self.stack[STACK_SENTINEL + ply - 1].was_null;
+
+        // --- Static eval (SF11 search.cpp:808-820, Steps 6/C2) ---
         //
         // `raw_static_eval` is the evaluator's untinted output — what
         // we persist to the TT so that later searches (possibly with
         // a different root side-to-move) can re-apply the right
         // contempt sign. `static_eval` is the contempt-adjusted form
         // used for this search's pruning decisions.
+        //
+        // On a TT miss (no stored eval) and out of check, SF refines
+        // the fresh static eval two ways, both kept in *raw*
+        // (contempt-free) space so the persisted value stays clean:
+        //   - parent played a real move: bias by `-(parent statScore)
+        //     / 512` — a strongly-scored parent quiet suggests the eval
+        //     is about to climb, so nudge it (SF11 search.cpp:812-814).
+        //   - parent played the null move: don't re-evaluate; negate the
+        //     parent's raw static eval and add two tempi (search.cpp:817).
         let raw_static_eval = if in_check {
             Value::NONE
         } else if tt_hit && probe.data.eval != Value::NONE {
             probe.data.eval
+        } else if parent_was_null {
+            let parent_raw = self.stack[STACK_SENTINEL + ply - 1].raw_static_eval;
+            Value(-parent_raw.0 + 2 * crate::eval::TEMPO.0)
         } else {
-            evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask)
+            let parent_stat = self.stack[STACK_SENTINEL + ply - 1].stat_score;
+            let bonus = -parent_stat / 512;
+            Value(evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask).0 + bonus)
         };
         let static_eval = self.apply_contempt(raw_static_eval, pos);
 
         // Persist this ply's static eval for the `improving` lookup
         // performed by descendants — they read `stack[ply-2]` and
-        // `stack[ply-4]`.
+        // `stack[ply-4]`. The raw form feeds a null-move child's
+        // after-null refinement above (and qsearch's Q4).
         self.stack[STACK_SENTINEL + ply].static_eval = static_eval;
+        self.stack[STACK_SENTINEL + ply].raw_static_eval = raw_static_eval;
 
         // SF11 search.cpp:804-806 — the refined `eval`. `static_eval` is
         // the raw (contempt-adjusted) evaluation that gets persisted and
@@ -891,6 +959,18 @@ impl<'a> Search<'a> {
             if use_tt {
                 eval = tt_value;
             }
+        }
+
+        // --- Step 7. Razoring (SF11 search.cpp:822-826, ~1 Elo) ---
+        // At `depth < 2`, if even the refined eval is a full
+        // `RAZOR_MARGIN` below alpha, this node almost surely can't
+        // raise alpha — skip the move loop and settle it in quiescence.
+        // `!is_root` mirrors SF's `!rootNode` (the root needs PV
+        // handling qsearch can't provide). `eval == NONE` (in check)
+        // is a no-op since `NONE` is a large sentinel, but we gate it
+        // explicitly for clarity.
+        if !is_root && depth < 2 && eval != Value::NONE && eval.0 <= alpha.0 - RAZOR_MARGIN {
+            return self.qsearch(pos, alpha, beta, ply, 0);
         }
 
         // `improving`: true when this ply's static eval is trending up
@@ -934,48 +1014,53 @@ impl<'a> Search<'a> {
             return eval;
         }
 
-        // --- Null-move pruning ---
-        // Stockfish loosens the staticEval gate by 30 cp when
-        // improving: the searcher trusts the eval more, so a slightly
-        // lower static eval still qualifies for null-move pruning.
+        // --- Step 9. Null-move pruning with verification (SF11
+        // search.cpp:838-885, ~40 Elo) ---
+        //
+        // Gate (search.cpp:839-847): the refined `eval` must clear beta
+        // *and* not undershoot the raw static eval, the raw static eval
+        // must clear a depth-scaled floor (loosened 30 cp when
+        // improving — a rising eval is trusted more), the parent must
+        // not itself have played a null move, its last quiet must not
+        // have scored hugely (`statScore < 23397`), the side to move
+        // must hold non-pawn material (zugzwang guard), and NMP must
+        // not be suspended for us by an active verification search.
         let nmp_eval_floor = beta.0 - 32 * depth + 292 - if improving { 30 } else { 0 };
-        // SF11 search.cpp:841 — skip NMP when the parent's last
-        // quiet move scored very strongly. The intuition: if the
-        // parent already played a clearly-good quiet, the eval is
-        // probably about to climb naturally, and a null move here
-        // would prune subtrees where the side-to-move's *active*
-        // play would expose the parent's mistake.
         let parent_stat_score = self.stack[STACK_SENTINEL + ply - 1].stat_score;
-        // NOTE: this NMP still uses the raw `static_eval` and our existing
-        // reduction formula rather than SF11's refined-`eval` gate +
-        // `(854+68·depth)/258` reduction + depth>=13 verification search.
-        // A/B (2026-05-26) showed the faithful NMP regresses on our tree
-        // (+4% with old R, +12% with SF's R) because SF's aggressive NMP
-        // is balanced by companions we have not yet ported (qsearch
-        // ttValue eval-refinement Q3/Q4, razoring, after-null eval). Retry
-        // the faithful NMP+verification bundle once those land.
+        let us = pos.side_to_move();
         if !is_pv
             && !in_check
+            && !parent_was_null
             && depth >= NULL_MIN_DEPTH
-            && static_eval != Value::NONE
-            && static_eval >= beta
+            && eval != Value::NONE
+            && eval >= beta
+            && eval >= static_eval
             && static_eval.0 >= nmp_eval_floor
             && parent_stat_score < 23397
-            && pos.non_pawn_material(pos.side_to_move()).0 > 0
+            && pos.non_pawn_material(us).0 > 0
+            && (ply >= self.nmp_min_ply || us != self.nmp_color)
         {
-            let r = 3 + depth / 4 + ((static_eval.0 - beta.0) / 200).clamp(0, 3);
-            let reduced = (depth - r).max(1);
+            // SF11 search.cpp:852 — dynamic reduction from depth and how
+            // far the eval clears beta. `eval >= beta` is guaranteed by
+            // the gate, so the margin term is already non-negative.
+            let r = (854 + 68 * depth) / 258 + ((eval.0 - beta.0) / 192).min(3);
+            // Faithful to SF: `depth - R` (no clamp). When it lands at
+            // or below zero the child dives straight into quiescence,
+            // which is what makes the qsearch after-null refinement (Q4)
+            // reachable.
+            let reduced = depth - r;
 
-            // Mark this ply's move-info as "null move" so the child's
-            // cont-hist lookup at "1 ply ago" hits the sentinel slot
-            // (moved_piece_idx == 0) and reads zero. Mirrors
-            // Stockfish's `ss->continuationHistory =
-            // &continuationHistory[0][0][NO_PIECE][0]`.
+            // Mark this ply as the null move: cont-hist "1 ply ago"
+            // resolves to the sentinel slot (moved_piece_idx == 0 reads
+            // zero, mirroring SF's `continuationHistory[0][0][NO_PIECE]
+            // [0]`), and `was_null` tells the child to skip NMP and take
+            // the after-null eval path.
             self.stack[STACK_SENTINEL + ply].moved_piece_idx = 0;
             self.stack[STACK_SENTINEL + ply].to_idx = 0;
             self.stack[STACK_SENTINEL + ply].was_capture = false;
             self.stack[STACK_SENTINEL + ply].in_check = false;
             self.stack[STACK_SENTINEL + ply].captured_piece_kind = None;
+            self.stack[STACK_SENTINEL + ply].was_null = true;
 
             let saved = pos.do_null_move();
             self.tt.prefetch(pos.key());
@@ -999,12 +1084,51 @@ impl<'a> Search<'a> {
             }
 
             if null_score >= beta {
+                // Don't return unproven mate scores (search.cpp:866-867).
                 let clamped = if null_score.0 >= Value::MATE.0 - Value::MAX_PLY {
                     beta
                 } else {
                     null_score
                 };
-                return clamped;
+
+                // Trust the cutoff directly when a verification is
+                // already running (no recursive verification) or when
+                // the depth is shallow and beta isn't in mate territory.
+                // Otherwise re-search at `depth - R` with NMP suspended
+                // for us until `ply` passes `nmp_min_ply`, and only
+                // accept the cutoff if the verification also fails high.
+                if self.nmp_min_ply != 0
+                    || (beta.0.abs() < Value::KNOWN_WIN.0 && depth < NMP_VERIFY_MIN_DEPTH)
+                {
+                    return clamped;
+                }
+
+                // `depth - reduced` can be non-positive at shallow,
+                // mate-territory verifications; saturate the resulting
+                // ply offset at zero (SF uses signed plies, where a
+                // negative floor is simply always-satisfied).
+                let verify_offset = (3 * reduced / 4).max(0) as usize;
+                self.nmp_min_ply = ply + verify_offset;
+                self.nmp_color = us;
+                let v = self.negamax(
+                    pos,
+                    Value(beta.0 - 1),
+                    beta,
+                    reduced,
+                    ply,
+                    false,
+                    false,
+                    prev,
+                    false,
+                );
+                self.nmp_min_ply = 0;
+
+                if self.is_aborted() {
+                    return Value::ZERO;
+                }
+                if v >= beta {
+                    return clamped;
+                }
             }
         }
 
@@ -1120,6 +1244,7 @@ impl<'a> Search<'a> {
                 self.stack[STACK_SENTINEL + ply].was_capture = true;
                 self.stack[STACK_SENTINEL + ply].captured_piece_kind =
                     state.captured.map(|p| p.kind());
+                self.stack[STACK_SENTINEL + ply].was_null = false;
 
                 self.path_keys.push(pos.key());
                 let child_prev = Some((moved_piece.kind(), mv.to()));
@@ -1579,6 +1704,7 @@ impl<'a> Search<'a> {
             self.stack[STACK_SENTINEL + ply].was_capture = is_capture;
             self.stack[STACK_SENTINEL + ply].captured_piece_kind =
                 state.captured.map(|p| p.kind());
+            self.stack[STACK_SENTINEL + ply].was_null = false;
 
             let child_prev = Some((moved_pt, mv.to()));
 
@@ -2068,15 +2194,49 @@ impl<'a> Search<'a> {
             }
         }
 
-        // Qsearch doesn't save to TT, so no need to preserve a raw
-        // variant — apply contempt directly to the value we'll use.
-        let stand_pat = if in_check {
+        // --- Stand-pat / static eval (SF11 search.cpp:1408-1446) ---
+        //
+        // `raw_stand_pat` is the contempt-free static eval (SF's
+        // `ss->staticEval`); we persist it on the stack so a null-move
+        // child reached straight from quiescence can take the after-null
+        // refinement (Q4). On a TT hit we read the stored eval (falling
+        // back to a fresh evaluation if the entry had none); on a miss
+        // we either negate the parent's raw eval and add two tempi when
+        // the parent played the null move (Q4), or evaluate fresh.
+        let parent_was_null = self.stack[STACK_SENTINEL + ply - 1].was_null;
+        let raw_stand_pat = if in_check {
             Value::NONE
-        } else if tt_hit && probe.data.eval != Value::NONE {
-            self.apply_contempt(probe.data.eval, pos)
+        } else if tt_hit {
+            if probe.data.eval != Value::NONE {
+                probe.data.eval
+            } else {
+                evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask)
+            }
+        } else if parent_was_null {
+            let parent_raw = self.stack[STACK_SENTINEL + ply - 1].raw_static_eval;
+            Value(-parent_raw.0 + 2 * crate::eval::TEMPO.0)
         } else {
-            self.search_eval(pos)
+            evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask)
         };
+        self.stack[STACK_SENTINEL + ply].raw_static_eval = raw_stand_pat;
+
+        let mut stand_pat = self.apply_contempt(raw_stand_pat, pos);
+
+        // Q3 (SF11 search.cpp:1422-1425): on a TT hit, a stored value
+        // tighter than the static eval in the bound's direction is a
+        // better stand-pat estimate. Mirrors the negamax `eval`
+        // refinement (S4). Only out of check, where the stand-pat is a
+        // real value.
+        if !in_check && tt_hit && tt_value != Value::NONE {
+            let use_tt = if tt_value > stand_pat {
+                matches!(probe.data.bound, Bound::Lower | Bound::Exact)
+            } else {
+                matches!(probe.data.bound, Bound::Upper | Bound::Exact)
+            };
+            if use_tt {
+                stand_pat = tt_value;
+            }
+        }
 
         let mut best_score;
         if !in_check {
@@ -2170,6 +2330,7 @@ impl<'a> Search<'a> {
             self.stack[STACK_SENTINEL + ply].to_idx = mv.to().index() as u8;
             self.stack[STACK_SENTINEL + ply].in_check = in_check;
             self.stack[STACK_SENTINEL + ply].was_capture = is_capture;
+            self.stack[STACK_SENTINEL + ply].was_null = false;
 
             self.path_keys.push(pos.key());
             // SF11 search.cpp:1522 — recursive qsearch decrements
