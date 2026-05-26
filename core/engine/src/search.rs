@@ -1420,16 +1420,11 @@ impl<'a> Search<'a> {
                     >= (crate::types::Rank::R6 as u8);
             let is_first_killer = mv == self.killers[ply][0];
 
-            // Legality check via do/undo. `pos.do_move` assumes pseudo-
-            // legal input; the picker guarantees that.
-            let state = pos.do_move(mv);
-            self.tt.prefetch(pos.key());
-            let us_was = !pos.side_to_move();
-            let our_king = pos.king_square(us_was);
-            let still_attacked =
-                (pos.attackers_to(our_king, pos.occupied()) & pos.pieces_by_color(!us_was)).any();
-            if still_attacked {
-                pos.undo_move(mv, state);
+            // Legality (B1): test before making the move, so the
+            // Step-13 prunes below can reject a move without a
+            // `do_move`/`undo_move` round-trip. `pos.legal` is
+            // oracle-tested against the make/unmake filter it replaces.
+            if !pos.legal(mv) {
                 continue;
             }
 
@@ -1439,17 +1434,32 @@ impl<'a> Search<'a> {
             // `(ss-1)->move_count` for its CMP gate. SF11 search.cpp:979.
             self.stack[STACK_SENTINEL + ply].move_count = move_count as u32;
 
-            // SF11 `moveCountPruning` update (search.cpp:1002). Matches
-            // SF's outer guards: `!rootNode && pos.non_pawn_material(us)
-            // && bestValue > VALUE_MATED_IN_MAX_PLY`. Once tripped, the
-            // *next* picker call skips quiet generation. Held flat
-            // false when MOVE_COUNT_PRUNING_UNIVERSAL is off so the
-            // shallow-prune box at depth ≤ SHALLOW_PRUNE_MAX_DEPTH
-            // remains the only LMP site (legacy behaviour).
+            // --- Pre-move move classification (B1) ---
+            // Derived before `do_move` so the Step-13 prunes can fire
+            // without making the move. `is_capture` equals the old
+            // `state.captured.is_some() || ep`; `gives_check` is the
+            // oracle-tested no-make predicate (== post-move `in_check`).
+            let is_capture = pos.is_capture(mv);
+            // SF11 `captureOrPromotion` — captures (incl. en passant) plus
+            // every promotion. The quiet-LMR adjuster block and the
+            // post-re-search cont-history feedback gate on its negation.
+            let is_cap_or_promo =
+                is_capture || mv.kind() == crate::types::MoveKind::Promotion;
+            let gives_check = pos.gives_check(mv);
+            // SF11 Step-13 outer gate `pos.non_pawn_material(us) > 0`,
+            // evaluated for the position *after* the move: a promotion
+            // adds a non-pawn piece, so a pure-pawn side gains material.
+            // The `|| Promotion` term reproduces that post-move truth
+            // from the pre-move board, preserving node-for-node behaviour.
+            let npm_us_after_positive = pos.non_pawn_material(us_at_node).0 > 0
+                || mv.kind() == crate::types::MoveKind::Promotion;
+
+            // SF11 `moveCountPruning` update (search.cpp:1002): once
+            // tripped, the *next* picker call skips quiet generation.
             if MOVE_COUNT_PRUNING_UNIVERSAL
                 && !is_root
                 && best_score > Value::MATED_IN_MAX_PLY
-                && pos.non_pawn_material(us_at_node).0 > 0
+                && npm_us_after_positive
             {
                 move_count_pruning = late_move_prune(depth, move_count, improving);
             }
@@ -1463,15 +1473,6 @@ impl<'a> Search<'a> {
                     self.start_time.elapsed().as_millis(),
                 );
             }
-            let is_capture =
-                state.captured.is_some() || mv.kind() == crate::types::MoveKind::EnPassant;
-            // SF11 `captureOrPromotion` — captures (incl. en passant) plus
-            // every promotion. The quiet-LMR adjuster block and the
-            // post-re-search cont-history feedback both gate on its
-            // negation (SF's `!captureOrPromotion`).
-            let is_cap_or_promo =
-                is_capture || mv.kind() == crate::types::MoveKind::Promotion;
-            let gives_check = pos.in_check();
 
             // --- Counter-move-based pruning (SF11 search.cpp:1010-1014, ~20 Elo) ---
             //
@@ -1504,7 +1505,7 @@ impl<'a> Search<'a> {
                 && !is_capture
                 && !gives_check
                 && best_score > Value::MATED_IN_MAX_PLY
-                && pos.non_pawn_material(!pos.side_to_move()).0 > 0
+                && npm_us_after_positive
                 && {
                     let lmr_r = lmr_reduction(depth, move_count, improving);
                     // SF11 search.cpp:1008 — `lmrDepth = max(newDepth -
@@ -1528,11 +1529,10 @@ impl<'a> Search<'a> {
                     }
                 };
             if cmp_prune {
-                pos.undo_move(mv, state);
-                // SF's `quietsSearched` only records moves that
-                // were *actually searched* (line 1300). CMP-pruned
-                // moves never reach the search — don't pollute the
-                // bonus-decrement list with them on cutoff.
+                // CMP-pruned moves are never searched, so (per SF's
+                // `quietsSearched`, line 1300) they don't join the
+                // bonus-decrement list. No move was made (B1 prunes
+                // before `do_move`).
                 continue;
             }
 
@@ -1563,7 +1563,7 @@ impl<'a> Search<'a> {
                 // `do_move` the side-to-move is the *opponent*, so the
                 // side that just moved (== `us` in SF's sense) is the
                 // negated side. Pure-pawn endgames skip Step 13.
-                && pos.non_pawn_material(!pos.side_to_move()).0 > 0
+                && npm_us_after_positive
                 && {
                     let lmr_r = lmr_reduction(depth, move_count, improving);
                     // newDepth = depth - 1 here; extensions are computed
@@ -1575,7 +1575,10 @@ impl<'a> Search<'a> {
                     } else if static_eval.0 + 235 + 172 * lmr_d > alpha.0 {
                         false
                     } else {
-                        let stm = pos.side_to_move();
+                        // Post-`do_move` this read was `pos.side_to_move()`
+                        // (the opponent); pre-move we reproduce that exact
+                        // value as `!us_at_node` to stay node-neutral.
+                        let stm = !us_at_node;
                         let mvp_idx = moved_piece.index() as usize;
                         let mvt_idx = mv.to().index() as usize;
                         let main_h = self.history.get(stm, mv.from(), mv.to()) as i32;
@@ -1595,7 +1598,6 @@ impl<'a> Search<'a> {
                     }
                 };
             if do_futility_prune {
-                pos.undo_move(mv, state);
                 quiets_tried.push(mv);
                 continue;
             }
@@ -1620,15 +1622,13 @@ impl<'a> Search<'a> {
                 && depth <= 6
                 && !gives_check
                 && best_score > Value::MATED_IN_MAX_PLY
-                && pos.non_pawn_material(us_at_node).0 > 0
+                && npm_us_after_positive
             {
+                // B1: SEE-prune the losing capture before it is made.
                 let margin = Value(-200 * depth);
-                pos.undo_move(mv, state);
                 if !pos.see_ge(mv, margin) {
                     continue;
                 }
-                let _ = pos.do_move(mv);
-                self.tt.prefetch(pos.key());
             }
 
             // --- Extension chain (SF11 search.cpp:1072-1090) ---
@@ -1690,6 +1690,11 @@ impl<'a> Search<'a> {
                 extension = 1;
             }
             let new_depth = depth - 1 + extension;
+
+            // B1: only now — for the moves that survived legality and
+            // every Step-13 prune — do we actually make the move.
+            let state = pos.do_move(mv);
+            self.tt.prefetch(pos.key());
 
             self.path_keys.push(pos.key());
 

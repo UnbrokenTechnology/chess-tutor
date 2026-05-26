@@ -199,14 +199,33 @@ impl Position {
                 true
             }
             MoveKind::Normal | MoveKind::Promotion => {
+                let ksq = self.king_square(us);
                 if self.moved_piece(mv).kind() == PieceType::King {
-                    (self.attackers_to(to, occ ^ square_bb(from)) & enemy).is_empty()
-                } else {
-                    // A non-king move is legal iff the piece isn't pinned,
-                    // or it stays on the king↔piece ray.
-                    let ksq = self.king_square(us);
-                    !self.blockers_for_king(us).contains(from) || aligned(from, to, ksq)
+                    return (self.attackers_to(to, occ ^ square_bb(from)) & enemy).is_empty();
                 }
+                // A non-king move that leaves a pinned piece off its
+                // king↔pinner ray exposes the king — illegal.
+                if self.blockers_for_king(us).contains(from) && !aligned(from, to, ksq) {
+                    return false;
+                }
+                // When the king is already in check, a non-king move must
+                // *resolve* it. SF leaves this to its evasion generator;
+                // ours emits the full pseudo-legal set even in check, so
+                // legal() enforces it here:
+                //   - double check  → only a king move can answer it;
+                //   - single check  → capture the checker, or interpose on
+                //     the king↔checker ray (interposition squares are
+                //     empty for a knight/pawn checker, so only the capture
+                //     case survives there).
+                let checkers = self.checkers();
+                if checkers.any() {
+                    if checkers.more_than_one() {
+                        return false;
+                    }
+                    let checker_sq = checkers.lsb();
+                    return to == checker_sq || between_bb(ksq, checker_sq).contains(to);
+                }
+                true
             }
         }
     }
@@ -425,6 +444,19 @@ mod tests {
             "k7/8/8/8/8/8/8/4K2r w - - 0 1",
             // Pinned knight (cannot move off the pin ray).
             "4rk2/8/8/8/8/8/4N3/4K3 w - - 0 1",
+            // IN CHECK with movable non-king pieces: black rook on e8
+            // checks the e1 king; the a2 rook can interpose on e2 (legal)
+            // or move elsewhere on the a-file (illegal — doesn't resolve
+            // the check). Exercises the single-check resolution path.
+            "4r2k/8/8/8/8/8/R7/4K3 w - - 0 1",
+            // DOUBLE CHECK: black rook e8 (e-file) and black bishop a5
+            // (a5–e1 diagonal) both check the e1 king after ...Bb4+ style
+            // geometry; here both rays are open. Only king moves are
+            // legal — every non-king move must be rejected.
+            "4r2k/8/8/b7/8/8/4P3/4K3 w - - 0 1",
+            // Knight check (uninterposable): only capturing the knight or
+            // a king move resolves it.
+            "7k/8/8/8/8/5n2/8/4K2R w - - 0 1",
         ];
         for fen in fens {
             let mut p = Position::from_fen(fen).unwrap();
