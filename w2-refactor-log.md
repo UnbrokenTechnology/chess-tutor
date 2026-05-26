@@ -9,7 +9,7 @@ Branch: **main**. (W1 + the merged UX WIP + W2 all live on main now.)
 
 ---
 
-## Status: IN PROGRESS — 9 commits landed, ~5 files + 2 checkpoint files remain
+## Status: IN PROGRESS — 10 commits landed, ~5 files + 2 checkpoint files remain (eval/mod.rs done; eval/pieces.rs next)
 
 **Done criteria (from ROADMAP):** every `.rs` *source* file ≤500 LOC (data
 tables like `psqt` and one cohesive eval term `pawns` are documented
@@ -96,7 +96,8 @@ Each split is small enough to also do by hand.
 | `a1820b5` | `types.rs` (engine) | → `types/{color,piece,square,direction,value,misc,moves,tests}.rs`. `Square.0`→pub(crate). Bench 9,739,495. |
 | `e9b9357` | `traps/mod.rs` (engine) | → `traps/{mod,logic,tests}.rs` (360/445/...). damiano.rs (470) untouched. Bench 9,739,495. |
 | `f40c050` | `tt.rs` (engine) | → `tt/{mod,storage,tests}.rs` (356/154/...). Entry/Cluster internals pub(super). Bench 9,739,495. |
-| _pending_ | `analysis/threats_outcome.rs` (engine) | → `threats_outcome/{mod,types,lists,guaranteed,tests}.rs` (97/107/285/133/387). `list_pressured`→pub(super); `count_hanging` test helper moved into tests.rs. Bench 9,739,495; 728 engine tests. |
+| `e2a7649` | `analysis/threats_outcome.rs` (engine) | → `threats_outcome/{mod,types,lists,guaranteed,tests}.rs` (97/107/285/133/387). `list_pressured`→pub(super); `count_hanging` test helper moved into tests.rs. Bench 9,739,495; 728 engine tests. |
+| _pending_ | `eval/mod.rs` (engine, HOT PATH) | → `eval/{mod,core,scale,trace,tests}.rs` (296/216/40/281/267). trace types (EvalTrace/MaterialBreakdown/MobilityBreakdown) → trace.rs; evaluate_inner + piece_value_balance → core.rs; scale_factor → scale.rs. PHASE_MAX/SCALE_NORMAL→pub(super); evaluate_inner/scale_factor→pub(super). `crate::eval::X` paths preserved via glob re-export. Bench 9,739,495, NPS within noise (no `#[inline]` needed — same-crate inlining holds); 728 engine tests. |
 
 `CLAUDE.md` "Separation of concerns" bullet already updated (in `3a3d155`) to
 document the `#[path]` sibling-test convention precisely.
@@ -106,13 +107,13 @@ document the `#[path]` sibling-test convention precisely.
 Seam plans below are from a prior structural analysis — trust them, no need to
 re-derive.
 
-1. **`eval/mod.rs` (1059) + `eval/pieces.rs` (655)** (engine, HOT PATH). Plan:
-   `eval/mod.rs` → keep `Evaluator` + constants + public `evaluate*` entry
-   points (~330); move `EvalTrace`/`MaterialBreakdown`/per-piece trace types →
-   `eval/trace.rs` (~228); `evaluate_inner` orchestration → `eval/core.rs`
-   (~177); `scale_factor` → `eval/scale.rs` (~37). `pieces.rs` is 512 src after
+1. **`eval/pieces.rs` (655)** (engine, HOT PATH). `eval/mod.rs` ✅ done
+   (`e2a7649`'s successor — see Landed table). `pieces.rs` is ~512 src after
    test extraction — needs a small trim/sub-split. **Bench-lock; `#[inline]`
-   on any hot fn moved across a module boundary.**
+   on any hot fn moved across a module boundary.** (Note from mod.rs split:
+   same-crate inlining held with no `#[inline]` needed — the bench stayed
+   node-neutral and NPS within noise after moving `evaluate_inner` across a
+   module boundary.)
 2. **`movepick.rs`** (engine, 1718, HOT PATH). Plan: `movepick/mod.rs` =
    history data structs (ButterflyHistory, ContinuationHistory, ContHistStore,
    CaptureHistory, CounterMoveTable, ScoredMove/MoveBufs pool, Stage enum,
