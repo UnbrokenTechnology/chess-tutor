@@ -2,7 +2,7 @@
 
 State index for fresh contexts. **Read [`CLAUDE.md`](CLAUDE.md) first** for evergreen guidance (mission, legal/licensing, ground rules); this file and its split-outs are forward-looking only — git history covers what's been built, inline module docs (`//!`) cover design rationale.
 
-> **[`ROADMAP.md`](ROADMAP.md)** (temporary) — four sequenced big-rock workflows, a detour *out of* the teaching-UX work (the coach couldn't reason from the PV, so the plan is to port lichess tactic detection — which first needs a correct, clean engine). Status: **(1) SF11 parity audit ✅ COMPLETE** (gap closed to ~2× SF — the "~10x" was stale; see [`parity-audit-log.md`](parity-audit-log.md)); **(2) non-functional refactor — NEXT**; (3) lichess tactic-library port; (4) broader lichess feature audit. Order matters; read before starting any of them.
+> **[`ROADMAP.md`](ROADMAP.md)** (temporary) — four sequenced big-rock workflows, a detour *out of* the teaching-UX work (the coach couldn't reason from the PV, so the plan is to port lichess tactic detection — which first needs a correct, clean engine). Status: **(1) SF11 parity audit ✅ COMPLETE** (gap closed to ~2× SF — the "~10x" was stale; see [`parity-audit-log.md`](parity-audit-log.md)); **(2) non-functional refactor ✅ COMPLETE** (every source file ≤500 LOC bar documented exceptions; see [`w2-refactor-log.md`](w2-refactor-log.md)); **(3) lichess tactic-library port — NEXT**; (4) broader lichess feature audit. Order matters; read before starting any of them.
 
 ## What this app is
 
@@ -18,7 +18,7 @@ Tests: **728 engine (+4 ignored) + 105 narration + 33 cli + 27 ui = 893 passing*
 
 ## Current focus: executing the ROADMAP (teaching UX parked)
 
-We are partway through the four-workflow [`ROADMAP.md`](ROADMAP.md) detour. **W1 (SF11 parity audit) is ✅ complete** — done-criteria met (d=14 1.48× SF, d=20 2.04× SF), two correctness bugs fixed plus the SF11 pruning stack landed as balanced bundles; full log in [`parity-audit-log.md`](parity-audit-log.md). **W2 (non-functional refactor) is 🔶 IN PROGRESS** — every `.rs` source file ≤500 LOC, tests to sibling `_tests.rs` files, no logic/perf/test-count change. 8 commits landed (Tier A + view/learning_mode/side_panel/play/types/traps/tt); engine bench held node-neutral (d=14 = 9,739,495). **Resume from [`w2-refactor-log.md`](w2-refactor-log.md)** (recipe, conventions, gotchas, remaining worklist; checkpoint with the user before session.rs and search.rs). W3 (lichess tactic port) + W4 (broader audit) follow. The teaching UX is **parked until W4 completes**; the rest of this section is the state to resume from.
+We are through the first two of the four-workflow [`ROADMAP.md`](ROADMAP.md) detour. **W1 (SF11 parity audit) is ✅ complete** — done-criteria met (d=14 1.48× SF, d=20 2.04× SF), two correctness bugs fixed plus the SF11 pruning stack landed as balanced bundles; full log in [`parity-audit-log.md`](parity-audit-log.md). **W2 (non-functional refactor) is ✅ complete** — every source `.rs` file ≤500 LOC bar documented exceptions (`pawns.rs` 687, one cohesive eval term; data tables), tests in sibling files, no logic/perf/test-count change. 18 commits; the final two were the checkpoint files — `search.rs` (decompose `negamax` in place → split into `search/`) and `session.rs` (split into `session/`), engine bench node-neutral (d=14 = 9,739,495), 893 tests, no new clippy warnings; full log in [`w2-refactor-log.md`](w2-refactor-log.md). **W3 (lichess tactic-library port) is NEXT** (W4 broader audit follows) — the teaching UX stays **parked until W4 completes**. See [`HANDOFF-ux.md`](HANDOFF-ux.md) "Tactic library design brief" for W3.
 
 ### Parked: the teaching UX (resume post-W4)
 
@@ -66,7 +66,7 @@ Per-search or per-engine allocations are fine. **Per-node allocations are not** 
 - **Teaching analysis pipeline**: [`core/engine/src/analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!`
 - **Trap library schema + four-gate validator**: [`core/engine/src/traps/mod.rs`](core/engine/src/traps/mod.rs) `//!`
 - **Engine public API surface**: [`core/engine/src/engine.rs`](core/engine/src/engine.rs)
-- **Search structure + pruning stack**: [`core/engine/src/search.rs`](core/engine/src/search.rs) `//!`
+- **Search structure + pruning stack**: [`core/engine/src/search/`](core/engine/src/search/) (`mod.rs` `//!` + per-phase files: `negamax`, `pre_loop`, `move_loop`, `move_search`, `loop_helpers`, `qsearch`, `run`, `settled`, `state`)
 - **Move picker pipeline**: [`core/engine/src/movepick.rs`](core/engine/src/movepick.rs) `//!`
 - **TT layout**: [`core/engine/src/tt.rs`](core/engine/src/tt.rs) `//!`
 - **Repo layout, mission, ground rules**: [`CLAUDE.md`](CLAUDE.md)

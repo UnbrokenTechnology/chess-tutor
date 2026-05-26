@@ -9,7 +9,7 @@ Branch: **main**. (W1 + the merged UX WIP + W2 all live on main now.)
 
 ---
 
-## Status: IN PROGRESS — 15 commits landed. All non-checkpoint files DONE. **Only the 2 checkpoint files remain: session.rs + search.rs — CHECKPOINT WITH USER before starting either.**
+## Status: ✅ COMPLETE — 18 commits landed. Every source `.rs` file ≤500 LOC except the documented `pawns.rs` (687, one cohesive eval term) and data tables. Bench node-neutral (d=14 = 9,739,495); test count unchanged (893); no new clippy warnings. **W3 (lichess tactic port) is next — see [`ROADMAP.md`](ROADMAP.md).**
 
 **Done criteria (from ROADMAP):** every `.rs` *source* file ≤500 LOC (data
 tables like `psqt` and one cohesive eval term `pawns` are documented
@@ -106,26 +106,25 @@ Each split is small enough to also do by hand.
 | `8380d55` | `pawns.rs` (engine) | tests → `pawns_tests.rs` (335); source 679 LOC **kept whole** (documented >500 W2 exception — one cohesive eval term). Bench 9,739,495; 728 engine tests. |
 | `b71517f` | `movepick.rs` (engine, HOT PATH) | → `movepick/{mod,history,picker,helpers,tests}.rs` (266/359/456/88/578). history tables (Butterfly/Continuation/Capture/CounterMove) → history.rs; MovePicker FSM impl → picker.rs; pick_best_index/partial_insertion_sort/mvv_lva/captured_piece_value/is_pseudo_legal → helpers.rs (pub(super)). mod.rs keeps buffer pool + Stage + MovePicker struct + split_bufs. Sibling/child modules reach mod.rs privates (ScoredMove, split_bufs, consts) by descendant access; `pub use history::*` re-export keeps `crate::movepick::X` paths. Byte-faithful slice via /tmp script. Bench 9,739,495, NPS within noise; 728 engine tests. **NB: working-tree EOL is LF, not CRLF (git autocrlf stores LF; the log's earlier CRLF claim was a `grep $'\r'` quoting artifact).** |
 
+| `cf09fa9` | `search.rs` negamax decompose (engine, HOTTEST PATH) | In-place (file still whole): broke the 1373-LOC `negamax` into orchestrator + `try_null_move`/`try_probcut` (pre-loop, `Option<Value>` = prune/abort/proceed) + `negamax_moves` (loop → `MovesOutcome` enum; caller keeps terminal+TT-save) + `search_made_move` (LMR/full/PV) + `cmp_cont_negative`/`quiet_futility_inner` (Step-13 inner tests) + `compute_extension` (free fn) + `update_all_stats`. Bench-locked **9,739,495** after EVERY extraction. Dropped 4 now-redundant `as usize` identity casts surfaced by the move; clippy set == baseline. |
+| `fd003f2` | `search.rs` → `search/` dir (engine, HOTTEST PATH) | Pure relocation into `search/{mod,state,run,negamax,pre_loop,move_loop,move_search,loop_helpers,qsearch,settled,tests}.rs` (all source ≤500; move_loop 471, state 468). Fields/methods → `pub(super)`; re-exported free fns + RootMove/MovesOutcome → `pub(crate)`; mod.rs **glob**-re-exports (`pub(crate) use loop_helpers::*` etc.) so siblings+tests resolve via `use super::*` and `cargo fix` can't trim a glob-only re-export. Bench 9,739,495; 893 tests; clippy == baseline. |
+| `2bec9d6` | `session.rs` → `session/` dir (ui) | Pure relocation into `session/{mod,types,lifecycle,moves,worker,queries,event_dispatch,view_builders}.rs` (all ≤500; view_builders 493). No inline tests. Fields + private methods → `pub(crate)`; `pub use types::*` keeps the external `chess_tutor_ui::session::X` API; free-fn modules glob-re-exported. 27 ui + 33 cli + 105 narration tests; clippy == baseline. |
+
 `CLAUDE.md` "Separation of concerns" bullet already updated (in `3a3d155`) to
 document the `#[path]` sibling-test convention precisely.
 
-## Remaining worklist — ONLY THE 2 CHECKPOINT FILES LEFT
+## Remaining worklist — ✅ NONE (W2 COMPLETE)
 
-Seam plans below are from a prior structural analysis — trust them, no need to
-re-derive.
+Both checkpoint files are done (`search.rs` → `cf09fa9` + `fd003f2`;
+`session.rs` → `2bec9d6`). Every source `.rs` file is ≤500 LOC except the two
+documented exceptions: **`pawns.rs`** (687, one cohesive eval term) and data
+tables. Bench held node-neutral throughout; the full 893-test suite passes;
+clippy introduced no new warnings.
 
-### CHECKPOINT WITH USER before these two (per user, 2026-05-26):
-
-1. **`session.rs`** (ui, 2107, god-object). Plan: `session/{mod (struct +
-   ctor + accessors), moves, game_flow, worker, event_dispatch, view_builders,
-   game_state, learning}.rs`. Fields → `pub(crate)`. No inline tests. Risky —
-   pause for review before starting.
-2. **`search.rs`** (engine, 3539, HOTTEST PATH). User chose **decompose +
-   bench-lock**: file-split (qsearch, pruning helpers, history helpers,
-   settled_ply, aspiration/run, SearchContext/state to siblings) AND decompose
-   the ~1373-LOC `negamax` into sub-functions to hit ≤500 — node count
-   byte-identical, NPS within noise, `#[inline]` on extracted hot helpers.
-   Highest risk; pause for review before starting.
+**EOL correction:** the working tree is **CRLF** (git `autocrlf=true` converts
+on checkout), not LF as an earlier row claimed. New files were written CRLF to
+match. The split was driven by a self-verifying Python carve script (asserts
+boundary lines, splits/joins on `\r\n`); recreate from this log if needed.
 
 ## Key decisions (from the user this session)
 

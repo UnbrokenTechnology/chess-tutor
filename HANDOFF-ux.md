@@ -56,7 +56,7 @@ The intervention panel ([`SidePanelBody::Intervention`](core/ui/src/view.rs) + [
 
 ### Game Review surface
 
-[`Session::build_game_review`](core/ui/src/session.rs) walks every user move's cached retrospective analyses through the same classifier and returns a ranked [`GameReviewView`](core/ui/src/view.rs) of significant moments. The classifier's gating uses `LearningPreferences.mistake_handling` — switching to AllMistakes before opening Review widens the list. Top-bar "Review Game" button (enabled once any user move's retrospective has arrived) toggles `Session::game_review_open`. Click a moment → `JumpToReviewMoment(history_index)` sets `viewing_index` and pre-selects nothing (user clicks through cards themselves).
+[`Session::build_game_review`](core/ui/src/session/view_builders.rs) walks every user move's cached retrospective analyses through the same classifier and returns a ranked [`GameReviewView`](core/ui/src/view.rs) of significant moments. The classifier's gating uses `LearningPreferences.mistake_handling` — switching to AllMistakes before opening Review widens the list. Top-bar "Review Game" button (enabled once any user move's retrospective has arrived) toggles `Session::game_review_open`. Click a moment → `JumpToReviewMoment(history_index)` sets `viewing_index` and pre-selects nothing (user clicks through cards themselves).
 
 ### Coached mode — live coaching panel
 
