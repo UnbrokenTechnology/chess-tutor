@@ -98,8 +98,13 @@ const NULL_MIN_DEPTH: i32 = 3;
 /// out at full depth.
 const LMR_MIN_DEPTH: i32 = 3;
 
-/// Number of moves always searched at full depth before LMR kicks in.
-const LMR_FULL_DEPTH_MOVES: usize = 4;
+/// SF11 `ttHitAverageWindow` / `ttHitAverageResolution` (search.cpp:64-65).
+/// The running TT-hit average is maintained per search and read by two
+/// LMR relaxers (decrease reduction when hits are common; allow
+/// capture-LMR when hits are rare). Initialised to half-window.
+const TT_HIT_AVERAGE_WINDOW: i64 = 4096;
+const TT_HIT_AVERAGE_RESOLUTION: i64 = 1024;
+const TT_HIT_AVERAGE_INIT: i64 = TT_HIT_AVERAGE_WINDOW * TT_HIT_AVERAGE_RESOLUTION / 2;
 
 /// When `true`, the LMP threshold (`late_move_prune`) is evaluated at
 /// every depth (not just shallow). Once tripped, the flag is threaded
@@ -315,6 +320,13 @@ pub(crate) struct Search<'a> {
     /// Captured from `params` at `run()` start; passed to every
     /// `evaluate_with_pawn_cache` call inside the search.
     eval_mask: EvalMask,
+
+    /// SF11's `Thread::ttHitAverage` (search.cpp:699-700): a running
+    /// exponential average of TT-hit success, in units of
+    /// `TT_HIT_AVERAGE_RESOLUTION`. Updated once per `negamax` node
+    /// after the probe; read by the LMR relaxer/capture-gate. Reset to
+    /// half-window at every `run()`.
+    tt_hit_average: i64,
 }
 
 impl<'a> Search<'a> {
@@ -364,6 +376,7 @@ impl<'a> Search<'a> {
             verbose_next_tick: 0,
             root_stm: Color::White,
             eval_mask: EvalMask::EMPTY,
+            tt_hit_average: TT_HIT_AVERAGE_INIT,
         }
     }
 
@@ -405,6 +418,7 @@ impl<'a> Search<'a> {
         self.stop_time = params.max_time.map(|d| self.start_time + d);
         self.max_nodes = params.max_nodes;
         self.eval_mask = params.eval_mask;
+        self.tt_hit_average = TT_HIT_AVERAGE_INIT;
         self.next_stop_check = STOP_CHECK_INTERVAL;
         self.verbose_progress = params.verbose_progress;
         self.verbose_next_tick = VERBOSE_TICK_INTERVAL;
@@ -772,6 +786,12 @@ impl<'a> Search<'a> {
         let key = pos.key();
         let probe = self.tt.probe(key);
         let tt_hit = probe.hit;
+        // SF11 search.cpp:699-700 — running exponential TT-hit average,
+        // read by the LMR relaxer (`r--` when hits are common) and the
+        // capture-LMR enable gate (`< 375·…` when hits are rare).
+        self.tt_hit_average = (TT_HIT_AVERAGE_WINDOW - 1) * self.tt_hit_average
+            / TT_HIT_AVERAGE_WINDOW
+            + TT_HIT_AVERAGE_RESOLUTION * tt_hit as i64;
         let tt_move = if tt_hit { probe.data.mv } else { Move::NONE };
         let tt_value = if tt_hit {
             value_from_tt(probe.data.value, ply as i32)
@@ -1291,6 +1311,12 @@ impl<'a> Search<'a> {
             }
             let is_capture =
                 state.captured.is_some() || mv.kind() == crate::types::MoveKind::EnPassant;
+            // SF11 `captureOrPromotion` — captures (incl. en passant) plus
+            // every promotion. The quiet-LMR adjuster block and the
+            // post-re-search cont-history feedback both gate on its
+            // negation (SF's `!captureOrPromotion`).
+            let is_cap_or_promo =
+                is_capture || mv.kind() == crate::types::MoveKind::Promotion;
             let gives_check = pos.in_check();
 
             // --- Counter-move-based pruning (SF11 search.cpp:1010-1014, ~20 Elo) ---
@@ -1529,47 +1555,92 @@ impl<'a> Search<'a> {
 
             let mut score: Value;
             let mut full_depth = true;
+            let did_lmr;
 
-            // --- LMR: zero-window reduced-depth search on late quiets ---
+            // --- LMR: zero-window reduced-depth search on late moves ---
+            // SF11 search.cpp:1117-1217. Faithful reduction plus the full
+            // relaxer/adjuster stack. The move-count gate matches SF: at a
+            // non-root node LMR begins on the 2nd move (`move_count > 1`),
+            // and at the root it begins later (`> 2`, or `> 3` once a move
+            // has already failed to beat alpha). This step keeps the gate
+            // quiet-only (`!is_cap_or_promo`); capture-LMR is a separate
+            // change.
+            //
+            // (Root divergence: SF additionally guards root LMR with
+            // `best_move_count(move) == 0` to protect a previously-best
+            // root move from reduction. We omit that guard — the root gate
+            // already excludes the first 2-3 moves and the full-depth
+            // re-search recovers any fail-high, so the effect is negligible
+            // and root nodes are a tiny fraction of the tree.)
+            let lmr_move_gate =
+                1 + (is_root as usize) + ((is_root && best_score < alpha) as usize);
             if depth >= LMR_MIN_DEPTH
-                && move_count > LMR_FULL_DEPTH_MOVES
-                && !is_capture
+                && move_count > lmr_move_gate
+                && !is_cap_or_promo
                 && !in_check
                 && !gives_check
             {
                 let mut r = lmr_reduction(depth, move_count, improving);
 
-                // SF11 search.cpp:1155 — increase reduction at cut
-                // nodes. The parent expects a fail-high; reducing
-                // late-move quiets *more* here is cheap when correct
-                // (they'd have been cut anyway) and the full-depth
-                // re-search backs us out when we're wrong.
-                if cut_node {
-                    r += 2;
+                // SF11 search.cpp:1129 — decrease reduction when the
+                // running TT-hit average is high (transposition-rich
+                // region; the ordering is trustworthy, reduce less).
+                if self.tt_hit_average
+                    > 500 * TT_HIT_AVERAGE_RESOLUTION * TT_HIT_AVERAGE_WINDOW / 1024
+                {
+                    r -= 1;
                 }
 
-                // NOTE: SF11 search.cpp:1137 also has `r -= 2` when
-                // `tt_pv` is true. Measured in isolation (2026-05-12)
-                // as a +30-80 % wall-clock regression across the three
-                // reference positions — same missing-prerequisites
-                // pattern as singular extensions. The companion LMR
-                // relaxers in SF (`ttHitAverage`, `opp moveCount > 14`,
-                // `singularLMR`, escape-capture detection) tighten
-                // elsewhere to balance the tree; without those, this
-                // bump only loosens. Sticky ttPv *saving* still lands
-                // (see `tt_pv` definition above and the `probe.save`
-                // call site below) so the bit is available when those
-                // prerequisites arrive and we revisit `r -= 2`
-                // together with them.
+                // (SF11 search.cpp:1133 breadcrumb `r++` is multi-thread
+                // only; single-threaded it never fires, so it is omitted.)
 
-                // SF11 statScore: blend main + cont-history into a
-                // single quality estimate for the move we're about
-                // to search, then compare against the parent's
-                // statScore to nudge `r` in {-1, 0, +1}, finally
-                // gravity-scale by `statScore / 16384`. Computed
-                // here only for quiet moves (captures take the
-                // `else` branch of SF's `!captureOrPromotion`
-                // block).
+                // SF11 search.cpp:1137 — decrease reduction for nodes that
+                // are, or have been, on the PV.
+                if tt_pv {
+                    r -= 2;
+                }
+
+                // SF11 search.cpp:1141 — decrease reduction when the
+                // opponent's previous move count was high.
+                if self.stack[STACK_SENTINEL + ply - 1].move_count > 14 {
+                    r -= 1;
+                }
+
+                // (SF11 search.cpp:1145 `singularLMR → r -= 2` omitted: no
+                // singular extensions yet, so the flag is always false.)
+
+                // --- quiet-move (`!captureOrPromotion`) adjusters,
+                // SF11 search.cpp:1148-1187 ---
+
+                // SF11 search.cpp:1151 — increase reduction if the ttMove
+                // is a capture/promotion (a tactical alternative exists;
+                // reduce this quiet more).
+                let tt_capture = tt_move != Move::NONE
+                    && (pos.is_capture(tt_move)
+                        || tt_move.kind() == crate::types::MoveKind::Promotion);
+                if tt_capture {
+                    r += 1;
+                }
+
+                if cut_node {
+                    // SF11 search.cpp:1155 — increase reduction at cut
+                    // nodes; the parent expects a fail-high.
+                    r += 2;
+                } else if mv.kind() == crate::types::MoveKind::Normal
+                    && !pos.see_ge(Move::normal(mv.to(), mv.from()), Value::ZERO)
+                {
+                    // SF11 search.cpp:1161 — decrease reduction for moves
+                    // that escape a capture: a (now-quiet) reverse move
+                    // from `to` back to `from` losing material means the
+                    // from-square was unsafe for this piece, so moving away
+                    // was useful. Castling is excluded by the NORMAL gate.
+                    r -= 2;
+                }
+
+                // SF11 statScore: blend main + cont-history into a single
+                // quality estimate for the move we're about to search,
+                // compare against the parent's statScore to nudge `r` in
+                // {-1, 0, +1}, then gravity-scale by `statScore / 16384`.
                 let us = !pos.side_to_move(); // side-to-move *before* do_move
                 let mvp_idx = moved_piece.index() as u8;
                 let mvt_idx = mv.to().index() as u8;
@@ -1625,14 +1696,22 @@ impl<'a> Search<'a> {
                     // node (we expect it to fail low quickly).
                     true,
                 );
-                full_depth = reduced_score > alpha;
+                // SF11 search.cpp:1197 — `doFullDepthSearch = (value >
+                // alpha && d != newDepth)`. The `d != newDepth` guard
+                // matters: when the relaxers drive `r <= 0` the clamp gives
+                // `reduced == new_depth`, so the reduced search WAS a
+                // full-depth search; re-running it would be pure waste. In
+                // that case the reduced value is the move's value.
+                full_depth = reduced_score > alpha && reduced != new_depth;
                 if !full_depth {
                     score = reduced_score;
                 } else {
                     score = Value::NONE;
                 }
+                did_lmr = true;
             } else {
                 score = Value::NONE;
+                did_lmr = false;
             }
 
             if full_depth && !(is_pv && move_count == 1) {
@@ -1647,6 +1726,29 @@ impl<'a> Search<'a> {
                     child_prev,
                     !cut_node,
                 );
+
+                // SF11 search.cpp:1207-1216 — after an LMR move is
+                // re-searched at full depth, feed the result back into
+                // continuation history: positive bonus if it beat alpha,
+                // negative otherwise, with a +¼ kicker for the first
+                // killer. Quiet moves only (`!captureOrPromotion`).
+                if did_lmr && !is_cap_or_promo {
+                    let mut bonus = if score > alpha {
+                        stat_bonus(new_depth)
+                    } else {
+                        -stat_bonus(new_depth)
+                    };
+                    if mv == self.killers[ply][0] {
+                        bonus += bonus / 4;
+                    }
+                    update_cont_histories(
+                        self.cont_history,
+                        &cont_keys,
+                        moved_piece.index() as u8,
+                        mv.to().index() as u8,
+                        bonus,
+                    );
+                }
             }
 
             if is_pv && (move_count == 1 || (score > alpha && (is_root || score < beta))) {
@@ -2327,14 +2429,18 @@ fn cont_key_at(stack: &[StackEntry], ply: usize, offset: usize) -> (bool, bool, 
 }
 
 /// SF11's `Reductions[]` table (`search.cpp` `Search::init`):
-/// `Reductions[i] = int(23.4 * ln(i))` for `i >= 1` at single thread.
-/// Initialised lazily on first access (one-time `ln()` cost).
+/// `Reductions[i] = int((24.8 + ln(threads)/2) * ln(i))` for `i >= 1`
+/// (SF11 search.cpp:197). Single-threaded → the `ln(threads)/2` term is
+/// `ln(1)/2 = 0`, so the coefficient is exactly **24.8**. (A prior port
+/// used `23.4`, which appears nowhere in SF11 and systematically
+/// under-reduced; corrected 2026-05-26 as part of the faithful LMR
+/// bundle.) Initialised lazily on first access (one-time `ln()` cost).
 /// Sized for `MAX_MOVES = 256` (SF11's constant); index 0 stays `0`
 /// per SF (default-initialised).
 static SF11_REDUCTIONS: std::sync::LazyLock<[i32; 256]> = std::sync::LazyLock::new(|| {
     let mut arr = [0i32; 256];
     for i in 1..256 {
-        arr[i] = (23.4 * (i as f64).ln()) as i32;
+        arr[i] = (24.8 * (i as f64).ln()) as i32;
     }
     arr
 });
