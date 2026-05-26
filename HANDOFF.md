@@ -2,7 +2,7 @@
 
 State index for fresh contexts. **Read [`CLAUDE.md`](CLAUDE.md) first** for evergreen guidance (mission, legal/licensing, ground rules); this file and its split-outs are forward-looking only — git history covers what's been built, inline module docs (`//!`) cover design rationale.
 
-> **[`ROADMAP.md`](ROADMAP.md)** (temporary) — four sequenced big-rock workflows are queued: (1) SF11 parity audit to close the ~10x node-count gap, (2) non-functional refactor splitting files >500 LOC + extracting tests to sibling files, (3) lichess tactic-library port, (4) broader lichess feature audit. Order matters; read before starting any of them.
+> **[`ROADMAP.md`](ROADMAP.md)** (temporary) — four sequenced big-rock workflows, a detour *out of* the teaching-UX work (the coach couldn't reason from the PV, so the plan is to port lichess tactic detection — which first needs a correct, clean engine). Status: **(1) SF11 parity audit ✅ COMPLETE** (gap closed to ~2× SF — the "~10x" was stale; see [`parity-audit-log.md`](parity-audit-log.md)); **(2) non-functional refactor — NEXT**; (3) lichess tactic-library port; (4) broader lichess feature audit. Order matters; read before starting any of them.
 
 ## What this app is
 
@@ -14,13 +14,15 @@ A **chess tutor**, not a chess engine. The product surface is move-by-move teach
 
 UIs: CLI (`chess-tutor`), egui desktop (`chess-tutor-desktop`), planned Apple + Android. FFI crate (`core/ffi/`) is the prerequisite for the platform apps and doesn't exist yet.
 
-Tests: **723 engine (+4 ignored) + 105 narration + 33 cli + 27 ui = 888 passing**, clippy clean.
+Tests: **728 engine (+4 ignored) + 105 narration + 33 cli + 27 ui = 893 passing**, clippy clean.
 
-## Currently iterating on: teaching UX
+## Current focus: executing the ROADMAP (teaching UX parked)
 
-Engine perf is in a good place (sub-300 ms retrospective on hard positions, 43 s for the full d=20 bench at 8 threads). Further perf has diminishing returns relative to the UX work that is now the bottleneck on the actual product.
+We are partway through the four-workflow [`ROADMAP.md`](ROADMAP.md) detour. **W1 (SF11 parity audit) is ✅ complete** — done-criteria met (d=14 1.48× SF, d=20 2.04× SF), two correctness bugs fixed plus the SF11 pruning stack landed as balanced bundles; full log in [`parity-audit-log.md`](parity-audit-log.md). **W2 (non-functional refactor) is next** — every `.rs` source file ≤500 LOC, tests to sibling `_tests.rs` files, no logic/perf/test-count change. W3 (lichess tactic port) + W4 (broader audit) follow. The teaching UX is **parked until W4 completes**; the rest of this section is the state to resume from.
 
-The product has three teaching surfaces now, all card-based and all reading the same engine outcomes:
+### Parked: the teaching UX (resume post-W4)
+
+The product has three teaching surfaces, all card-based and all reading the same engine outcomes. This is the in-progress body that motivated the roadmap (it needs PV-based tactic detection to be honest about "you missed a tactic" / "you had a mate") and was merged from `main` so it doesn't bit-rot:
 
 1. **Retrospective panel** — after-the-fact analysis of the user's last move. Cards per signal (material, threats, king safety, mobility, pawn structure, passed pawns, piece placement, secondary, **forced consequences of opponent's best reply**). Best-move reveal is opt-in (`LearningPreferences.reveal_best_moves`, default off).
 2. **Coaching panel** (live) — features-to-notice for the position the user is about to move from. Shown when `AssistanceLevel::Coached` is active. Surfaces hanging-piece opportunities (filtered through legal moves so in-check / pinned cases don't lie), en-passant captures, pawn weaknesses on either side, and a "your king is in check" card. Never names a move.
@@ -30,9 +32,9 @@ Plus the **intervention pause**: when `MistakeHandling::TeachingMoments` or blun
 
 → **[`HANDOFF-ux.md`](HANDOFF-ux.md)** — teaching layer state, learning-mode design, deferred Phase 2/4/5 work, narration tuning, UX platform tasks, live-play tuning loop. Read this when iterating on teaching UX.
 
-→ **[`HANDOFF-perf.md`](HANDOFF-perf.md)** — current bench numbers, levers tested + reverted, outlier breakdowns, deferred perf opportunities, engine-strength deferred. Read only when returning to engine perf / strength work; it is stable but noisy and would pollute a UX-focused context.
+→ **[`HANDOFF-perf.md`](HANDOFF-perf.md)** — engine perf levers tested + reverted, outlier breakdowns, deferred perf/strength opportunities. **Its bench numbers predate the W1 parity audit — [`parity-audit-log.md`](parity-audit-log.md) holds the current figures.** Read only when returning to engine perf / strength work; stable but noisy.
 
-**Open and most likely next:** persistence design — game history on disk so past games are reviewable across launches and the foundation for drills / per-concept mastery fading. Desktop and mobile storage models differ (filesystem vs platform storage); user erase / clear-history UX needs design before code lands. See HANDOFF-ux's "Persistence (deferred)" section.
+**Open thread when teaching UX resumes (post-W4):** persistence design — game history on disk so past games are reviewable across launches and the foundation for drills / per-concept mastery fading. Desktop and mobile storage models differ (filesystem vs platform storage); user erase / clear-history UX needs design before code lands. See HANDOFF-ux's "Persistence (deferred)" section.
 
 ## Build / dev commands
 

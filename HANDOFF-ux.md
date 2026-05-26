@@ -2,6 +2,8 @@
 
 Forward-looking UX context. The product surface is teaching feedback, not the engine. See [`HANDOFF.md`](HANDOFF.md) for the index, [`CLAUDE.md`](CLAUDE.md) for the mission and ground rules, and [`HANDOFF-perf.md`](HANDOFF-perf.md) for engine perf state (read only if perf becomes relevant to a UX task).
 
+> ⏸️ **This work is PARKED behind [`ROADMAP.md`](ROADMAP.md) — resume after W4.** Everything described below is the in-progress teaching layer as of 2026-05-25, merged into the working branch so it doesn't bit-rot, but **not actively iterated on** until the parity → refactor → lichess-port detour completes. It is, in fact, *why* the roadmap exists: this layer can only teach from static positional eval, so it can't honestly say "you missed a tactic" or "you had a forced mate" — that needs PV-based tactic detection (the lichess port, W3), which first needs a correct (W1 ✅) and clean (W2) engine. When you return here post-W4, the new capability to lean on is the tactic library producing structured `TacticHit`s the coaching/retrospective surfaces can name. **Do not start new UX features here mid-roadmap** — the refactor (W2) will move much of this code, and the tactic port (W3) changes what the surfaces can claim.
+
 ## Current state: learning-mode workflows (2026-05-25)
 
 The product now has three orthogonal axes for how much the student is guided during play, named [`LearningPreferences`](core/ui/src/learning_mode.rs). They drive three side-panel surfaces (Retrospective, Coaching, Game Review) plus an in-game intervention pause. The 2026-05-20 retrospective card system is the foundation — every new surface reuses its categories, sentiments, and annotation layer.

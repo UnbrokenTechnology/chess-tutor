@@ -2,6 +2,25 @@
 
 **Temporary planning doc.** Four sequential big-rock workflows that need to land in this order. Each one substantially churns the code the next one would touch, so doing them out of order multiplies the work. Delete this file once workflow 4 is complete.
 
+## Status at a glance
+
+| Workflow | State |
+|---|---|
+| **W1 — SF11 parity audit** | ✅ **Complete.** Done-criteria met (d=14 1.48× SF, d=20 2.04× SF). Full log in [`parity-audit-log.md`](parity-audit-log.md). |
+| **W2 — Non-functional refactor** | ⬜ **Next up.** Not started. |
+| **W3 — Tactic library port** | ⬜ Not started. |
+| **W4 — Broader lichess audit** | ⬜ Not started. |
+
+## Origin — why this roadmap exists
+
+The actual product is the **teaching UX**, not the engine. This roadmap is a detour we took *out of* that UX work, for a concrete reason:
+
+While building the teaching layer we hit a wall — the coach could only reason from the **current-position positional eval**. It had no way to walk the principal variation, so it could never say "you missed a tactic here" or "you had a forced mate." Teaching off static eval alone is the myopia the [prior attempt](CLAUDE.md) died of.
+
+The fix was to walk the PV. Rather than reinvent tactic detection, we looked for prior art and found lichess already does exactly this ([`reference/lichess-puzzler/`](reference/lichess-puzzler/), `tagger/cook.py`). The plan became "port the lichess tactic tagger so the coach can name what happened in the line." But scoping that port surfaced two blockers: our engine code was (a) a tangle of oversized files and (b) **not functionally equivalent to SF11** — so any PV the tactic detectors read came from a search exploring far too many nodes, and we couldn't tell a detector bug from a search bug.
+
+Hence the detour, in dependency order: **parity (W1) → clean the code (W2) → port lichess (W3 tactics, W4 broader audit) → resume the teaching UX.** The in-progress teaching-UX code is **parked** until W4 completes — see [`HANDOFF-ux.md`](HANDOFF-ux.md) for where to pick it back up.
+
 ## Why this order
 
 - **Refactor before parity audit** = we refactor code that's about to change again, plus we may split a file in a way that obscures a divergence we'd have spotted in a side-by-side review.
@@ -14,6 +33,14 @@ So: parity → refactor → tactic port → broader lichess audit.
 ---
 
 ## Workflow 1: Stockfish 11 parity audit
+
+> ✅ **COMPLETE (2026-05-26).** Full file-by-file walk done across all 9 SF11 file-groups; results in [`parity-audit-log.md`](parity-audit-log.md). Headline outcomes:
+> - The **"~10×" symptom below was stale** — the audit's first finding was that the real gap was 2.0–3.3×, not 10×.
+> - **Two genuine correctness bugs** found and fixed: E1 (king-ring double-pawn removal used the wrong color) and P1 (en-passant square set on every double push → TT/repetition key divergence from SF).
+> - The SF11 pruning stack then landed as **balanced bundles** (never piece-by-piece): faithful quiet-LMR, capture-LMR, S4 refined-eval pruning gates, the NMP family, and the B1+B3 structural-NPS rework (`Position::legal` + prune-before-`do_move` + cached check info).
+> - **Done-criteria met:** d=14 (TT=16,1T) **1.48× SF** (was 2.03×); d=20 (TT=128,1T) **2.04× SF** (was 3.3×). The residual is now a diffuse **NPS** gap (~0.65× SF) living in movegen/eval/TT-entry-size, not pruning — out of scope for this workflow.
+>
+> What remains is W2.
 
 ### Symptom
 
@@ -85,29 +112,29 @@ The bench is **the** reference instrument for this workflow. SF11's own `benchma
 
 Get every `.rs` file under 500 LOC without changing runtime logic or measurable performance. Big files mean Claude reads ~10kLOC of unrelated code on every session that touches them, and the human reader (you) has the same problem with worse working memory.
 
-### Current state (largest files, LOC)
+### Current state (largest files, LOC — refreshed 2026-05-26 post-W1/post-merge)
 
 ```
-3217 core/engine/src/search.rs              ★ workflow-1 will already churn this
-2797 core/ui/src/retrospective_view.rs      ★ obvious split candidate
+3539 core/engine/src/search.rs              W1 churned this (now larger — the parity bundles landed here)
+2797 core/ui/src/retrospective_view.rs      ★ obvious split candidate (parked teaching-UX work added ~1.2k LOC here)
 2107 core/ui/src/session.rs                 ★ god-object — view-building / worker dispatch / state mutation
-1709 core/engine/src/movepick.rs            ★ workflow-1 will already churn this
+1718 core/engine/src/movepick.rs            W1 churned this
 1260 core/engine/src/types.rs               Mostly enums + impls; clean splits along piece / move / value boundaries
 1180 core/cli/src/play.rs                   REPL command handlers — natural split per-verb
-1056 core/engine/src/eval/mod.rs            Already a module dir; can promote sub-functions to siblings
+1059 core/engine/src/eval/mod.rs            Already a module dir; can promote sub-functions to siblings
 1025 core/engine/src/traps/mod.rs           Same as eval/mod.rs
 1012 core/engine/src/pawns.rs               Single eval term; harder to split usefully
  976 core/engine/src/analysis/threats_outcome.rs
  967 core/engine/src/noise.rs
- 855 core/engine/src/analysis/move_assessment.rs
+ 855 core/engine/src/analysis/move_assessment.rs   parked teaching-UX module (W3-adjacent)
  832 core/cli/src/main.rs
+ 811 core/engine/src/position/make_move.rs
  799 core/ui/src/view.rs                    Just struct definitions; split by surface
- 754 core/engine/src/position/make_move.rs
  741 desktop/src/draw/side_panel.rs
  ...
 ```
 
-~20 files over 500 LOC. The three biggest (`search.rs`, `retrospective_view.rs`, `session.rs`) are the load-bearing ones.
+~20 files over 500 LOC. The three biggest (`search.rs`, `retrospective_view.rs`, `session.rs`) are the load-bearing ones. Note: `search.rs` and `movepick.rs` were churned by W1 (parity) as predicted; `retrospective_view.rs` / `session.rs` / `move_assessment.rs` carry the parked teaching-UX work merged from `main` — refactoring them touches paused-but-not-abandoned code, so split along seams that survive when that work resumes.
 
 ### Approach
 

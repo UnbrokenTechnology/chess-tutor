@@ -4,6 +4,8 @@ Working log for [ROADMAP.md](ROADMAP.md) workflow 1. Tracks the file-by-file sid
 
 **Read first:** ROADMAP.md "Workflow 1" section for methodology, ground rules (one fix at a time, A/B each against bench, etc.), and done criteria.
 
+> ✅ **W1 COMPLETE (2026-05-26).** Done-criteria met: **d=14 1.48× SF** (was 2.03×), **d=20 2.04× SF** (was 3.3×). Full file-by-file walk done across all 9 SF11 file-groups. Two correctness bugs fixed (E1 king-ring color, P1 ep-key); SF11 pruning stack landed as balanced bundles (quiet-LMR, capture-LMR, S4, NMP) + B1+B3 structural-NPS rework. The "~10×" gap in ROADMAP's symptom was stale (real gap was 2–3.3×). Residual is a diffuse NPS gap (~0.65× SF, in movegen/eval/TT-entry-size, not pruning) — out of W1 scope. The sections below are the chronological working log; the **baseline table is a pre-audit snapshot** (its "at the boundary"/"over the boundary" notes are superseded by the results in "Fixes landed" and the bundle-phase sections).
+
 ---
 
 ## Baseline (2026-05-25, pre-audit)

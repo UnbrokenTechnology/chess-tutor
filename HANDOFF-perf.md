@@ -2,6 +2,8 @@
 
 Forward-looking engine perf and strength context. **Read this only when returning to perf or strength work.** For current UX-focused iteration see [`HANDOFF-ux.md`](HANDOFF-ux.md); for the project overview and build commands see [`HANDOFF.md`](HANDOFF.md).
 
+> ⚠️ **Numbers below predate the W1 SF11 parity audit (2026-05-25/26).** The audit superseded the node-count/NPS figures in this file. **Current gap vs SF11: d=14 1.48× / d=20 2.04× nodes** (was ~2.0×/2.8× when this doc was written), after fixing two correctness bugs and landing the SF11 pruning stack as balanced bundles. The residual is a diffuse **NPS** gap (~0.65× SF) in movegen/eval/TT-entry-size, *not* pruning. See **[`parity-audit-log.md`](parity-audit-log.md)** for the authoritative current state. Everything below is retained as the *levers-tested archive* — the failed experiments and outlier analyses are still valid history, but quote bench figures from the parity-audit-log, not from here.
+
 ## Threading policy — single-thread default (2026-05-16)
 
 **All shipped surfaces (desktop + CLI) default to `threads = 1`.** The Lazy SMP code stays in tree but the multi-thread path is opt-in only (`chess-tutor play --threads N`, `chess-tutor bench <tt> <threads> <depth>`, `chess-tutor noise-bench --threads N`). Engine moves, retrospective, hint panel, and analyze all run single-threaded by default.
