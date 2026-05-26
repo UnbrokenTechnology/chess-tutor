@@ -873,6 +873,26 @@ impl<'a> Search<'a> {
         // `stack[ply-4]`.
         self.stack[STACK_SENTINEL + ply].static_eval = static_eval;
 
+        // SF11 search.cpp:804-806 — the refined `eval`. `static_eval` is
+        // the raw (contempt-adjusted) evaluation that gets persisted and
+        // drives `improving`; `eval` is the value the early-pruning gates
+        // (RFP, NMP, razoring) actually test. When the TT holds a tighter
+        // estimate in the bound's direction, it replaces the static eval:
+        // a LOWER/EXACT entry whose value exceeds the static eval, or an
+        // UPPER/EXACT entry whose value is below it. In check both are
+        // NONE and this is a no-op.
+        let mut eval = static_eval;
+        if static_eval != Value::NONE && tt_hit && tt_value != Value::NONE {
+            let use_tt = if tt_value > eval {
+                matches!(tt_bound, Bound::Lower | Bound::Exact)
+            } else {
+                matches!(tt_bound, Bound::Upper | Bound::Exact)
+            };
+            if use_tt {
+                eval = tt_value;
+            }
+        }
+
         // `improving`: true when this ply's static eval is trending up
         // versus the same side-to-move's eval two plies ago. Mirrors
         // Stockfish 11 (search.cpp:828): if the 2-back frame was in
@@ -903,14 +923,15 @@ impl<'a> Search<'a> {
         // `static_eval < KNOWN_WIN` mirrors SF's "do not return
         // unproven wins" — beyond +10000 cp we're claiming a forced
         // win that the search hasn't actually verified.
+        // SF11 search.cpp:831-836 tests the refined `eval` and returns it.
         if !is_pv
             && !in_check
             && depth < 6
-            && static_eval != Value::NONE
-            && static_eval.0 < Value::KNOWN_WIN.0
-            && static_eval.0 - futility_margin(depth, improving) >= beta.0
+            && eval != Value::NONE
+            && eval.0 < Value::KNOWN_WIN.0
+            && eval.0 - futility_margin(depth, improving) >= beta.0
         {
-            return static_eval;
+            return eval;
         }
 
         // --- Null-move pruning ---
@@ -925,6 +946,14 @@ impl<'a> Search<'a> {
         // would prune subtrees where the side-to-move's *active*
         // play would expose the parent's mistake.
         let parent_stat_score = self.stack[STACK_SENTINEL + ply - 1].stat_score;
+        // NOTE: this NMP still uses the raw `static_eval` and our existing
+        // reduction formula rather than SF11's refined-`eval` gate +
+        // `(854+68·depth)/258` reduction + depth>=13 verification search.
+        // A/B (2026-05-26) showed the faithful NMP regresses on our tree
+        // (+4% with old R, +12% with SF's R) because SF's aggressive NMP
+        // is balanced by companions we have not yet ported (qsearch
+        // ttValue eval-refinement Q3/Q4, razoring, after-null eval). Retry
+        // the faithful NMP+verification bundle once those land.
         if !is_pv
             && !in_check
             && depth >= NULL_MIN_DEPTH
