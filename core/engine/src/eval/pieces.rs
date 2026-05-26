@@ -307,13 +307,14 @@ fn evaluate_piece_type(
         // Accumulated per-piece-type on the granular [`MobilityBreakdown`];
         // call `.total()` on the breakdown for the aggregate the main
         // evaluator used pre-split.
-        let mob = (attacks & e.mobility_area[us_idx]).popcount() as usize;
+        let mobility_squares = attacks & e.mobility_area[us_idx];
+        let mob = mobility_squares.popcount() as usize;
         let mob_score = mobility_bonus(pt, mob);
         e.mobility[us_idx].add_for(pt, mob_score);
         // Opt-in per-piece bookkeeping (None on the hot search path,
         // Some on analysis snapshots — see [`Evaluator::per_piece_mobility`]).
         if let Some(vec) = e.per_piece_mobility.as_mut() {
-            vec.push((s, us, pt, mob_score));
+            vec.push((s, us, pt, mob_score, mobility_squares));
         }
 
         match pt {

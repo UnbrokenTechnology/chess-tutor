@@ -12,6 +12,7 @@
 //! meaningful space advantage to dilute.
 
 use super::{post_user_move, MoveAnalysis};
+use crate::bitboard::Bitboard;
 use crate::position::Position;
 use crate::types::Color;
 
@@ -20,6 +21,16 @@ use crate::types::Color;
 ///
 /// POV convention: `ours_*` = user's side (`root_stm`); `theirs_*` =
 /// opponent.
+///
+/// The `*_safe_post` / `*_reinforced_post` bitboards expose the two
+/// square sets that drive the space score: `safe` is the central
+/// c-f × ranks 2-4 (POV) box minus own pawns minus enemy pawn
+/// attacks; `reinforced` is the subset of `safe` lying on/behind a
+/// friendly pawn that no enemy piece attacks. Surfaced so the
+/// retrospective UI can paint a two-tier "your space" highlight on
+/// the board. Pre-move bitboards are not currently stored (the
+/// existing scalar deltas drive the card-firing decision, and the
+/// post-move snapshot is the natural visual).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SpaceOutcome {
     pub ours_space_pre_mg: i32,
@@ -32,6 +43,15 @@ pub struct SpaceOutcome {
     pub ours_piece_count_post: u32,
     pub theirs_piece_count_pre: u32,
     pub theirs_piece_count_post: u32,
+    /// Post-move "front" space for our side: the c-f × ranks 2-4 box
+    /// minus our pawns minus enemy pawn attacks.
+    pub ours_safe_post: Bitboard,
+    /// Post-move "reinforced" space for our side — subset of
+    /// `ours_safe_post` lying on/behind a friendly pawn (within three
+    /// pushes) that no enemy piece attacks.
+    pub ours_reinforced_post: Bitboard,
+    pub theirs_safe_post: Bitboard,
+    pub theirs_reinforced_post: Bitboard,
 }
 
 impl SpaceOutcome {
@@ -56,6 +76,20 @@ fn space_mg(pos: &Position, side: Color) -> i32 {
     crate::eval::pieces::evaluate(&mut e, Color::White);
     crate::eval::pieces::evaluate(&mut e, Color::Black);
     crate::eval::space::evaluate(&e, side).mg().0
+}
+
+/// Run the standard priming and return the `(safe, reinforced)`
+/// bitboards for both colours at `pos`.
+fn space_bitboards_both(pos: &Position) -> ((Bitboard, Bitboard), (Bitboard, Bitboard)) {
+    let mut e = crate::eval::Evaluator::new(pos);
+    e.initialize(Color::White);
+    e.initialize(Color::Black);
+    crate::eval::pieces::evaluate(&mut e, Color::White);
+    crate::eval::pieces::evaluate(&mut e, Color::Black);
+    (
+        crate::eval::space::space_bitboards(&e, Color::White),
+        crate::eval::space::space_bitboards(&e, Color::Black),
+    )
 }
 
 fn piece_count(pos: &Position, side: Color) -> u32 {
@@ -85,6 +119,24 @@ pub fn compute_space_outcome(
     let ours_piece_count_post = piece_count(&scratch, root_stm);
     let theirs_piece_count_post = piece_count(&scratch, !root_stm);
 
+    let ((white_safe, white_reinforced), (black_safe, black_reinforced)) =
+        space_bitboards_both(&scratch);
+    let (ours_safe_post, ours_reinforced_post, theirs_safe_post, theirs_reinforced_post) =
+        match root_stm {
+            Color::White => (
+                white_safe,
+                white_reinforced,
+                black_safe,
+                black_reinforced,
+            ),
+            Color::Black => (
+                black_safe,
+                black_reinforced,
+                white_safe,
+                white_reinforced,
+            ),
+        };
+
     SpaceOutcome {
         ours_space_pre_mg,
         ours_space_post_mg,
@@ -94,6 +146,10 @@ pub fn compute_space_outcome(
         ours_piece_count_post,
         theirs_piece_count_pre,
         theirs_piece_count_post,
+        ours_safe_post,
+        ours_reinforced_post,
+        theirs_safe_post,
+        theirs_reinforced_post,
     }
 }
 

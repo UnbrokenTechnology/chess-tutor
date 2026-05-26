@@ -9,6 +9,8 @@
 use std::io;
 
 use chess_tutor_engine::analysis::SpaceOutcome;
+#[cfg(test)]
+use chess_tutor_engine::bitboard::Bitboard;
 
 /// Minimum |delta_mg| to bother narrating. Space is a small term to
 /// begin with — most shifts are <20 cp — so we threshold modestly.
@@ -79,6 +81,10 @@ mod tests {
             ours_piece_count_post: ours_count_post,
             theirs_piece_count_pre: theirs_count_pre,
             theirs_piece_count_post: theirs_count_post,
+            ours_safe_post: Bitboard::EMPTY,
+            ours_reinforced_post: Bitboard::EMPTY,
+            theirs_safe_post: Bitboard::EMPTY,
+            theirs_reinforced_post: Bitboard::EMPTY,
         }
     }
 

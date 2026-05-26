@@ -208,6 +208,50 @@ fn annotation_square_colors(
             Some(egui::Color32::from_rgba_unmultiplied(0xa0, 0x40, 0x40, 0x45)),
             None,
         ),
+        AnnotationKind::SpaceFront => (
+            Some(egui::Color32::from_rgba_unmultiplied(0x40, 0x90, 0xc0, 0x35)),
+            None,
+        ),
+        AnnotationKind::SpaceReinforced => (
+            Some(egui::Color32::from_rgba_unmultiplied(0x20, 0x60, 0xb0, 0x60)),
+            Some(egui::Color32::from_rgb(0x10, 0x40, 0x90)),
+        ),
+        AnnotationKind::OpponentSpaceFront => (
+            // Warm amber so a "both space overlays on" board reads as
+            // teal-vs-amber without the colors clashing.
+            Some(egui::Color32::from_rgba_unmultiplied(0xc0, 0x70, 0x20, 0x35)),
+            None,
+        ),
+        AnnotationKind::OpponentSpaceReinforced => (
+            Some(egui::Color32::from_rgba_unmultiplied(0xb0, 0x50, 0x10, 0x60)),
+            Some(egui::Color32::from_rgb(0x90, 0x40, 0x10)),
+        ),
+        AnnotationKind::MobilityExcluded => (
+            // Muted grey — the engine considers these "dead." Subtle
+            // so it doesn't fight with other overlays painted on top.
+            Some(egui::Color32::from_rgba_unmultiplied(0x60, 0x60, 0x60, 0x40)),
+            None,
+        ),
+        AnnotationKind::Pin => (
+            Some(egui::Color32::from_rgba_unmultiplied(0xe0, 0x60, 0xc0, 0x55)),
+            Some(egui::Color32::from_rgb(0xb0, 0x30, 0x90)),
+        ),
+        AnnotationKind::HeatOurs1 => (
+            Some(egui::Color32::from_rgba_unmultiplied(0x40, 0xc0, 0x60, 0x30)),
+            None,
+        ),
+        AnnotationKind::HeatOurs2 => (
+            Some(egui::Color32::from_rgba_unmultiplied(0x20, 0x90, 0x40, 0x60)),
+            None,
+        ),
+        AnnotationKind::HeatTheirs1 => (
+            Some(egui::Color32::from_rgba_unmultiplied(0xc0, 0x40, 0x40, 0x30)),
+            None,
+        ),
+        AnnotationKind::HeatTheirs2 => (
+            Some(egui::Color32::from_rgba_unmultiplied(0x90, 0x20, 0x20, 0x60)),
+            None,
+        ),
         AnnotationKind::Highlight => (
             Some(egui::Color32::from_rgba_unmultiplied(0xff, 0xeb, 0x3b, 0x55)),
             None,
@@ -232,6 +276,34 @@ fn arrow_color(kind: AnnotationKind) -> egui::Color32 {
         AnnotationKind::NewMobility => egui::Color32::from_rgba_unmultiplied(0x20, 0x90, 0x60, 0xd0),
         AnnotationKind::LostMobility => {
             egui::Color32::from_rgba_unmultiplied(0xa0, 0x40, 0x40, 0xd0)
+        }
+        AnnotationKind::SpaceFront => {
+            egui::Color32::from_rgba_unmultiplied(0x40, 0x90, 0xc0, 0xd0)
+        }
+        AnnotationKind::SpaceReinforced => {
+            egui::Color32::from_rgba_unmultiplied(0x20, 0x60, 0xb0, 0xd0)
+        }
+        AnnotationKind::OpponentSpaceFront => {
+            egui::Color32::from_rgba_unmultiplied(0xc0, 0x70, 0x20, 0xd0)
+        }
+        AnnotationKind::OpponentSpaceReinforced => {
+            egui::Color32::from_rgba_unmultiplied(0xb0, 0x50, 0x10, 0xd0)
+        }
+        AnnotationKind::MobilityExcluded => {
+            egui::Color32::from_rgba_unmultiplied(0x60, 0x60, 0x60, 0xd0)
+        }
+        AnnotationKind::Pin => egui::Color32::from_rgba_unmultiplied(0xb0, 0x30, 0x90, 0xd0),
+        AnnotationKind::HeatOurs1 => {
+            egui::Color32::from_rgba_unmultiplied(0x20, 0x90, 0x40, 0xd0)
+        }
+        AnnotationKind::HeatOurs2 => {
+            egui::Color32::from_rgba_unmultiplied(0x20, 0x90, 0x40, 0xd0)
+        }
+        AnnotationKind::HeatTheirs1 => {
+            egui::Color32::from_rgba_unmultiplied(0x90, 0x20, 0x20, 0xd0)
+        }
+        AnnotationKind::HeatTheirs2 => {
+            egui::Color32::from_rgba_unmultiplied(0x90, 0x20, 0x20, 0xd0)
         }
         AnnotationKind::Highlight => egui::Color32::from_rgba_unmultiplied(0xff, 0xc0, 0x10, 0xd0),
     }

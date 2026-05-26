@@ -2,6 +2,7 @@
 //! mobility (knight / bishop / rook / queen) on both sides.
 
 use super::{post_user_move, MoveAnalysis};
+use crate::bitboard::Bitboard;
 use crate::eval::MobilityBreakdown;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
@@ -21,6 +22,11 @@ pub struct PieceMobility {
     pub piece: PieceType,
     /// Midgame mobility bonus in engine-cp.
     pub mg: i32,
+    /// The exact squares this piece attacks that counted toward its
+    /// mobility score (`attacks & mobility_area`). The retrospective
+    /// UI diffs this between pre/post snapshots to highlight which
+    /// squares a piece newly attacks (or no longer attacks).
+    pub mobility_squares: Bitboard,
 }
 
 /// Pre/post snapshots of per-piece-type mobility on both sides plus
@@ -64,11 +70,12 @@ fn snapshot_mobility_both(
     let mut white = Vec::new();
     let mut black = Vec::new();
     if let Some(vec) = e.per_piece_mobility.take() {
-        for (sq, col, pt, score) in vec {
+        for (sq, col, pt, score, mobility_squares) in vec {
             let pm = PieceMobility {
                 square: sq,
                 piece: pt,
                 mg: score.mg().0,
+                mobility_squares,
             };
             match col {
                 Color::White => white.push(pm),

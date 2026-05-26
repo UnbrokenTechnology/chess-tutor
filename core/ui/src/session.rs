@@ -21,10 +21,15 @@ use chess_tutor_engine::traps::{self, PendingTrap, TrapEvent, TrapHit, TrapThrea
 use chess_tutor_engine::types::{Color, Move, MoveKind, PieceType, Square, Value};
 
 use crate::event::Event;
+use crate::learning_mode::{
+    build_intervention_panel, gating_config_for, intervention_required, LearningPreferences,
+    LearningPreset, MistakeHandling, PendingIntervention,
+};
 use crate::view::{
-    BoardView, EvalBarView, HintEntryView, HintPanelState, HintPanelView, MoveListCell,
-    MoveListRow, MoveListView, NewGameDialogView, PromotionPickerView, RetrospectiveBody,
-    RetrospectiveKind, RetrospectivePanelView, SidePanelBody, SidePanelView, TopBarView,
+    BoardView, CoachingPanelView, EvalBarView, HintEntryView, HintPanelState, HintPanelView,
+    MoveListCell, MoveListRow, MoveListView, NewGameDialogView, PromotionPickerView,
+    RetrospectiveBody, RetrospectiveKind, RetrospectivePanelView, SidePanelBody, SidePanelView,
+    TopBarView,
 };
 use crate::worker::{worker_loop, NoisePickInfo, WorkerJob, WorkerResult};
 
@@ -318,6 +323,42 @@ pub struct Session {
     /// "Other shifts" caps at the 50%-coverage prefix. Sticky across
     /// moves so the student can opt in once and keep the wider view.
     pub(crate) show_all_signals: bool,
+
+    /// User-toggled board overlays — each [`crate::view::OverlayKind`]
+    /// paints its own annotations onto the live board. Sticky across
+    /// moves; not persisted to disk yet.
+    pub(crate) active_overlays: std::collections::HashSet<crate::view::OverlayKind>,
+
+    /// Learning-mode preferences (assistance level, mistake handling,
+    /// blunder safety, whether engine-preferred moves are revealed).
+    /// Defaults match the "Practicing" preset: silent during play,
+    /// retrospective only, no best-move reveal. The intervention path
+    /// reads these on every move-related event; the retrospective
+    /// builder reads `reveal_best_moves` per frame.
+    pub(crate) learning: LearningPreferences,
+
+    /// Set after a user move when the engine classifier said an
+    /// intervention is warranted *and* the user's preferences want
+    /// to be paused for it. While `Some`, the engine reply is held
+    /// (no `WorkerJob::Search` queued) and the side panel renders
+    /// the intervention prompt instead of the retrospective. Cleared
+    /// by any of the intervention-response events (continue, reveal,
+    /// take-back).
+    pub(crate) pending_intervention: Option<PendingIntervention>,
+
+    /// `true` between `apply_user_move` and the matching retrospective
+    /// arrival when we deferred the engine search waiting for the
+    /// classifier to weigh in. Without this flag we'd never queue the
+    /// engine search in the "user is in intervention mode, but the
+    /// move turned out Fine" case. Cleared as soon as the
+    /// classifier decision lands.
+    pub(crate) awaiting_intervention_decision: bool,
+
+    /// `true` while the user has opened the post-game review surface.
+    /// Renderers swap the side panel's body to the review when set.
+    /// Auto-closed on takeback / new game so the user isn't left on a
+    /// stale list.
+    pub(crate) game_review_open: bool,
 }
 
 pub(crate) struct PendingPromotion {
@@ -382,6 +423,11 @@ impl Session {
             pending_trap: None,
             selected_retrospective: None,
             show_all_signals: false,
+            active_overlays: std::collections::HashSet::new(),
+            learning: LearningPreferences::default(),
+            pending_intervention: None,
+            awaiting_intervention_decision: false,
+            game_review_open: false,
         }
     }
 
@@ -412,6 +458,9 @@ impl Session {
         self.book_out_announced = false;
         self.pending_trap = None;
         self.selected_retrospective = None;
+        self.pending_intervention = None;
+        self.awaiting_intervention_decision = false;
+        self.game_review_open = false;
         if self.log_to_stderr {
             log_new_game_intro(&self.opponent);
         }
@@ -485,6 +534,9 @@ impl Session {
         self.book_out_announced = false;
         self.pending_trap = None;
         self.selected_retrospective = None;
+        self.pending_intervention = None;
+        self.awaiting_intervention_decision = false;
+        self.game_review_open = false;
         if self.log_to_stderr {
             log_new_game_intro(&self.opponent);
         }
@@ -656,12 +708,22 @@ impl Session {
     /// promotion picker. Snapshots pre-move state for the retrospective
     /// job (when [`Self::auto_retrospective`] is set), applies the
     /// move, and clears the hint panel.
+    ///
+    /// Sets [`Self::awaiting_intervention_decision`] when the user's
+    /// preferences want the classifier to run on this move — that
+    /// flag causes `maybe_queue_engine_search` to hold the bot
+    /// reply until the classifier returns (or the user resolves the
+    /// resulting prompt). Without auto-retrospective there's no
+    /// classifier to wait for, so the flag stays false.
     pub fn apply_user_move(&mut self, mv: Move) {
         if self.auto_retrospective {
             let pre_move_pos = self.position.clone();
             let pre_move_history = game_history_for_search(&self.position_keys);
             self.apply_move(mv);
             let target_index = self.history.len() - 1;
+            if self.intervention_mode_active() {
+                self.awaiting_intervention_decision = true;
+            }
             let _ = self.worker_tx.send(WorkerJob::Retrospective {
                 pre_move_pos: Box::new(pre_move_pos),
                 user_move: mv,
@@ -676,6 +738,21 @@ impl Session {
             self.apply_move(mv);
         }
         self.close_hint();
+    }
+
+    /// `true` when the user's learning preferences want the engine
+    /// classifier to inspect each user move (and pause the game if it
+    /// flags one). Both gates — blunder safety and mistake handling —
+    /// route through the classifier; we only skip when *neither* is
+    /// active.
+    fn intervention_mode_active(&self) -> bool {
+        !matches!(
+            self.learning.mistake_handling,
+            MistakeHandling::SilentRetrospective
+        ) || matches!(
+            self.learning.blunder_safety,
+            crate::learning_mode::BlunderSafety::OfferTakeback
+        )
     }
 
     fn apply_move(&mut self, mv: Move) {
@@ -751,6 +828,12 @@ impl Session {
             // toggle engine_thinking) need to be invalidated.
             self.gen = self.gen.wrapping_add(1);
         }
+        // Any active or pending intervention referred to the move
+        // we're about to undo — drop it so the panel snaps back to
+        // the normal retrospective surface.
+        self.pending_intervention = None;
+        self.awaiting_intervention_decision = false;
+        self.game_review_open = false;
         self.viewing_index = None;
         self.close_hint();
         self.undo_one();
@@ -801,6 +884,15 @@ impl Session {
         // top-of-loop guard returns.
         loop {
             if self.engine_thinking {
+                return;
+            }
+            // Hold the engine reply while we're either (a) showing an
+            // intervention prompt to the user or (b) waiting for the
+            // classifier to decide whether one's needed. The
+            // intervention-response events and the Retrospective
+            // worker arrival path are responsible for re-calling this
+            // method once the wait clears.
+            if self.pending_intervention.is_some() || self.awaiting_intervention_decision {
                 return;
             }
             if !self.engine_plays.is_engine_turn(self.position.side_to_move()) {
@@ -966,14 +1058,50 @@ impl Session {
                 if gen != self.gen {
                     return;
                 }
+                // Snapshot pre-move position before mutating the entry
+                // — we need it for the classifier below and the
+                // immutable borrow can't coexist with the later
+                // `history.get_mut`.
+                let pre_pos = (target_index <= self.history.len())
+                    .then(|| self.pre_move_position(target_index));
                 if let Some(entry) = self.history.get_mut(target_index) {
                     entry.retrospective = Some(RetrospectiveResult {
                         user_move,
-                        analyses,
+                        analyses: analyses.clone(),
                         elapsed,
                         nodes,
                         nps_m,
                     });
+                }
+                // If we held the engine reply waiting for the
+                // classifier to decide, decide now. The retrospective
+                // we just received must be for the *latest* user move
+                // — anything else is a stale arrival and we ignore it
+                // for intervention purposes (the gen-check above
+                // already filtered most of those).
+                if self.awaiting_intervention_decision
+                    && target_index + 1 == self.history.len()
+                {
+                    self.awaiting_intervention_decision = false;
+                    let assessment = pre_pos.as_ref().map(|pp| {
+                        chess_tutor_engine::analysis::classify_user_move(
+                            pp,
+                            &analyses,
+                            user_move,
+                            &gating_config_for(self.learning.mistake_handling),
+                        )
+                    });
+                    if let Some(assessment) = assessment {
+                        if intervention_required(&assessment, &self.learning) {
+                            self.pending_intervention = Some(PendingIntervention {
+                                at_history_index: target_index,
+                                original_move: user_move,
+                                assessment,
+                                concept_revealed: false,
+                            });
+                        }
+                    }
+                    self.maybe_queue_engine_search();
                 }
             }
             WorkerResult::Analyze { for_key, analyses } => {
@@ -1049,27 +1177,22 @@ impl Session {
         self.viewing_index.is_none()
     }
 
-    /// The EngineInfo to display on the eval bar for the position the
-    /// user is currently viewing.
+    /// The most-recent post-move evaluation (white POV) at or before
+    /// the currently viewed history index — used by the eval bar.
     ///
-    /// `engine_info` is only populated for moves the engine played, so
-    /// when the user is browsing back to a user-move position we scan
-    /// backward for the most recent engine evaluation that was
-    /// available at that point in the game. That's an approximation —
-    /// the true post-user-move eval would require a fresh search per
-    /// click — but it's close enough to let the user see the trend
-    /// (eval bar drops at the move where it actually dropped, not
-    /// always shows the live eval).
+    /// Both engine moves (`engine_info`) and user moves (the
+    /// retrospective worker's analysis of the user's chosen move) are
+    /// valid sources. Scanning backward picks up the first either-or
+    /// hit, so the bar updates on every move that has reached the
+    /// analysis stage — not only engine moves.
     ///
-    /// When viewing live (`viewing_index = None`), behaves identically
-    /// to the previous `latest_engine_info` — most recent across the
-    /// full history.
-    pub(crate) fn viewed_engine_info(&self) -> Option<&EngineInfo> {
+    /// When the user is browsing back to a position whose retrospective
+    /// hasn't arrived yet, we fall further back to the most recent
+    /// pre-existing evaluation. That's an approximation, but it gives
+    /// a sensible "trend" view while the worker catches up.
+    pub(crate) fn viewed_eval_white_pov(&self) -> Option<Value> {
         let upper = self.viewing_index.map_or(self.history.len(), |i| i + 1);
-        self.history[..upper]
-            .iter()
-            .rev()
-            .find_map(|e| e.engine_info.as_ref())
+        self.history[..upper].iter().rev().find_map(entry_eval_white_pov)
     }
 
     /// Picks the (index, entry) to show in the retrospective panel:
@@ -1110,6 +1233,17 @@ impl Session {
             EngineMode::None => true,
             EngineMode::Side(c) => entry.moved_by != c,
             EngineMode::Both => false,
+        }
+    }
+
+    /// "User's" colour for POV-flipped overlays. When the engine plays
+    /// one side, the user is the other; otherwise we fall back to the
+    /// side-to-move at the currently-viewed position (the natural POV
+    /// for two-human / self-play modes).
+    pub(crate) fn user_color(&self) -> Color {
+        match self.engine_plays {
+            EngineMode::Side(eng) => !eng,
+            EngineMode::None | EngineMode::Both => self.viewed_position().side_to_move(),
         }
     }
 
@@ -1223,6 +1357,98 @@ impl Session {
         self.depth
     }
 
+    /// Current learning preferences (assistance level, mistake
+    /// handling, blunder safety, reveal-best-moves).
+    pub fn learning_preferences(&self) -> &LearningPreferences {
+        &self.learning
+    }
+
+    /// Replace the full learning preferences bundle. Renderers can
+    /// either dispatch [`Event::ApplyLearningPreset`] for the named
+    /// presets or call this for per-axis edits.
+    pub fn set_learning_preferences(&mut self, prefs: LearningPreferences) {
+        self.learning = prefs;
+    }
+
+    /// `Some` while an intervention prompt is showing. CLI callers
+    /// can inspect this to know the bot reply is being held.
+    pub fn pending_intervention(&self) -> Option<&PendingIntervention> {
+        self.pending_intervention.as_ref()
+    }
+
+    /// Walk every user move's cached retrospective analysis through
+    /// the engine classifier and return the ranked list of moments
+    /// worth reviewing. Returns `None` when the game has no user
+    /// moves whose retrospective has arrived yet.
+    ///
+    /// Reuses [`crate::learning_mode::gating_config_for`] with the
+    /// user's current `mistake_handling` preference so the same gate
+    /// drives both the in-game prompt and the post-game review —
+    /// switching to "AllMistakes" before opening review surfaces
+    /// every non-best move, switching back tightens the list.
+    pub fn build_game_review(&self) -> Option<crate::view::GameReviewView> {
+        use crate::view::{GameReviewMoment, GameReviewView, ReviewMomentKind};
+
+        let mut moments: Vec<GameReviewMoment> = Vec::new();
+        let mut user_move_count: usize = 0;
+        let config = gating_config_for(self.learning.mistake_handling);
+
+        for (idx, entry) in self.history.iter().enumerate() {
+            if !self.is_user_move(entry) {
+                continue;
+            }
+            user_move_count += 1;
+            let Some(retro) = entry.retrospective.as_ref() else {
+                // Analysis hasn't arrived yet — skip silently. Most
+                // common case is the very-latest move while the worker
+                // is still computing.
+                continue;
+            };
+            let pre = self.pre_move_position(idx);
+            let assessment = chess_tutor_engine::analysis::classify_user_move(
+                &pre,
+                &retro.analyses,
+                retro.user_move,
+                &config,
+            );
+            let kind = match (&assessment.blunder, &assessment.teaching) {
+                (Some(_), Some(_)) => ReviewMomentKind::BlunderWithLesson,
+                (Some(_), None) => ReviewMomentKind::Blunder,
+                (None, Some(_)) => ReviewMomentKind::TeachingMoment,
+                (None, None) => continue,
+            };
+            let headline = review_headline_for(&assessment);
+            let move_pair_number = idx / 2 + 1;
+            let side_to_move_label = if entry.moved_by == Color::White {
+                "White"
+            } else {
+                "Black"
+            };
+            moments.push(GameReviewMoment {
+                history_index: idx,
+                move_pair_number,
+                side_to_move_label,
+                san: entry.san.clone(),
+                kind,
+                headline,
+            });
+        }
+
+        if user_move_count == 0 {
+            return None;
+        }
+        Some(GameReviewView {
+            game_outcome: self.game_outcome(),
+            user_move_count,
+            moments,
+        })
+    }
+
+    /// Whether the game-review surface is currently being shown.
+    pub fn is_game_review_open(&self) -> bool {
+        self.game_review_open
+    }
+
     // ---- Event dispatch ------------------------------------------------
 
     /// Apply a renderer-emitted intent. Centralising this here keeps
@@ -1271,12 +1497,59 @@ impl Session {
             Event::ToggleShowAllSignals => {
                 self.show_all_signals = !self.show_all_signals;
             }
+            Event::ToggleOverlay(kind) => {
+                if !self.active_overlays.remove(&kind) {
+                    self.active_overlays.insert(kind);
+                }
+            }
             Event::Cancel => self.handle_cancel(),
             Event::ConfirmNewGame => self.try_start_from_form(),
             Event::ResetBotForm => {
                 if let Some(f) = self.new_game_form.as_mut() {
                     f.noise = NoiseProfile::default();
                     f.eval_mask = EvalMask::EMPTY;
+                }
+            }
+            Event::ApplyLearningPreset(preset) => {
+                // Custom is a no-op when set externally; it just means
+                // "the bundle was custom-tuned, don't touch it."
+                if !matches!(preset, LearningPreset::Custom) {
+                    self.learning = preset.to_preferences();
+                }
+            }
+            Event::SetRevealBestMoves(on) => {
+                self.learning.reveal_best_moves = on;
+            }
+            Event::ContinueDespitePrompt => {
+                self.pending_intervention = None;
+                self.maybe_queue_engine_search();
+            }
+            Event::RevealMissedConcept => {
+                if let Some(p) = self.pending_intervention.as_mut() {
+                    p.concept_revealed = true;
+                }
+            }
+            Event::TakeBackDuringIntervention => {
+                self.pending_intervention = None;
+                self.awaiting_intervention_decision = false;
+                self.takeback();
+            }
+            Event::OpenGameReview => {
+                // Only meaningful when there's at least one user move;
+                // for an empty history just leave the regular surface up.
+                if self.history.iter().any(|e| self.is_user_move(e)) {
+                    self.game_review_open = true;
+                    self.close_hint();
+                }
+            }
+            Event::CloseGameReview => {
+                self.game_review_open = false;
+            }
+            Event::JumpToReviewMoment(history_index) => {
+                if history_index < self.history.len() {
+                    self.viewing_index = Some(history_index);
+                    self.selected_retrospective = None;
+                    self.game_review_open = false;
                 }
             }
         }
@@ -1305,6 +1578,9 @@ impl Session {
             && !self.engine_thinking
             && self.is_users_turn()
             && self.game_outcome().is_none();
+        let review_button_enabled = self.history.iter().any(|e| {
+            self.is_user_move(e) && e.retrospective.is_some()
+        });
         TopBarView {
             can_takeback: !self.history.is_empty(),
             hint_open: self.hint_open,
@@ -1313,11 +1589,13 @@ impl Session {
             depth: self.depth,
             engine_thinking: self.engine_thinking,
             game_outcome: self.game_outcome(),
+            review_open: self.game_review_open,
+            review_button_enabled,
         }
     }
 
     pub fn build_eval_bar_view(&self) -> EvalBarView {
-        let score = self.viewed_engine_info().map(|i| i.score_white_pov);
+        let score = self.viewed_eval_white_pov();
         let (white_ratio, label) = match score {
             Some(v) if v.abs() >= Value::MATE_IN_MAX_PLY => {
                 if v.0 > 0 {
@@ -1370,12 +1648,25 @@ impl Session {
     }
 
     /// Gather any annotations to draw on the board. Sources:
+    /// - Active board overlays (always-on, computed against the
+    ///   currently-viewed position).
     /// - The currently-viewed user-move entry's retrospective: best-
     ///   move arrow always shown; the selected card's annotations
     ///   layer on top.
     /// - Future: trap-refutation arrows, pin renderer per HANDOFF-ux.
     fn collect_board_annotations(&self) -> Vec<crate::view::BoardAnnotation> {
         let mut out = Vec::new();
+
+        // Overlays first, so retrospective annotations paint on top.
+        if !self.active_overlays.is_empty() {
+            crate::overlays_view::push_overlay_annotations(
+                &mut out,
+                &chess_tutor_engine::analysis::compute_overlays(self.viewed_position()),
+                self.user_color(),
+                &self.active_overlays,
+            );
+        }
+
         let Some((entry_idx, entry)) = self.panel_entry_with_index() else {
             return out;
         };
@@ -1391,6 +1682,7 @@ impl Session {
             &result.analyses,
             result.user_move,
             self.show_all_signals,
+            self.learning.reveal_best_moves,
         );
         if let Some(ann) = vm.headline.best_move_annotation {
             out.push(ann);
@@ -1405,15 +1697,42 @@ impl Session {
         out
     }
 
+    /// Snapshot of the currently-active overlay set. Renderers consume
+    /// this to draw the overlay checkboxes with the right initial
+    /// state.
+    pub fn active_overlays(&self) -> &std::collections::HashSet<crate::view::OverlayKind> {
+        &self.active_overlays
+    }
+
     pub fn build_side_panel_view(&self) -> SidePanelView {
-        let body = if self.hint_open {
+        // Body priority, top to bottom:
+        //   Intervention > GameReview (when explicitly opened)
+        //     > Hint (when explicitly opened)
+        //     > Coaching (live, when assistance = Coached, user's turn,
+        //                 viewing live, game in progress)
+        //     > Retrospective (the default)
+        let body = if let Some(pending) = self.pending_intervention.as_ref() {
+            SidePanelBody::Intervention(build_intervention_panel(pending))
+        } else if self.game_review_open {
+            // build_game_review returns None only when there are no
+            // user moves at all — in that case fall back to the
+            // regular retrospective so the panel isn't blank.
+            match self.build_game_review() {
+                Some(review) => SidePanelBody::GameReview(review),
+                None => SidePanelBody::Retrospective(self.build_retrospective_view()),
+            }
+        } else if self.hint_open {
             SidePanelBody::Hint(self.build_hint_panel_view())
+        } else if self.coaching_should_show() {
+            SidePanelBody::Coaching(self.build_coaching_panel_view())
         } else {
             SidePanelBody::Retrospective(self.build_retrospective_view())
         };
         SidePanelView {
             moves: self.build_move_list_view(),
             body,
+            active_overlays: self.active_overlays.clone(),
+            learning: self.learning,
             stick_to_bottom: self.is_viewing_live(),
         }
     }
@@ -1464,6 +1783,7 @@ impl Session {
                         &result.analyses,
                         result.user_move,
                         self.show_all_signals,
+                        self.learning.reveal_best_moves,
                     );
                     let selected_item = match self.selected_retrospective {
                         Some((h, i)) if h == entry_index => Some(i),
@@ -1494,6 +1814,30 @@ impl Session {
             },
             show_all_signals: self.show_all_signals,
         }
+    }
+
+    /// Conditions for the live coaching panel to appear:
+    /// - User explicitly turned it on via `AssistanceLevel::Coached`.
+    /// - It's the user's turn (coaching applies to the live position
+    ///   the student is about to move from).
+    /// - The user is viewing live, not browsing back.
+    /// - The game isn't over.
+    /// - There's no other higher-priority body active (the caller
+    ///   already drained those — this function only sees the lower-
+    ///   priority case).
+    pub(crate) fn coaching_should_show(&self) -> bool {
+        matches!(
+            self.learning.assistance,
+            crate::learning_mode::AssistanceLevel::Coached
+        ) && self.is_viewing_live()
+            && self.is_users_turn()
+            && self.game_outcome().is_none()
+    }
+
+    fn build_coaching_panel_view(&self) -> CoachingPanelView {
+        let view_model =
+            crate::coaching_view::build_coaching_view(&self.position, self.user_color());
+        CoachingPanelView { view_model }
     }
 
     fn build_hint_panel_view(&self) -> HintPanelView {
@@ -1542,11 +1886,68 @@ impl Session {
     }
 }
 
+/// Build the short headline shown for a moment in the game review
+/// list. Mirrors the in-game prompt phrasing without ever naming the
+/// engine's preferred move.
+fn review_headline_for(
+    assessment: &chess_tutor_engine::analysis::MoveAssessment,
+) -> String {
+    if let Some(b) = assessment.blunder {
+        let pawns = (b.material_loss_cp as f32) / 100.0;
+        return match b.lost_piece_square {
+            Some(sq) => format!(
+                "Material at risk: piece on {} ({:.1} pawns)",
+                sq.to_algebraic(),
+                pawns
+            ),
+            None => format!("Material at risk: {:.1} pawns", pawns),
+        };
+    }
+    if let Some(t) = assessment.teaching {
+        let (area_a, _) = crate::learning_mode::term_prompt_copy(t.dominant.term);
+        return match t.secondary {
+            None => format!(
+                "Missed point: {} ({:.1} pawns concentrated)",
+                area_a,
+                (t.dominant.severity_cp as f32) / 100.0
+            ),
+            Some(secondary) => {
+                let (area_b, _) = crate::learning_mode::term_prompt_copy(secondary.term);
+                let combined = ((t.dominant.severity_cp + secondary.severity_cp) as f32) / 100.0;
+                format!(
+                    "Missed points: {} and {} ({:.1} pawns split)",
+                    area_a, area_b, combined
+                )
+            }
+        };
+    }
+    "Significant moment".to_string()
+}
+
 /// Saturation point for the eval bar's score→ratio mapping. Used by
 /// [`Session::build_eval_bar_view`]; lives at module scope so the only
 /// constant referenced by view-building stays adjacent to the
 /// session.
 const EVAL_BAR_SATURATION_CP: f32 = 1000.0;
+
+/// Pick a post-move evaluation (white POV) off a single
+/// [`HistoryEntry`]. Engine moves carry the score directly on
+/// `engine_info`; user moves carry it on the retrospective's analysis
+/// of the move they actually played. The eval bar walks history
+/// backward through this so it updates on every move, not only engine
+/// replies.
+fn entry_eval_white_pov(e: &HistoryEntry) -> Option<Value> {
+    if let Some(info) = &e.engine_info {
+        return Some(info.score_white_pov);
+    }
+    let retro = e.retrospective.as_ref()?;
+    let analysis = retro.analyses.iter().find(|a| a.mv == retro.user_move)?;
+    Some(if e.moved_by == Color::White {
+        analysis.score
+    } else {
+        -analysis.score
+    })
+}
 
 pub(crate) fn game_history_for_search(position_keys: &[u64]) -> Vec<u64> {
     if position_keys.is_empty() {
