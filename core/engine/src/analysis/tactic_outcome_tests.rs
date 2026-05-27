@@ -208,6 +208,43 @@ fn outcome_reports_user_played_hanging_capture() {
     assert_eq!(hit.pattern, TacticPattern::HangingCapture);
 }
 
+// ---- detect_removing_defender ---------------------------------------
+
+// White pawn e5 captures the black knight f6, which was the only
+// defender of the black bishop on d5 that the white rook on d1 attacks.
+// The knight is itself defended by the g7 pawn, so this is purely a
+// remove-the-defender (not a free capture of the knight).
+const REMOVE_DEFENDER_FEN: &str = "4k3/6p1/5n2/3bP3/8/8/8/3RK3 w - - 0 1";
+
+#[test]
+fn capturing_the_sole_defender_fires_removing_defender() {
+    let pre = pos(REMOVE_DEFENDER_FEN);
+    let exf6 = Move::normal(Square::E5, Square::F6);
+    let hit = detect_line_tactic(&pre, &[exf6], Color::White, 0).expect("removing the defender");
+    assert_eq!(hit.pattern, TacticPattern::RemovingDefender);
+    assert_eq!(hit.pv_ply, 0);
+    assert_eq!(hit.primary_piece, Square::F6);
+    assert_eq!(hit.targets, vec![Square::D5]);
+}
+
+#[test]
+fn not_removing_defender_when_target_has_a_second_defender() {
+    // A black pawn on c6 also defends d5, so removing the f6 knight
+    // doesn't leave the bishop hanging.
+    let pre = pos("4k3/6p1/2p2n2/3bP3/8/8/8/3RK3 w - - 0 1");
+    let exf6 = Move::normal(Square::E5, Square::F6);
+    assert!(detect_line_tactic(&pre, &[exf6], Color::White, 0).is_none());
+}
+
+#[test]
+fn outcome_reports_user_played_removing_defender() {
+    let pre = pos(REMOVE_DEFENDER_FEN);
+    let ma = ma_with_pv(vec![Move::normal(Square::E5, Square::F6)], Some(0));
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White);
+    let hit = outcome.user_played_tactic.expect("removing the defender");
+    assert_eq!(hit.pattern, TacticPattern::RemovingDefender);
+}
+
 // ---- ported util helpers --------------------------------------------
 
 #[test]

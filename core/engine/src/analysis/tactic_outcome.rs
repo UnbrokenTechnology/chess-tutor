@@ -190,6 +190,7 @@ fn detect_line_tactic(
     // a piece that was simply left hanging. Ship 1 returns a single
     // hit; a future ship may collect a Vec.
     detect_fork(&post, key_move, mover, base_ply, material_gain)
+        .or_else(|| detect_removing_defender(pre, &post, key_move, mover, base_ply, material_gain))
         .or_else(|| detect_hanging_capture(pre, key_move, mover, base_ply, material_gain))
 }
 
@@ -299,6 +300,71 @@ fn detect_hanging_capture(
         pv_ply: base_ply,
         primary_piece: to,
         targets: vec![to],
+        material_gain,
+        confidence: confidence_for(material_gain),
+    })
+}
+
+/// Removing the defender — port of `cook.py:capturing_defender`.
+///
+/// The key move captures an enemy piece X that was the sole defender of
+/// another enemy piece Y we were already pressuring; with X gone, Y is
+/// left hanging. We detect this by diffing the enemy's hanging list
+/// across the capture: a piece Y that X attacked pre-move, was *not*
+/// hanging before, but *is* hanging after, was being held up by X
+/// alone. Excludes king capturers (matching lichess).
+///
+/// Checked ahead of [`detect_hanging_capture`] in the priority chain:
+/// when a capture is both a free piece *and* unguards another, the
+/// removing-the-defender framing is the richer lesson.
+fn detect_removing_defender(
+    pre: &Position,
+    post: &Position,
+    key_move: Move,
+    mover: Color,
+    base_ply: usize,
+    material_gain: Option<i32>,
+) -> Option<TacticHit> {
+    if !pre.is_capture(key_move) {
+        return None;
+    }
+    let from = key_move.from();
+    if pre.piece_on(from)?.kind() == PieceType::King {
+        return None;
+    }
+    let to = key_move.to();
+    let enemy = !mover;
+
+    // The squares the captured defender X (on `to` pre-move) was
+    // guarding: enemy pieces it attacked.
+    let guarded_by_x = attacks_from_square(pre, to) & pre.pieces_by_color(enemy);
+    if guarded_by_x.is_empty() {
+        return None;
+    }
+
+    // A piece is "freed" if it's hanging now but wasn't before — the
+    // capture is what exposed it.
+    let pre_hanging: Vec<Square> = list_hanging(pre, enemy)
+        .iter()
+        .map(|h| h.location.square)
+        .collect();
+
+    let mut freed: Vec<Square> = list_hanging(post, enemy)
+        .into_iter()
+        .map(|h| h.location.square)
+        .filter(|&y| guarded_by_x.contains(y) && !pre_hanging.contains(&y))
+        .collect();
+
+    if freed.is_empty() {
+        return None;
+    }
+    freed.sort_by_key(|s| s.index());
+
+    Some(TacticHit {
+        pattern: TacticPattern::RemovingDefender,
+        pv_ply: base_ply,
+        primary_piece: to,
+        targets: freed,
         material_gain,
         confidence: confidence_for(material_gain),
     })
