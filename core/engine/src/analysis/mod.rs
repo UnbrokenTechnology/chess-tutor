@@ -113,6 +113,7 @@ pub mod pieces_positional_outcome;
 pub mod space_outcome;
 pub mod surprise;
 pub mod tactic_outcome;
+pub mod tactic_util;
 pub mod term_delta;
 pub mod term_id;
 pub mod threats_outcome;
@@ -151,7 +152,7 @@ pub use move_assessment::{
     classify_user_move, BlunderInfo, GatingConfig, MoveAssessment, TeachingInfo, TermContribution,
     TermFamily,
 };
-pub use overlays::{compute_overlays, OverlayData};
+pub use overlays::{compute_overlays, trapped_cages, OverlayData};
 pub use passed_pawns_outcome::{compute_passed_pawns_outcome, PassedPawnsOutcome};
 pub use pawn_structure_outcome::{compute_pawn_structure_outcome, PawnStructureOutcome};
 pub use pieces_positional_outcome::{compute_pieces_positional_outcome, PiecesPositionalOutcome};

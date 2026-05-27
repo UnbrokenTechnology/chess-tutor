@@ -331,36 +331,136 @@ fn outcome_reports_user_played_removing_defender() {
     assert_eq!(hit.pattern, TacticPattern::RemovingDefender);
 }
 
-// ---- ported util helpers --------------------------------------------
+// ---- detect_trapped_piece -------------------------------------------
+
+// White bishop on e4; the black knight on a8 is fenced by white pawns
+// c5 (covers b6) and d6 (covers c7). White plays Bd5 keeping the knight
+// attacked while it has no safe square — black is poised to lose it.
+const SPRING_TRAP_FEN: &str = "n6k/8/3P4/2P5/4B3/8/8/6K1 w - - 0 1";
 
 #[test]
-fn is_in_bad_spot_detects_hanging_attacked_piece() {
-    // After Nc7 with a bishop on a5 raking c7, the knight is in a bad spot.
-    let mut post = pos("r3k3/8/8/bN6/8/8/8/6K1 w - - 0 1");
-    post.do_move(Move::normal(Square::B5, Square::C7));
-    assert!(is_in_bad_spot(&post, Square::C7));
+fn move_trapping_a_corner_knight_fires() {
+    let pre = pos(SPRING_TRAP_FEN);
+    let bd5 = Move::normal(Square::E4, Square::D5);
+    let hit = detect_line_tactic(&pre, &[bd5], Color::White, 0, None).expect("trapped piece");
+    assert_eq!(hit.pattern, TacticPattern::TrappedPiece);
+    assert_eq!(hit.pv_ply, 0);
+    assert_eq!(hit.primary_piece, Square::A8);
+    assert_eq!(hit.targets, vec![Square::A8]);
+    // No capture in the line yet — the trap is a threat, not realized.
+    assert_eq!(hit.confidence, Confidence::Medium);
 }
 
 #[test]
-fn is_in_bad_spot_false_for_safe_piece() {
-    let p = pos(ROYAL_FORK_FEN);
-    // The white king on g1 is unattacked.
-    assert!(!is_in_bad_spot(&p, Square::G1));
+fn move_leaving_the_knight_unattacked_does_not_fire() {
+    // Bf5 steps the bishop off the a8 diagonal: the knight is no longer
+    // attacked, so it isn't trapped.
+    let pre = pos(SPRING_TRAP_FEN);
+    let bf5 = Move::normal(Square::E4, Square::F5);
+    assert!(detect_line_tactic(&pre, &[bf5], Color::White, 0, None).is_none());
 }
 
 #[test]
-fn is_defended_recognizes_ray_defense_through_enemy_slider() {
-    // White pawn d5 is attacked by a black bishop on f7. A white bishop on
-    // g8 sits behind it on the same diagonal: removing the black bishop
-    // reveals the defender, so the pawn is defended, not hanging.
-    let p = pos("6B1/5b2/8/3P4/8/8/8/k6K w - - 0 1");
-    assert!(is_defended(&p, Square::D5, Color::White));
-    assert!(!is_hanging(&p, Square::D5, Color::White));
+fn outcome_reports_user_played_trapped_piece() {
+    let pre = pos(SPRING_TRAP_FEN);
+    let ma = ma_with_pv(vec![Move::normal(Square::E4, Square::D5)], Some(0));
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, None);
+    let hit = outcome.user_played_tactic.expect("trapped piece");
+    assert_eq!(hit.pattern, TacticPattern::TrappedPiece);
+    assert_eq!(hit.primary_piece, Square::A8);
+}
+
+// ---- detect_double_check --------------------------------------------
+
+#[test]
+fn knight_move_unmasking_rook_is_a_double_check() {
+    // Black Ke8, white Ne5 on the e-file blocking Re1. Ne5-d6+ checks with
+    // the knight and unmasks the rook: two checkers at once.
+    let pre = pos("4k3/8/8/4N3/8/8/8/4R1K1 w - - 0 1");
+    let nd6 = Move::normal(Square::E5, Square::D6);
+    let hit = detect_line_tactic(&pre, &[nd6], Color::White, 0, None).expect("double check");
+    assert_eq!(hit.pattern, TacticPattern::DoubleCheck);
+    assert_eq!(hit.primary_piece, Square::D6);
+    assert_eq!(hit.targets, vec![Square::E8]);
+}
+
+// ---- detect_discovered_check ----------------------------------------
+
+#[test]
+fn bishop_move_unmasking_rook_is_a_discovered_check() {
+    // Black Ke8, white Be5 on the e-file blocking Re1. Be5-d4 unmasks the
+    // rook's check without the bishop itself checking — a discovered check.
+    let pre = pos("4k3/8/8/4B3/8/8/8/4R1K1 w - - 0 1");
+    let bd4 = Move::normal(Square::E5, Square::D4);
+    let hit = detect_line_tactic(&pre, &[bd4], Color::White, 0, None).expect("discovered check");
+    assert_eq!(hit.pattern, TacticPattern::DiscoveredCheck);
+    assert_eq!(hit.primary_piece, Square::D4);
+    assert_eq!(hit.targets, vec![Square::E8]);
+}
+
+// ---- detect_skewer --------------------------------------------------
+
+#[test]
+fn rook_check_with_queen_behind_is_a_skewer() {
+    // Black Ke4 with the queen on e8 behind it. Ra1-e1+ forces the king to
+    // step off the e-file, winning the queen — a skewer.
+    let pre = pos("4q3/8/8/8/4k3/8/8/R5K1 w - - 0 1");
+    let re1 = Move::normal(Square::A1, Square::E1);
+    let hit = detect_line_tactic(&pre, &[re1], Color::White, 0, None).expect("skewer");
+    assert_eq!(hit.pattern, TacticPattern::Skewer);
+    assert_eq!(hit.primary_piece, Square::E1);
+    assert_eq!(hit.targets, vec![Square::E4, Square::E8]);
 }
 
 #[test]
-fn is_hanging_true_for_undefended_attacked_piece() {
-    // Lone white pawn d5 attacked by a black bishop f7, no defender behind.
-    let p = pos("8/5b2/8/3P4/8/8/8/k6K w - - 0 1");
-    assert!(is_hanging(&p, Square::D5, Color::White));
+fn no_skewer_when_back_piece_is_not_less_valuable() {
+    // Rook attacks a black bishop (e4) with a black knight (e8) behind:
+    // front and back are equal value, so it isn't a skewer.
+    let pre = pos("4n2k/8/8/8/4b3/8/8/R5K1 w - - 0 1");
+    let re1 = Move::normal(Square::A1, Square::E1);
+    let hit = detect_line_tactic(&pre, &[re1], Color::White, 0, None);
+    assert!(hit.map_or(true, |h| h.pattern != TacticPattern::Skewer));
 }
+
+// ---- detect_discovered_attack ---------------------------------------
+
+#[test]
+fn knight_move_unmasking_rook_onto_a_knight_is_a_discovered_attack() {
+    // White Ne4 blocks Re1's view up the e-file to the undefended black
+    // knight on e8. Ne4-c5 unmasks the attack. The target is a knight (it
+    // can't fire back down the file), so the revealed rook is safe and the
+    // discovery genuinely threatens material. No check, so it's a
+    // discovered attack, not a discovered check.
+    let pre = pos("k3n3/8/8/8/4N3/8/8/4R1K1 w - - 0 1");
+    let nc5 = Move::normal(Square::E4, Square::C5);
+    let hit = detect_line_tactic(&pre, &[nc5], Color::White, 0, None).expect("discovered attack");
+    assert_eq!(hit.pattern, TacticPattern::DiscoveredAttack);
+    assert_eq!(hit.primary_piece, Square::C5);
+    assert_eq!(hit.targets, vec![Square::E8]);
+}
+
+// ---- detect_pin -----------------------------------------------------
+
+#[test]
+fn pinned_knight_attacked_by_a_pawn_is_a_pin() {
+    // Black Nd6 is pinned to Kd8 by the white rook arriving on d1; a white
+    // pawn on c5 attacks it. Pinned and attacked by something cheaper, the
+    // knight can't escape — a pin that wins material.
+    let pre = pos("3k4/8/3n4/2P5/8/8/8/R5K1 w - - 0 1");
+    let rd1 = Move::normal(Square::A1, Square::D1);
+    let hit = detect_line_tactic(&pre, &[rd1], Color::White, 0, None).expect("pin");
+    assert_eq!(hit.pattern, TacticPattern::Pin);
+    assert_eq!(hit.primary_piece, Square::D1);
+    assert_eq!(hit.targets, vec![Square::D6]);
+}
+
+#[test]
+fn no_pin_when_the_piece_is_not_pinned() {
+    // Same shape but the black king is on a8, not behind the knight — the
+    // knight isn't pinned, so no pin tactic.
+    let pre = pos("k7/8/3n4/2P5/8/8/8/R5K1 w - - 0 1");
+    let rd1 = Move::normal(Square::A1, Square::D1);
+    let hit = detect_line_tactic(&pre, &[rd1], Color::White, 0, None);
+    assert!(hit.map_or(true, |h| h.pattern != TacticPattern::Pin));
+}
+
