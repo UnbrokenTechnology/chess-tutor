@@ -120,6 +120,37 @@ pub struct TacticsOutcome {
     pub user_walked_into: Option<TacticHit>,
 }
 
+/// The opponent's move that produced `pre_move_pos`, paired with the
+/// piece (if any) it captured. Lets [`detect_hanging_capture`] tell a
+/// genuine free piece from a plain recapture: if the opponent's last
+/// move just took a piece of equal-or-greater value on the same square
+/// the user now captures, the user isn't winning material, they're
+/// completing an exchange. This is lichess's `op_capture` guard
+/// (`cook.py:hanging`), which reads the move *into* the puzzle position.
+///
+/// `None` at the start of a game, or when an ad-hoc caller (analysing a
+/// bare FEN) has no move history — the guard is simply skipped.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PriorMove {
+    /// The move the opponent played to reach `pre_move_pos`.
+    pub mv: Move,
+    /// The piece that move captured, or `None` if it was quiet.
+    pub captured: Option<PieceType>,
+}
+
+impl PriorMove {
+    /// Build from the opponent's move and the position it was played in
+    /// (the position *before* `pre_move_pos`), resolving what it
+    /// captured. The natural call for a retrospective worker that holds
+    /// the prior board in its game history.
+    pub fn new(pos_before_move: &Position, mv: Move) -> PriorMove {
+        PriorMove {
+            mv,
+            captured: captured_kind(pos_before_move, mv),
+        }
+    }
+}
+
 /// Material window (plies) over which a [`Confidence::High`] hit must
 /// realize its gain. Ply 0 is the key move; ply 3 is the second move
 /// for the tactic's owner — enough to collect a fork's second target.
@@ -132,6 +163,10 @@ const MATERIAL_WINDOW_PLIES: usize = 4;
 /// - `pre_move_pos` — the position the user moved from (`root_stm` to
 ///   move).
 /// - `root_stm` — the side that moved (the user's colour).
+/// - `prior_move` — the opponent's move into `pre_move_pos`, if known
+///   (see [`PriorMove`]). Used only to suppress recapture false
+///   positives in the hanging-capture detector; pass `None` when there
+///   is no move history.
 ///
 /// `pre_move_pos` is cloned internally before any move is replayed;
 /// the caller's position is not mutated.
@@ -140,23 +175,27 @@ pub fn compute_tactic_outcome(
     user_ma: &MoveAnalysis,
     pre_move_pos: &Position,
     root_stm: Color,
+    prior_move: Option<PriorMove>,
 ) -> TacticsOutcome {
-    let user_played_tactic = detect_line_tactic(pre_move_pos, &user_ma.pv, root_stm, 0);
+    let user_played_tactic = detect_line_tactic(pre_move_pos, &user_ma.pv, root_stm, 0, prior_move);
 
     let user_missed_tactic = if user_ma.mv != best_ma.mv {
-        detect_line_tactic(pre_move_pos, &best_ma.pv, root_stm, 0)
+        detect_line_tactic(pre_move_pos, &best_ma.pv, root_stm, 0, prior_move)
     } else {
         None
     };
 
     // "Walked into": replay the user's own move, then look at the
     // opponent's reply line from the opponent's point of view. The
-    // pattern's key move sits at original PV ply 1.
+    // pattern's key move sits at original PV ply 1. The move *into* that
+    // sub-line's start position is the user's own move, so that — not
+    // `prior_move` — is the relevant recapture context here.
     let user_walked_into = match user_ma.pv.first() {
         Some(&first) => {
             let mut after = pre_move_pos.clone();
+            let sub_prior = PriorMove::new(pre_move_pos, first);
             after.do_move(first);
-            detect_line_tactic(&after, &user_ma.pv[1..], !root_stm, 1)
+            detect_line_tactic(&after, &user_ma.pv[1..], !root_stm, 1, Some(sub_prior))
         }
         None => None,
     };
@@ -178,6 +217,7 @@ fn detect_line_tactic(
     pv: &[Move],
     mover: Color,
     base_ply: usize,
+    prior: Option<PriorMove>,
 ) -> Option<TacticHit> {
     let &key_move = pv.first()?;
     let mut post = pre.clone();
@@ -191,7 +231,7 @@ fn detect_line_tactic(
     // hit; a future ship may collect a Vec.
     detect_fork(&post, key_move, mover, base_ply, material_gain)
         .or_else(|| detect_removing_defender(pre, &post, key_move, mover, base_ply, material_gain))
-        .or_else(|| detect_hanging_capture(pre, key_move, mover, base_ply, material_gain))
+        .or_else(|| detect_hanging_capture(pre, key_move, mover, base_ply, material_gain, prior))
 }
 
 /// Fork — port of `cook.py:fork`.
@@ -262,21 +302,19 @@ fn detect_fork(
 /// that backs [`super::ThreatsOutcome`]) on the pre-move position, so
 /// the definition of "hanging" is identical across the teaching layer.
 ///
-/// **Known limitation** (vs. lichess): `cook.py` also rejects the case
-/// where the captured piece is just an even-or-better recapture left by
-/// the opponent's previous move (their `op_capture` guard). That guard
-/// reads the move *into* the pre-move position, which this function's
-/// signature doesn't carry. Because a hanging piece by definition has
-/// no defender on its square, our capture is never refuted *on that
-/// square*; the realized-material window and the (separate) guaranteed-
-/// target filter catch the sacrifice-bait case. The pure even-recapture
-/// false positive remains until the prior move is threaded in.
+/// `prior` carries the opponent's move into the pre-move position. It
+/// implements lichess's `op_capture` guard: when that move just took a
+/// piece worth at least as much on the very square we now capture, this
+/// is a recapture completing an exchange — not a won free piece — so we
+/// don't flag it. When `prior` is `None` (no move history) the guard is
+/// skipped.
 fn detect_hanging_capture(
     pre: &Position,
     key_move: Move,
     mover: Color,
     base_ply: usize,
     material_gain: Option<i32>,
+    prior: Option<PriorMove>,
 ) -> Option<TacticHit> {
     if !pre.is_capture(key_move) {
         return None;
@@ -293,6 +331,19 @@ fn detect_hanging_capture(
     let hanging = list_hanging(pre, !mover);
     if !hanging.iter().any(|h| h.location.square == to) {
         return None;
+    }
+
+    // Recapture guard: if the opponent's last move took an equal-or-
+    // greater piece on this same square, the "hang" is just the far side
+    // of a trade we initiated, not free material.
+    if let Some(prior) = prior {
+        if prior.mv.to() == to {
+            if let Some(prior_captured) = prior.captured {
+                if king_value(prior_captured) >= king_value(captured.kind()) {
+                    return None;
+                }
+            }
+        }
     }
 
     Some(TacticHit {
@@ -418,6 +469,18 @@ fn capture_value(pos: &Position, mv: Move) -> Option<(Color, i32)> {
             let captured = pos.piece_on(mv.to())?;
             Some((captor, Value::mg_of_piece(captured.kind()).0))
         }
+    }
+}
+
+/// The kind of piece `mv` captures, resolved against the position it's
+/// played in. `None` for a quiet move or castling. En passant always
+/// takes a pawn.
+fn captured_kind(pos: &Position, mv: Move) -> Option<PieceType> {
+    use crate::types::MoveKind;
+    match mv.kind() {
+        MoveKind::Castling => None,
+        MoveKind::EnPassant => Some(PieceType::Pawn),
+        MoveKind::Normal | MoveKind::Promotion => pos.piece_on(mv.to()).map(|p| p.kind()),
     }
 }
 

@@ -16,7 +16,7 @@ fn pos(fen: &str) -> Position {
 fn knight_royal_fork_fires() {
     let pre = pos(ROYAL_FORK_FEN);
     let nc7 = Move::normal(Square::B5, Square::C7);
-    let hit = detect_line_tactic(&pre, &[nc7], Color::White, 0).expect("fork should fire");
+    let hit = detect_line_tactic(&pre, &[nc7], Color::White, 0, None).expect("fork should fire");
 
     assert_eq!(hit.pattern, TacticPattern::Fork);
     assert_eq!(hit.pv_ply, 0);
@@ -35,7 +35,7 @@ fn fork_with_capture_continuation_is_high_confidence() {
         Move::normal(Square::E8, Square::D8),
         Move::normal(Square::C7, Square::A8),
     ];
-    let hit = detect_line_tactic(&pre, &pv, Color::White, 0).expect("fork should fire");
+    let hit = detect_line_tactic(&pre, &pv, Color::White, 0, None).expect("fork should fire");
     assert_eq!(hit.confidence, Confidence::High);
     assert_eq!(hit.material_gain, Some(Value::ROOK_MG.0));
 }
@@ -46,7 +46,7 @@ fn pawn_fork_fires_via_pawn_attack_pattern() {
     // Neither rook attacks d5, so the pawn is safe and both rooks outvalue it.
     let pre = pos("k7/8/2r1r3/8/3P4/8/8/7K w - - 0 1");
     let d5 = Move::normal(Square::D4, Square::D5);
-    let hit = detect_line_tactic(&pre, &[d5], Color::White, 0).expect("pawn fork should fire");
+    let hit = detect_line_tactic(&pre, &[d5], Color::White, 0, None).expect("pawn fork should fire");
     assert_eq!(hit.pattern, TacticPattern::Fork);
     assert_eq!(hit.primary_piece, Square::D5);
     assert_eq!(hit.targets, vec![Square::C6, Square::E6]);
@@ -60,7 +60,7 @@ fn queen_forks_two_hanging_knights_via_hanging_branch() {
     // is on a8 — off every line from d4 — so it isn't a third target.
     let pre = pos("k7/8/8/8/1n3n2/8/8/Q6K w - - 0 1");
     let qd4 = Move::normal(Square::A1, Square::D4);
-    let hit = detect_line_tactic(&pre, &[qd4], Color::White, 0).expect("queen fork should fire");
+    let hit = detect_line_tactic(&pre, &[qd4], Color::White, 0, None).expect("queen fork should fire");
     assert_eq!(hit.pattern, TacticPattern::Fork);
     assert_eq!(hit.targets, vec![Square::B4, Square::F4]);
 }
@@ -73,7 +73,7 @@ fn king_mover_is_not_a_fork() {
     // treated as a fork — a king can't be the forking piece.
     let pre = pos("7k/8/8/2r1n3/3K4/8/8/8 w - - 0 1");
     let kd5 = Move::normal(Square::D4, Square::D5);
-    assert!(detect_line_tactic(&pre, &[kd5], Color::White, 0).is_none());
+    assert!(detect_line_tactic(&pre, &[kd5], Color::White, 0, None).is_none());
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn single_target_is_not_a_fork() {
     // not a fork.
     let pre = pos("4k3/8/8/1N6/8/8/8/6K1 w - - 0 1");
     let nc7 = Move::normal(Square::B5, Square::C7);
-    assert!(detect_line_tactic(&pre, &[nc7], Color::White, 0).is_none());
+    assert!(detect_line_tactic(&pre, &[nc7], Color::White, 0, None).is_none());
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn forker_in_bad_spot_is_not_a_fork() {
     // knight would be hanging there, so the fork is illusory.
     let pre = pos("r3k3/8/8/bN6/8/8/8/6K1 w - - 0 1");
     let nc7 = Move::normal(Square::B5, Square::C7);
-    assert!(detect_line_tactic(&pre, &[nc7], Color::White, 0).is_none());
+    assert!(detect_line_tactic(&pre, &[nc7], Color::White, 0, None).is_none());
 }
 
 // ---- compute_tactic_outcome: the three slots ------------------------
@@ -105,7 +105,7 @@ fn outcome_reports_user_played_fork() {
         Move::normal(Square::C7, Square::A8),
     ];
     let ma = ma_with_pv(pv, Some(2));
-    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White);
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, None);
 
     let hit = outcome.user_played_tactic.expect("user played a fork");
     assert_eq!(hit.pattern, TacticPattern::Fork);
@@ -122,7 +122,7 @@ fn outcome_reports_missed_fork_when_user_chose_another_move() {
     // User shuffled the king instead of forking.
     let user = ma_with_pv(vec![Move::normal(Square::G1, Square::F1)], Some(0));
 
-    let outcome = compute_tactic_outcome(&best, &user, &pre, Color::White);
+    let outcome = compute_tactic_outcome(&best, &user, &pre, Color::White, None);
     let missed = outcome.user_missed_tactic.expect("best line had a fork");
     assert_eq!(missed.pattern, TacticPattern::Fork);
     assert!(outcome.user_played_tactic.is_none());
@@ -132,7 +132,7 @@ fn outcome_reports_missed_fork_when_user_chose_another_move() {
 fn outcome_has_no_missed_tactic_when_user_played_best() {
     let pre = pos(ROYAL_FORK_FEN);
     let ma = ma_with_pv(vec![Move::normal(Square::B5, Square::C7)], Some(0));
-    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White);
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, None);
     assert!(outcome.user_missed_tactic.is_none());
 }
 
@@ -146,7 +146,7 @@ fn outcome_reports_walked_into_fork() {
         Move::normal(Square::B4, Square::C2),
     ];
     let ma = ma_with_pv(pv, Some(1));
-    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White);
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, None);
 
     let walked = outcome.user_walked_into.expect("walked into a fork");
     assert_eq!(walked.pattern, TacticPattern::Fork);
@@ -166,7 +166,7 @@ const HANGING_BISHOP_FEN: &str = "4k3/8/8/3b4/8/8/8/3RK3 w - - 0 1";
 fn capturing_an_undefended_piece_fires_hanging_capture() {
     let pre = pos(HANGING_BISHOP_FEN);
     let rxd5 = Move::normal(Square::D1, Square::D5);
-    let hit = detect_line_tactic(&pre, &[rxd5], Color::White, 0).expect("hanging capture");
+    let hit = detect_line_tactic(&pre, &[rxd5], Color::White, 0, None).expect("hanging capture");
     assert_eq!(hit.pattern, TacticPattern::HangingCapture);
     assert_eq!(hit.pv_ply, 0);
     assert_eq!(hit.primary_piece, Square::D5);
@@ -180,7 +180,7 @@ fn capturing_a_defended_piece_is_not_a_hanging_capture() {
     // A black pawn on e6 defends (and would recapture on) d5.
     let pre = pos("4k3/8/4p3/3b4/8/8/8/3RK3 w - - 0 1");
     let rxd5 = Move::normal(Square::D1, Square::D5);
-    assert!(detect_line_tactic(&pre, &[rxd5], Color::White, 0).is_none());
+    assert!(detect_line_tactic(&pre, &[rxd5], Color::White, 0, None).is_none());
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn capturing_a_pawn_is_not_a_hanging_capture() {
     // Pawns are excluded — "you won a free pawn" isn't the lesson.
     let pre = pos("4k3/8/8/3p4/8/8/8/3RK3 w - - 0 1");
     let rxd5 = Move::normal(Square::D1, Square::D5);
-    assert!(detect_line_tactic(&pre, &[rxd5], Color::White, 0).is_none());
+    assert!(detect_line_tactic(&pre, &[rxd5], Color::White, 0, None).is_none());
 }
 
 #[test]
@@ -196,16 +196,102 @@ fn quiet_move_next_to_a_hanging_piece_is_not_a_capture() {
     // Rd1-d4 attacks the hanging bishop but doesn't capture it.
     let pre = pos(HANGING_BISHOP_FEN);
     let rd4 = Move::normal(Square::D1, Square::D4);
-    assert!(detect_line_tactic(&pre, &[rd4], Color::White, 0).is_none());
+    assert!(detect_line_tactic(&pre, &[rd4], Color::White, 0, None).is_none());
 }
 
 #[test]
 fn outcome_reports_user_played_hanging_capture() {
     let pre = pos(HANGING_BISHOP_FEN);
     let ma = ma_with_pv(vec![Move::normal(Square::D1, Square::D5)], Some(0));
-    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White);
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, None);
     let hit = outcome.user_played_tactic.expect("free-piece capture");
     assert_eq!(hit.pattern, TacticPattern::HangingCapture);
+}
+
+// ---- recapture guard (lichess op_capture) ---------------------------
+
+// Black's undefended bishop sits on e5, attacked by the white queen on
+// h5 — Qxe5 looks like a free piece in isolation.
+const RECAPTURE_ON_E5_FEN: &str = "4k3/8/8/4b2Q/8/8/8/6K1 w - - 0 1";
+
+#[test]
+fn even_recapture_is_not_flagged_as_free_piece() {
+    // The bishop only sits on e5 because black just played Bxe5, taking a
+    // white knight there. Qxe5 is the far side of a B-for-N trade, not a
+    // won piece — so with the prior move known, it must NOT fire.
+    let pre = pos(RECAPTURE_ON_E5_FEN);
+    let qxe5 = Move::normal(Square::H5, Square::E5);
+    let ma = ma_with_pv(vec![qxe5], Some(0));
+    let prior = PriorMove {
+        mv: Move::normal(Square::D6, Square::E5),
+        captured: Some(PieceType::Knight),
+    };
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, Some(prior));
+    assert!(outcome.user_played_tactic.is_none());
+}
+
+#[test]
+fn recapture_guard_is_skipped_without_prior_move() {
+    // Same position, no move history: we can't tell a recapture from a
+    // hang, so the (now-acknowledged) false positive still fires. This
+    // pins down that the guard — not some other check — is what suppresses
+    // the even-recapture case.
+    let pre = pos(RECAPTURE_ON_E5_FEN);
+    let qxe5 = Move::normal(Square::H5, Square::E5);
+    let ma = ma_with_pv(vec![qxe5], Some(0));
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, None);
+    assert_eq!(
+        outcome.user_played_tactic.map(|h| h.pattern),
+        Some(TacticPattern::HangingCapture)
+    );
+}
+
+#[test]
+fn hanging_a_queen_survives_the_recapture_guard() {
+    // The opponent grabbed a pawn with their queen (Qxe5 taking a pawn),
+    // leaving the queen hanging to our rook. Winning a queen for a pawn is
+    // a genuine free piece — a lower-valued prior capture must not suppress.
+    let pre = pos("k7/8/8/4q3/8/8/8/4R1K1 w - - 0 1");
+    let rxe5 = Move::normal(Square::E1, Square::E5);
+    let ma = ma_with_pv(vec![rxe5], Some(0));
+    let prior = PriorMove {
+        mv: Move::normal(Square::F6, Square::E5),
+        captured: Some(PieceType::Pawn),
+    };
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, Some(prior));
+    assert_eq!(
+        outcome.user_played_tactic.map(|h| h.pattern),
+        Some(TacticPattern::HangingCapture)
+    );
+}
+
+#[test]
+fn recapture_guard_only_applies_on_the_same_square() {
+    // The prior capture was on a different square (b2), so even though it
+    // was a heavy piece, it doesn't excuse the hang on e5.
+    let pre = pos(RECAPTURE_ON_E5_FEN);
+    let qxe5 = Move::normal(Square::H5, Square::E5);
+    let ma = ma_with_pv(vec![qxe5], Some(0));
+    let prior = PriorMove {
+        mv: Move::normal(Square::A1, Square::B2),
+        captured: Some(PieceType::Rook),
+    };
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, Some(prior));
+    assert_eq!(
+        outcome.user_played_tactic.map(|h| h.pattern),
+        Some(TacticPattern::HangingCapture)
+    );
+}
+
+#[test]
+fn prior_move_new_resolves_the_captured_piece() {
+    // PriorMove::new reads the captured piece off the board it was played
+    // in: a white knight stood on e5 before ...Bxe5.
+    let before = pos("4k3/8/3b4/4N3/7Q/8/8/6K1 b - - 0 1");
+    let bxe5 = Move::normal(Square::D6, Square::E5);
+    let prior = PriorMove::new(&before, bxe5);
+    assert_eq!(prior.captured, Some(PieceType::Knight));
+    assert_eq!(prior.mv.to(), Square::E5);
 }
 
 // ---- detect_removing_defender ---------------------------------------
@@ -220,7 +306,7 @@ const REMOVE_DEFENDER_FEN: &str = "4k3/6p1/5n2/3bP3/8/8/8/3RK3 w - - 0 1";
 fn capturing_the_sole_defender_fires_removing_defender() {
     let pre = pos(REMOVE_DEFENDER_FEN);
     let exf6 = Move::normal(Square::E5, Square::F6);
-    let hit = detect_line_tactic(&pre, &[exf6], Color::White, 0).expect("removing the defender");
+    let hit = detect_line_tactic(&pre, &[exf6], Color::White, 0, None).expect("removing the defender");
     assert_eq!(hit.pattern, TacticPattern::RemovingDefender);
     assert_eq!(hit.pv_ply, 0);
     assert_eq!(hit.primary_piece, Square::F6);
@@ -233,14 +319,14 @@ fn not_removing_defender_when_target_has_a_second_defender() {
     // doesn't leave the bishop hanging.
     let pre = pos("4k3/6p1/2p2n2/3bP3/8/8/8/3RK3 w - - 0 1");
     let exf6 = Move::normal(Square::E5, Square::F6);
-    assert!(detect_line_tactic(&pre, &[exf6], Color::White, 0).is_none());
+    assert!(detect_line_tactic(&pre, &[exf6], Color::White, 0, None).is_none());
 }
 
 #[test]
 fn outcome_reports_user_played_removing_defender() {
     let pre = pos(REMOVE_DEFENDER_FEN);
     let ma = ma_with_pv(vec![Move::normal(Square::E5, Square::F6)], Some(0));
-    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White);
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, None);
     let hit = outcome.user_played_tactic.expect("removing the defender");
     assert_eq!(hit.pattern, TacticPattern::RemovingDefender);
 }
