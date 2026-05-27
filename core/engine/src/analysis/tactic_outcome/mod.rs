@@ -49,6 +49,7 @@
 //!   best reply to the user's move.
 
 mod detectors;
+mod mate;
 pub(crate) use detectors::detect_line_tactic;
 
 use super::MoveAnalysis;
@@ -120,6 +121,15 @@ pub enum TacticPattern {
     /// friendly ray piece directly behind, which recaptures. Port of
     /// `cook.py:x_ray`.
     XRay,
+    /// The line forces checkmate and *no* geometric pattern named the slot —
+    /// the standalone "you have a forced mate" lesson. The specific mating
+    /// geometry, when recognised, rides on [`TacticHit::mate_pattern`]. When a
+    /// geometric pattern (fork, pin, …) *does* fire on a mating line, that
+    /// pattern keeps the slot and the mate is recorded only on `mate_pattern`
+    /// — so this variant appears only for an otherwise-unnamed mate (e.g. a
+    /// clean back-rank mate-in-1). Mirrors how [`Sacrifice`](Self::Sacrifice)
+    /// is synthesized when no geometric pattern fires.
+    Checkmate,
 }
 
 impl TacticPattern {
@@ -142,7 +152,73 @@ impl TacticPattern {
             TacticPattern::Interference => "Interference",
             TacticPattern::Clearance => "Clearance",
             TacticPattern::XRay => "X-ray",
+            TacticPattern::Checkmate => "Checkmate",
         }
+    }
+}
+
+/// A named checkmating pattern, recognised at the terminal node of a forced
+/// mating line. Ports of the `cook.py` mate sub-detectors (`back_rank_mate`,
+/// `smothered_mate`, `anastasia_mate`, `hook_mate`, `arabian_mate`,
+/// `boden_or_double_bishop_mate`, `dovetail_mate`).
+///
+/// These name the *geometry* of a mate; the *fact* of a forced mate is already
+/// a search output (a mate score), so this is pure teaching enrichment. A
+/// [`TacticHit`] carries it in [`TacticHit::mate_pattern`] alongside whatever
+/// geometric `pattern` set up the mate — independent classifications, exactly
+/// as lichess assigns a mate tag *and* the tactic tags to the same puzzle.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MatePattern {
+    /// King on its back rank, hemmed in by its own pieces, mated by a piece on
+    /// that rank. `cook.py:back_rank_mate`.
+    BackRank,
+    /// Knight check with every king-flight square occupied by the king's own
+    /// pieces. `cook.py:smothered_mate`.
+    Smothered,
+    /// Knight + rook/queen on the king's edge file, the king blocked by its own
+    /// piece. `cook.py:anastasia_mate`.
+    Anastasia,
+    /// Rook beside the king, guarded by a knight that is itself guarded by a
+    /// pawn. `cook.py:hook_mate`.
+    Hook,
+    /// King in the corner, rook beside it guarded by a knight a (2,2) leap away.
+    /// `cook.py:arabian_mate`.
+    Arabian,
+    /// Two bishops on criss-crossing diagonals, the king's neighbourhood
+    /// covered only by bishops. `cook.py:boden_or_double_bishop_mate` (the
+    /// criss-cross arm).
+    Boden,
+    /// Two bishops on parallel diagonals, the king's neighbourhood covered only
+    /// by bishops. `cook.py:boden_or_double_bishop_mate` (the parallel arm).
+    DoubleBishop,
+    /// Queen beside a centre king on a diagonal, the king boxed by its own
+    /// pieces, the queen covering the remaining flights. `cook.py:dovetail_mate`.
+    Dovetail,
+}
+
+impl MatePattern {
+    /// Short card heading for the retrospective view.
+    pub fn heading(self) -> &'static str {
+        match self {
+            MatePattern::BackRank => "Back-rank mate",
+            MatePattern::Smothered => "Smothered mate",
+            MatePattern::Anastasia => "Anastasia's mate",
+            MatePattern::Hook => "Hook mate",
+            MatePattern::Arabian => "Arabian mate",
+            MatePattern::Boden => "Boden's mate",
+            MatePattern::DoubleBishop => "Double bishop mate",
+            MatePattern::Dovetail => "Dovetail mate",
+        }
+    }
+
+    /// Whether this mate is surfaced to a 1200-level student by default. Per
+    /// the W4-impl 5 directive only the two everyday patterns — back-rank and
+    /// smothered — pop a card automatically; the rest stay engine-available as
+    /// a named-pattern library for later / stronger users (the UI layer reads
+    /// this once it's wired). A `false` here is *not* a reason to skip
+    /// detection; every pattern is always detected and recorded.
+    pub fn surfaced_by_default(self) -> bool {
+        matches!(self, MatePattern::BackRank | MatePattern::Smothered)
     }
 }
 
@@ -192,6 +268,14 @@ pub struct TacticHit {
     /// while the `pattern` keeps naming the richer lesson. Always `true`
     /// when `pattern == TacticPattern::Sacrifice` (the standalone case).
     pub sacrifice: bool,
+    /// The named mating geometry, when the line forces checkmate and one is
+    /// recognised (a terminal-node port of the `cook.py` mate sub-detectors).
+    /// Independent of `pattern`: a fork that ends in a back-rank mate has
+    /// `pattern == Fork` and `mate_pattern == Some(BackRank)` — the same way
+    /// lichess tags a puzzle both `fork` and `backRankMate`. `Some` whenever
+    /// `pattern == TacticPattern::Checkmate` (the standalone unnamed-by-
+    /// geometry case); otherwise `None` for a non-mating line.
+    pub mate_pattern: Option<MatePattern>,
 }
 
 /// The tactic story for one analysed move. Each slot is independent;
@@ -375,6 +459,7 @@ fn synthesize_sacrifice_hit(pre: &Position, pv: &[Move], mover: Color) -> Tactic
         material_gain,
         confidence: confidence_for(material_gain),
         sacrifice: true,
+        mate_pattern: None,
     }
 }
 

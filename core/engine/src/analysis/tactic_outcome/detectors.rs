@@ -52,6 +52,12 @@ pub(crate) fn detect_line_tactic(
 
     let material_gain = line_material_gain(pre, pv, mover);
 
+    // Terminal-node scan: does the whole line force a checkmate the mover
+    // delivers, and if so what is its named geometry? Recorded on the hit's
+    // `mate_pattern` (independent of the geometric `pattern`), or — when no
+    // geometric pattern fires — synthesized as a standalone `Checkmate` hit.
+    let mate = super::mate::detect_mate_pattern(pre, pv, mover);
+
     // Multi-ply patterns (wave 4) read several plies of the line, so build
     // the board sequence once and share it: `boards[0] == pre`, `boards[i]`
     // = after `pv[0..i]`. Capped to the early window so a named tactic stays
@@ -85,15 +91,19 @@ pub(crate) fn detect_line_tactic(
         .or_else(|| detect_interference(&boards, pv, mover, base_ply, material_gain))
         .or_else(|| detect_clearance(&boards, pv, mover, base_ply, material_gain))
         .or_else(|| detect_x_ray(&boards, pv, mover, base_ply, material_gain))
-        // A geometric pattern can co-occur with a sacrifice; record it on
-        // the flag while the pattern keeps naming the richer lesson. The
-        // *standalone* sacrifice case (no geometric pattern) is synthesized
-        // in `compute_tactic_outcome`, which has the eval needed to confirm
-        // the sacrifice is sound.
+        // A geometric pattern can co-occur with a sacrifice and/or end in a
+        // named checkmate; record both on the hit's flags while the pattern
+        // keeps naming the richer lesson. (The *standalone* sacrifice case —
+        // no geometric pattern — is synthesized in `compute_tactic_outcome`,
+        // which has the eval needed to confirm soundness.)
         .map(|mut hit| {
             hit.sacrifice = super::is_sacrifice(pre, pv, mover);
+            hit.mate_pattern = mate.map(|m| m.pattern);
             hit
         })
+        // A forced mate with no geometric pattern: surface it as a standalone
+        // `Checkmate` hit carrying the named geometry.
+        .or_else(|| mate.map(|m| super::mate::synthesize_checkmate_hit(pre, pv, mover, base_ply, m)))
 }
 
 // =========================================================================
@@ -158,6 +168,7 @@ fn detect_fork(
         material_gain,
         confidence: confidence_for(material_gain),
         sacrifice: false,
+        mate_pattern: None,
     })
 }
 
@@ -222,6 +233,7 @@ fn detect_hanging_capture(
         material_gain,
         confidence: confidence_for(material_gain),
         sacrifice: false,
+        mate_pattern: None,
     })
 }
 
@@ -288,6 +300,7 @@ fn detect_removing_defender(
         material_gain,
         confidence: confidence_for(material_gain),
         sacrifice: false,
+        mate_pattern: None,
     })
 }
 
@@ -326,6 +339,7 @@ fn detect_trapped_piece(
         material_gain,
         confidence: confidence_for(material_gain),
         sacrifice: false,
+        mate_pattern: None,
     })
 }
 
@@ -358,6 +372,7 @@ fn detect_double_check(
         material_gain,
         confidence: confidence_for(material_gain),
         sacrifice: false,
+        mate_pattern: None,
     })
 }
 
@@ -388,6 +403,7 @@ fn detect_discovered_check(
         material_gain,
         confidence: confidence_for(material_gain),
         sacrifice: false,
+        mate_pattern: None,
     })
 }
 
@@ -446,6 +462,7 @@ fn detect_skewer(
                     material_gain,
                     confidence: confidence_for(material_gain),
                     sacrifice: false,
+                    mate_pattern: None,
                 });
             }
         }
@@ -512,6 +529,7 @@ fn detect_discovered_attack(
                     material_gain,
                     confidence: confidence_for(material_gain),
                     sacrifice: false,
+                    mate_pattern: None,
                 });
             }
         }
@@ -596,6 +614,7 @@ fn pin_hit(
         material_gain,
         confidence: confidence_for(material_gain),
         sacrifice: false,
+        mate_pattern: None,
     }
 }
 
@@ -650,6 +669,7 @@ fn wave4_hit(
         material_gain,
         confidence: confidence_for(material_gain),
         sacrifice: false,
+        mate_pattern: None,
     }
 }
 
