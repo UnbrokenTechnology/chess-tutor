@@ -112,6 +112,7 @@ pub mod pawn_structure_outcome;
 pub mod pieces_positional_outcome;
 pub mod space_outcome;
 pub mod surprise;
+pub mod tactic_outcome;
 pub mod term_delta;
 pub mod term_id;
 pub mod threats_outcome;
@@ -156,6 +157,9 @@ pub use pawn_structure_outcome::{compute_pawn_structure_outcome, PawnStructureOu
 pub use pieces_positional_outcome::{compute_pieces_positional_outcome, PiecesPositionalOutcome};
 pub use space_outcome::{compute_space_outcome, SpaceOutcome};
 pub use surprise::{detect_surprise, SurpriseKind};
+pub use tactic_outcome::{
+    compute_tactic_outcome, Confidence, TacticHit, TacticPattern, TacticsOutcome,
+};
 pub use term_delta::{compute_term_deltas, cumulative_prefix, TermDelta};
 pub use term_id::TermId;
 pub use threats_outcome::{
