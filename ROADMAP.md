@@ -8,7 +8,7 @@
 |---|---|
 | **W1 — SF11 parity audit** | ✅ **Complete.** Done-criteria met (d=14 1.48× SF, d=20 2.04× SF). Full log in [`parity-audit-log.md`](parity-audit-log.md). |
 | **W2 — Non-functional refactor** | ✅ **Complete** (18 commits). Every source `.rs` file ≤500 LOC except `pawns.rs` (687, documented one-eval-term exception) and data tables. Bench node-neutral (d=14 = 9,739,495); 893 tests pass; no new clippy warnings. Log in [`w2-refactor-log.md`](w2-refactor-log.md). |
-| **W3 — Tactic library port** | 🟡 **In progress.** Ship 1 *engine* surface landed (Fork + HangingCapture + RemovingDefender in `core/engine/src/analysis/tactic_outcome.rs`, 751 tests). NEXT: Ship 1 *UI* wiring (`RetrospectiveCategory::Tactic` card), then Ships 2–4. |
+| **W3 — Tactic library port** | 🟡 **In progress.** Ship 1 *engine* surface + recapture-guard fix landed (Fork + HangingCapture + RemovingDefender + `PriorMove` in `core/engine/src/analysis/tactic_outcome.rs`, 756 tests). Per user direction, **UI is deferred until after W4**; remaining engine waves (Ship 2 patterns, trapped-piece) fold into the W4 audit. |
 | **W4 — Broader lichess audit** | ⬜ Not started. |
 
 ## Origin — why this roadmap exists
@@ -202,9 +202,12 @@ The CLAUDE.md "Separation of concerns" bullet that previously mandated inline `#
 > `compute_tactic_outcome` returning a `TacticsOutcome` (played /
 > missed / walked-into slots) with all three Ship-1 detectors (Fork,
 > RemovingDefender, HangingCapture) in a priority chain — direct ports
-> of `cook.py`, no new search. The **UI** surface was deliberately
-> deferred (engine-first): wire `RetrospectiveCategory::Tactic` next.
-> Then Ships 2–4 below.
+> of `cook.py`, no new search. The recapture false positive is fixed
+> (`PriorMove` / `op_capture` guard). Per user direction (2026-05-26),
+> **the UI surface is deferred until after W4** — the remaining engine
+> waves (Ship 2 patterns, trapped-piece) are best done as part of the
+> W4 audit, since every tactic-related pattern must end up engine-
+> available. See the W4 "User directives" below.
 
 ### Scope
 
@@ -232,6 +235,15 @@ Long-term goal: parity with lichess's full 30-tag taxonomy. Why: validated again
 ---
 
 ## Workflow 4: Broader lichess feature audit
+
+### User directives for this workflow (2026-05-26)
+
+Set when W3 Ship 1's engine surface landed — read these first:
+
+1. **Audit the remaining ~27 lichess `cook.py` tags** (and `util.py` predicates) for **teaching value vs. mere score-computation plumbing**. The split is the point: some tags are pedagogically meaningful patterns, others only exist to bucket puzzles or compute difficulty.
+2. **Every tactic-related pattern must end up *available in the engine*** — decoy, deflection, zugzwang, interference, x-ray, intermezzo, clearance, attraction, discovered/double check, the mate patterns, etc. Engine availability is the deliverable; UI surfacing is a *later* layer.
+3. **UI work happens AFTER this audit is finished** — not before. (Ship 1's `RetrospectiveCategory::Tactic` card stays deferred until then.)
+4. **Trapped-piece is the standout priority** — see [memory `project_trapped_piece_visual_goal`]. Beyond porting `is_trapped`, investigate what *intermediate data* lichess computes for it and whether that can be **surfaced visually** (overlays, like space / king-safety). The user can't visually spot when a piece (esp. a deep enemy queen) is trappable; closing that gap is a flagship teaching feature.
 
 ### Scope
 
