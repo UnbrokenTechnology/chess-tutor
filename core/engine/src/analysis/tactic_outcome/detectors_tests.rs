@@ -179,3 +179,55 @@ fn intermezzo_true_and_guard_cases() {
     // Without the prior capture there's no in-between to recognize.
     assert!(detect_intermezzo(&boards, &pv, mover, 0, None, None).is_none());
 }
+
+// ---- attacking f2/f7 (wave 6) ---------------------------------------
+
+#[test]
+fn attacking_f2_f7_cases() {
+    use crate::types::Color;
+    // Bxf7+ with Black's king still home on e8 — the motif.
+    let pre = Position::from_fen("4k3/5p2/8/8/2B5/8/8/4K3 w - - 0 1").unwrap();
+    let key = Move::normal(Square::C4, Square::F7);
+    let mut post = pre.clone();
+    post.do_move(key);
+    assert!(detect_attacking_f2_f7(&pre, &post, key, Color::White, 0, None).is_some());
+
+    // Same capture, but the king isn't on e8 → not the motif.
+    let pre2 = Position::from_fen("3k4/5p2/8/8/2B5/8/8/4K3 w - - 0 1").unwrap();
+    let mut post2 = pre2.clone();
+    post2.do_move(key);
+    assert!(detect_attacking_f2_f7(&pre2, &post2, key, Color::White, 0, None).is_none());
+}
+
+// ---- under-promotion (wave 6) ---------------------------------------
+
+#[test]
+fn under_promotion_cases() {
+    // Knight promotion, not mate → under-promotion.
+    let pre = Position::from_fen("4k3/1P6/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+    let knight = vec![Move::promotion(Square::B7, Square::B8, PieceType::Knight)];
+    let boards = line_boards(&pre, &knight, WAVE4_MAX_PLIES);
+    assert!(detect_under_promotion(&boards, &knight, 0, None).is_some());
+
+    // Queen promotion, not mate → not an under-promotion.
+    let queen = vec![Move::promotion(Square::B7, Square::B8, PieceType::Queen)];
+    let boards_q = line_boards(&pre, &queen, WAVE4_MAX_PLIES);
+    assert!(detect_under_promotion(&boards_q, &queen, 0, None).is_none());
+}
+
+#[test]
+fn under_promotion_mate_cases_lichess() {
+    // Knight-promotion checkmate (the necessary `=N#`) → under-promotion.
+    let (boards, pv, _) = setup(
+        "3R3r/p1P1kp1b/4pnpp/7P/6P1/2p5/P4P2/3R2K1 b - - 0 31",
+        "c3c2 c7c8n",
+    );
+    assert!(detect_under_promotion(&boards, &pv, 0, None).is_some());
+
+    // Rook-promotion checkmate (an *unnecessary* under-promotion) → not flagged.
+    let (boards2, pv2, _) = setup(
+        "8/1Pp3p1/8/2p5/2P5/5kbp/3p4/7K w - - 0 52",
+        "b7b8q d2d1r",
+    );
+    assert!(detect_under_promotion(&boards2, &pv2, 0, None).is_none());
+}

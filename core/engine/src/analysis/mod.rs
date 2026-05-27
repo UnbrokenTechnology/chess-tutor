@@ -107,6 +107,7 @@ pub mod mobility_outcome;
 pub mod move_analysis;
 pub mod move_assessment;
 pub mod overlays;
+pub mod overloading;
 pub mod passed_pawns_outcome;
 pub mod pawn_structure_outcome;
 pub mod pieces_positional_outcome;
@@ -154,6 +155,7 @@ pub use move_assessment::{
     TermFamily,
 };
 pub use overlays::{compute_overlays, trapped_cages, OverlayData};
+pub use overloading::{find_overloaded, OverloadedPiece};
 pub use passed_pawns_outcome::{compute_passed_pawns_outcome, PassedPawnsOutcome};
 pub use pawn_structure_outcome::{compute_pawn_structure_outcome, PawnStructureOutcome};
 pub use pieces_positional_outcome::{compute_pieces_positional_outcome, PiecesPositionalOutcome};

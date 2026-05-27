@@ -121,6 +121,14 @@ pub enum TacticPattern {
     /// friendly ray piece directly behind, which recaptures. Port of
     /// `cook.py:x_ray`.
     XRay,
+    /// A capture on f2/f7 — the square beside an uncastled enemy king's home —
+    /// with that king still on e1/e8. The classic beginner hit on the weakest
+    /// square in front of the king. Port of `cook.py:attacking_f2_f7`.
+    AttackingF2F7,
+    /// The line promotes a pawn to something other than a queen (or to a
+    /// knight to deliver mate) — a deliberate under-promotion. Port of
+    /// `cook.py:under_promotion`.
+    UnderPromotion,
     /// The line forces checkmate and *no* geometric pattern named the slot —
     /// the standalone "you have a forced mate" lesson. The specific mating
     /// geometry, when recognised, rides on [`TacticHit::mate_pattern`]. When a
@@ -152,6 +160,8 @@ impl TacticPattern {
             TacticPattern::Interference => "Interference",
             TacticPattern::Clearance => "Clearance",
             TacticPattern::XRay => "X-ray",
+            TacticPattern::AttackingF2F7 => "Attack on f2/f7",
+            TacticPattern::UnderPromotion => "Under-promotion",
             TacticPattern::Checkmate => "Checkmate",
         }
     }
@@ -466,6 +476,18 @@ fn synthesize_sacrifice_hit(pre: &Position, pv: &[Move], mover: Color) -> Tactic
 // =========================================================================
 // Shared helpers (used by the detectors)
 // =========================================================================
+
+/// Whether the side to move in `pos` is checkmated (in check with no legal
+/// reply). Shared by the terminal-node mate detectors ([`mate`]) and the
+/// under-promotion detector.
+pub(super) fn is_checkmate(pos: &Position) -> bool {
+    use crate::movegen::legal_moves_vec;
+    if !pos.checkers().any() {
+        return false;
+    }
+    let mut scratch = pos.clone();
+    legal_moves_vec(&mut scratch).is_empty()
+}
 
 /// `High` when the line realizes strictly-positive material for the
 /// owner inside the window, else `Medium`.

@@ -25,7 +25,6 @@
 
 use super::{Confidence, MatePattern, TacticHit, TacticPattern};
 use crate::bitboard::{king_distance, Bitboard};
-use crate::movegen::legal_moves_vec;
 use crate::position::Position;
 use crate::types::{Color, File, Move, PieceType, Rank, Square};
 
@@ -67,7 +66,7 @@ pub(super) fn detect_mate_pattern(pre: &Position, pv: &[Move], mover: Color) -> 
     for &mv in pv {
         board.do_move(mv);
     }
-    if !is_checkmate(&board) {
+    if !super::is_checkmate(&board) {
         return None;
     }
     let mating = pv[n - 1];
@@ -369,15 +368,6 @@ fn is_dovetail_mate(board: &Position, mover: Color, king: Square, mating: Move) 
 /// The mating side's pieces attacking `sq`.
 fn pov_attackers(board: &Position, sq: Square, pov: Color) -> Bitboard {
     board.attackers_to(sq, board.occupied()) & board.pieces_by_color(pov)
-}
-
-/// Whether the side to move in `pos` is checkmated.
-fn is_checkmate(pos: &Position) -> bool {
-    if !pos.checkers().any() {
-        return false;
-    }
-    let mut scratch = pos.clone();
-    legal_moves_vec(&mut scratch).is_empty()
 }
 
 /// The on-board squares a king-step away (Chebyshev distance 1).

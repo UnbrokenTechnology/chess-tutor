@@ -91,6 +91,10 @@ pub(crate) fn detect_line_tactic(
         .or_else(|| detect_interference(&boards, pv, mover, base_ply, material_gain))
         .or_else(|| detect_clearance(&boards, pv, mover, base_ply, material_gain))
         .or_else(|| detect_x_ray(&boards, pv, mover, base_ply, material_gain))
+        // Low-priority motifs (wave 6): only claim the slot when nothing
+        // richer fired.
+        .or_else(|| detect_attacking_f2_f7(pre, &post, key_move, mover, base_ply, material_gain))
+        .or_else(|| detect_under_promotion(&boards, pv, base_ply, material_gain))
         // A geometric pattern can co-occur with a sacrifice and/or end in a
         // named checkmate; record both on the hit's flags while the pattern
         // keeps naming the richer lesson. (The *standalone* sacrifice case —
@@ -1049,4 +1053,88 @@ fn detect_x_ray(
         }
     }
     None
+}
+
+// =========================================================================
+// Wave 6 motifs (low priority — claim the slot only when nothing else fires)
+// =========================================================================
+
+/// Attacking f2/f7 — port of `cook.py:attacking_f2_f7`.
+///
+/// The key move captures on f2 or f7 — the square beside an uncastled enemy
+/// king's home — with that king still on e1/e8. The classic beginner hit on
+/// the weakest square in front of the king.
+fn detect_attacking_f2_f7(
+    pre: &Position,
+    post: &Position,
+    key_move: Move,
+    mover: Color,
+    base_ply: usize,
+    material_gain: Option<i32>,
+) -> Option<TacticHit> {
+    if !pre.is_capture(key_move) {
+        return None;
+    }
+    // f7 sits next to e8 (Black's king home); f2 next to e1 (White's).
+    let king_sq = match key_move.to() {
+        Square::F7 => Square::E8,
+        Square::F2 => Square::E1,
+        _ => return None,
+    };
+    let king = post.piece_on(king_sq)?;
+    if king.kind() != PieceType::King || king.color() != !mover {
+        return None;
+    }
+    Some(TacticHit {
+        pattern: TacticPattern::AttackingF2F7,
+        pv_ply: base_ply,
+        primary_piece: key_move.to(),
+        targets: vec![key_move.to()],
+        material_gain,
+        confidence: confidence_for(material_gain),
+        sacrifice: false,
+        mate_pattern: None,
+    })
+}
+
+/// Under-promotion — port of `cook.py:under_promotion`.
+///
+/// Walk the mover's moves in the early window. The first that delivers
+/// checkmate makes this an under-promotion only if it was a knight promotion
+/// (the classic `=N#` a queen couldn't give); a non-knight move that mates is
+/// *not* one (and ends the scan). Otherwise, the first promotion to anything
+/// but a queen is an under-promotion.
+fn detect_under_promotion(
+    boards: &[Position],
+    pv: &[Move],
+    base_ply: usize,
+    material_gain: Option<i32>,
+) -> Option<TacticHit> {
+    // The mover's moves are at even offsets within this line.
+    let mut i = 0;
+    while i < pv.len() && i + 1 < boards.len() {
+        let mv = pv[i];
+        if super::is_checkmate(&boards[i + 1]) {
+            return (mv.kind() == MoveKind::Promotion && mv.promoted_to() == PieceType::Knight)
+                .then(|| under_promo_hit(mv, base_ply + i, material_gain));
+        }
+        if mv.kind() == MoveKind::Promotion && mv.promoted_to() != PieceType::Queen {
+            return Some(under_promo_hit(mv, base_ply + i, material_gain));
+        }
+        i += 2;
+    }
+    None
+}
+
+fn under_promo_hit(mv: Move, pv_ply: usize, material_gain: Option<i32>) -> TacticHit {
+    TacticHit {
+        pattern: TacticPattern::UnderPromotion,
+        pv_ply,
+        primary_piece: mv.to(),
+        targets: vec![mv.to()],
+        material_gain,
+        confidence: confidence_for(material_gain),
+        sacrifice: false,
+        mate_pattern: None,
+    }
 }
