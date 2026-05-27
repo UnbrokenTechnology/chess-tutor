@@ -157,6 +157,57 @@ fn outcome_reports_walked_into_fork() {
     assert!(outcome.user_played_tactic.is_none());
 }
 
+// ---- detect_hanging_capture -----------------------------------------
+
+// White rook on d1 captures an undefended black bishop on d5.
+const HANGING_BISHOP_FEN: &str = "4k3/8/8/3b4/8/8/8/3RK3 w - - 0 1";
+
+#[test]
+fn capturing_an_undefended_piece_fires_hanging_capture() {
+    let pre = pos(HANGING_BISHOP_FEN);
+    let rxd5 = Move::normal(Square::D1, Square::D5);
+    let hit = detect_line_tactic(&pre, &[rxd5], Color::White, 0).expect("hanging capture");
+    assert_eq!(hit.pattern, TacticPattern::HangingCapture);
+    assert_eq!(hit.pv_ply, 0);
+    assert_eq!(hit.primary_piece, Square::D5);
+    assert_eq!(hit.targets, vec![Square::D5]);
+    assert_eq!(hit.confidence, Confidence::High);
+    assert_eq!(hit.material_gain, Some(Value::BISHOP_MG.0));
+}
+
+#[test]
+fn capturing_a_defended_piece_is_not_a_hanging_capture() {
+    // A black pawn on e6 defends (and would recapture on) d5.
+    let pre = pos("4k3/8/4p3/3b4/8/8/8/3RK3 w - - 0 1");
+    let rxd5 = Move::normal(Square::D1, Square::D5);
+    assert!(detect_line_tactic(&pre, &[rxd5], Color::White, 0).is_none());
+}
+
+#[test]
+fn capturing_a_pawn_is_not_a_hanging_capture() {
+    // Pawns are excluded — "you won a free pawn" isn't the lesson.
+    let pre = pos("4k3/8/8/3p4/8/8/8/3RK3 w - - 0 1");
+    let rxd5 = Move::normal(Square::D1, Square::D5);
+    assert!(detect_line_tactic(&pre, &[rxd5], Color::White, 0).is_none());
+}
+
+#[test]
+fn quiet_move_next_to_a_hanging_piece_is_not_a_capture() {
+    // Rd1-d4 attacks the hanging bishop but doesn't capture it.
+    let pre = pos(HANGING_BISHOP_FEN);
+    let rd4 = Move::normal(Square::D1, Square::D4);
+    assert!(detect_line_tactic(&pre, &[rd4], Color::White, 0).is_none());
+}
+
+#[test]
+fn outcome_reports_user_played_hanging_capture() {
+    let pre = pos(HANGING_BISHOP_FEN);
+    let ma = ma_with_pv(vec![Move::normal(Square::D1, Square::D5)], Some(0));
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White);
+    let hit = outcome.user_played_tactic.expect("free-piece capture");
+    assert_eq!(hit.pattern, TacticPattern::HangingCapture);
+}
+
 // ---- ported util helpers --------------------------------------------
 
 #[test]

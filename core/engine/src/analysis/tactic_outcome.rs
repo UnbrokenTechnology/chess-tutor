@@ -34,7 +34,7 @@
 //! - `user_walked_into` — a pattern fires for the *opponent* on their
 //!   best reply to the user's move.
 
-use super::MoveAnalysis;
+use super::{list_hanging, MoveAnalysis};
 use crate::attacks::{attacks_bb, pawn_attacks_from};
 use crate::bitboard::{square_bb, Bitboard};
 use crate::position::Position;
@@ -190,6 +190,7 @@ fn detect_line_tactic(
     // a piece that was simply left hanging. Ship 1 returns a single
     // hit; a future ship may collect a Vec.
     detect_fork(&post, key_move, mover, base_ply, material_gain)
+        .or_else(|| detect_hanging_capture(pre, key_move, mover, base_ply, material_gain))
 }
 
 /// Fork — port of `cook.py:fork`.
@@ -247,6 +248,57 @@ fn detect_fork(
         pv_ply: base_ply,
         primary_piece: forker_sq,
         targets,
+        material_gain,
+        confidence: confidence_for(material_gain),
+    })
+}
+
+/// Hanging-piece capture — port of `cook.py:hanging`.
+///
+/// The key move captures a non-pawn enemy piece that was attacked and
+/// undefended in the pre-move position — a free piece. We reuse
+/// [`list_hanging`] (the same "attacked AND no friendly defender" scan
+/// that backs [`super::ThreatsOutcome`]) on the pre-move position, so
+/// the definition of "hanging" is identical across the teaching layer.
+///
+/// **Known limitation** (vs. lichess): `cook.py` also rejects the case
+/// where the captured piece is just an even-or-better recapture left by
+/// the opponent's previous move (their `op_capture` guard). That guard
+/// reads the move *into* the pre-move position, which this function's
+/// signature doesn't carry. Because a hanging piece by definition has
+/// no defender on its square, our capture is never refuted *on that
+/// square*; the realized-material window and the (separate) guaranteed-
+/// target filter catch the sacrifice-bait case. The pure even-recapture
+/// false positive remains until the prior move is threaded in.
+fn detect_hanging_capture(
+    pre: &Position,
+    key_move: Move,
+    mover: Color,
+    base_ply: usize,
+    material_gain: Option<i32>,
+) -> Option<TacticHit> {
+    if !pre.is_capture(key_move) {
+        return None;
+    }
+    let to = key_move.to();
+    // En passant captures a pawn (and leaves `to` empty pre-move); the
+    // pawn exclusion below covers it either way.
+    let captured = pre.piece_on(to)?;
+    if captured.kind() == PieceType::Pawn {
+        return None;
+    }
+    // The captured piece must have been attacked-and-undefended before
+    // the capture — i.e. on the enemy's hanging list.
+    let hanging = list_hanging(pre, !mover);
+    if !hanging.iter().any(|h| h.location.square == to) {
+        return None;
+    }
+
+    Some(TacticHit {
+        pattern: TacticPattern::HangingCapture,
+        pv_ply: base_ply,
+        primary_piece: to,
+        targets: vec![to],
         material_gain,
         confidence: confidence_for(material_gain),
     })
