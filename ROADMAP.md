@@ -8,7 +8,7 @@
 |---|---|
 | **W1 — SF11 parity audit** | ✅ **Complete.** Done-criteria met (d=14 1.48× SF, d=20 2.04× SF). Full log in [`parity-audit-log.md`](parity-audit-log.md). |
 | **W2 — Non-functional refactor** | ✅ **Complete** (18 commits). Every source `.rs` file ≤500 LOC except `pawns.rs` (687, documented one-eval-term exception) and data tables. Bench node-neutral (d=14 = 9,739,495); 893 tests pass; no new clippy warnings. Log in [`w2-refactor-log.md`](w2-refactor-log.md). |
-| **W3 — Tactic library port** | ⬜ **Not started — NEXT.** |
+| **W3 — Tactic library port** | 🟡 **In progress.** Ship 1 *engine* surface landed (Fork + HangingCapture + RemovingDefender in `core/engine/src/analysis/tactic_outcome.rs`, 751 tests). NEXT: Ship 1 *UI* wiring (`RetrospectiveCategory::Tactic` card), then Ships 2–4. |
 | **W4 — Broader lichess audit** | ⬜ Not started. |
 
 ## Origin — why this roadmap exists
@@ -196,6 +196,15 @@ The CLAUDE.md "Separation of concerns" bullet that previously mandated inline `#
 ---
 
 ## Workflow 3: Tactic library port (lichess-puzzler)
+
+> 🟡 **In progress (2026-05-26).** Ship 1's **engine** surface is
+> complete: `core/engine/src/analysis/tactic_outcome.rs` exposes
+> `compute_tactic_outcome` returning a `TacticsOutcome` (played /
+> missed / walked-into slots) with all three Ship-1 detectors (Fork,
+> RemovingDefender, HangingCapture) in a priority chain — direct ports
+> of `cook.py`, no new search. The **UI** surface was deliberately
+> deferred (engine-first): wire `RetrospectiveCategory::Tactic` next.
+> Then Ships 2–4 below.
 
 ### Scope
 
