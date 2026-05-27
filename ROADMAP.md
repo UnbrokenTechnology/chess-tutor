@@ -9,7 +9,7 @@
 | **W1 — SF11 parity audit** | ✅ **Complete.** Done-criteria met (d=14 1.48× SF, d=20 2.04× SF). Full log in [`parity-audit-log.md`](parity-audit-log.md). |
 | **W2 — Non-functional refactor** | ✅ **Complete** (18 commits). Every source `.rs` file ≤500 LOC except `pawns.rs` (687, documented one-eval-term exception) and data tables. Bench node-neutral (d=14 = 9,739,495); 893 tests pass; no new clippy warnings. Log in [`w2-refactor-log.md`](w2-refactor-log.md). |
 | **W3 — Tactic library port** | 🟡 **In progress.** Ship 1 *engine* surface + recapture-guard fix landed (Fork + HangingCapture + RemovingDefender + `PriorMove` in `core/engine/src/analysis/tactic_outcome.rs`, 756 tests). Per user direction, **UI is deferred until after W4**; remaining engine waves (Ship 2 patterns, trapped-piece) fold into the W4 audit. |
-| **W4 — Broader lichess audit** | ⬜ Not started. |
+| **W4 — Broader lichess audit** | 🟡 **Research pass ✅ complete** — full port/reference/skip verdict on all 30 `cook.py` tags, the named-mate sub-detectors, every `util.py` primitive, zugzwang, the generator, the validator, and sibling lichess repos, with the teaching-value-vs-plumbing split and the flagship trapped-piece plan. See [`w4-audit.md`](w4-audit.md). Implementation (the 6-wave engine-availability sequence) is the follow-on. |
 
 ## Origin — why this roadmap exists
 
@@ -235,6 +235,15 @@ Long-term goal: parity with lichess's full 30-tag taxonomy. Why: validated again
 ---
 
 ## Workflow 4: Broader lichess feature audit
+
+> 🟡 **Research pass COMPLETE (2026-05-26).** Verdicts in
+> **[`w4-audit.md`](w4-audit.md)**: every `cook.py` tag, `util.py` primitive,
+> the zugzwang prober, the generator/validator, and sibling lichess repos
+> classified port / reference / skip, split by teaching value vs. puzzle-
+> bucketing plumbing. Flagship **trapped-piece** plan (engine port + visual
+> overlay; the per-escape-square bad/safe classification is the surfaceable
+> intermediate data) and a 6-wave engine-availability implementation sequence
+> are in that doc. What remains is the implementation, then the parked UI layer.
 
 ### User directives for this workflow (2026-05-26)
 
