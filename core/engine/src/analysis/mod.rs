@@ -117,6 +117,7 @@ pub mod tactic_util;
 pub mod term_delta;
 pub mod term_id;
 pub mod threats_outcome;
+pub mod win_chances;
 pub mod verdict;
 
 #[cfg(test)]
@@ -168,3 +169,4 @@ pub use threats_outcome::{
     HangingPiece, PieceLocation, PressureKind, PressuredPiece, ThreatsOutcome,
 };
 pub use verdict::{classify_move, MoveVerdict};
+pub use win_chances::win_chances;

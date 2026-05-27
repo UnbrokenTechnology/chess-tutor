@@ -52,6 +52,7 @@ mod detectors;
 pub(crate) use detectors::detect_line_tactic;
 
 use super::MoveAnalysis;
+use crate::analysis::win_chances::win_chances;
 use crate::position::Position;
 use crate::types::{Color, Move, PieceType, Value};
 
@@ -88,6 +89,37 @@ pub enum TacticPattern {
     /// The move gives check from two pieces at once — the king must
     /// move. Port of `cook.py:double_check`.
     DoubleCheck,
+    /// The line deliberately gives up material (down ≥ 2 points by the
+    /// mover's second move) and is sound anyway. Port of
+    /// `cook.py:sacrifice`. Used only as a *standalone* hit — when a line
+    /// is a winning sacrifice but no geometric pattern fires. When a
+    /// geometric pattern *does* fire, the sacrifice is recorded on its
+    /// [`TacticHit::sacrifice`] flag instead, so the richer lesson leads.
+    Sacrifice,
+    /// An in-between move: instead of an expected immediate recapture, the
+    /// mover inserts a forcing move elsewhere, then takes the offered
+    /// piece a move later. Port of `cook.py:intermezzo` (zwischenzug).
+    Intermezzo,
+    /// The mover's move lures an enemy defender *off* a duty square (or
+    /// forces a capture/check that pulls it away), leaving what it guarded
+    /// undefended. Port of `cook.py:deflection`.
+    Deflection,
+    /// The mover offers a piece that an enemy K/Q/R captures, drawing it
+    /// onto a square where the mover then checks or wins it. Port of
+    /// `cook.py:attraction`.
+    Attraction,
+    /// A defender's line to a piece is blocked by interposing a piece on
+    /// the ray — by the mover (player interference) or by the opponent's
+    /// own piece (self-interference) — after which the now-undefended
+    /// piece falls. Port of `cook.py:interference` / `self_interference`.
+    Interference,
+    /// The mover vacates a square (without capturing) to clear a friendly
+    /// ray piece's line, enabling the tactic. Port of `cook.py:clearance`.
+    Clearance,
+    /// A battery: the mover captures on a square defended through it by a
+    /// friendly ray piece directly behind, which recaptures. Port of
+    /// `cook.py:x_ray`.
+    XRay,
 }
 
 impl TacticPattern {
@@ -103,6 +135,13 @@ impl TacticPattern {
             TacticPattern::DiscoveredAttack => "Discovered attack",
             TacticPattern::DiscoveredCheck => "Discovered check",
             TacticPattern::DoubleCheck => "Double check",
+            TacticPattern::Sacrifice => "Sacrifice",
+            TacticPattern::Intermezzo => "In-between move",
+            TacticPattern::Deflection => "Deflection",
+            TacticPattern::Attraction => "Attraction",
+            TacticPattern::Interference => "Interference",
+            TacticPattern::Clearance => "Clearance",
+            TacticPattern::XRay => "X-ray",
         }
     }
 }
@@ -146,6 +185,13 @@ pub struct TacticHit {
     /// short to assess.
     pub material_gain: Option<i32>,
     pub confidence: Confidence,
+    /// Whether the line is also a *sacrifice* — the owner is down ≥ 2
+    /// points of material by their second move yet the combination is
+    /// sound (port of `cook.py:sacrifice`). A geometric pattern (fork,
+    /// pin, …) can co-occur with a sacrifice; this flag records that
+    /// while the `pattern` keeps naming the richer lesson. Always `true`
+    /// when `pattern == TacticPattern::Sacrifice` (the standalone case).
+    pub sacrifice: bool,
 }
 
 /// The tactic story for one analysed move. Each slot is independent;
@@ -200,6 +246,47 @@ impl PriorMove {
 /// for the tactic's owner — enough to collect a fork's second target.
 const MATERIAL_WINDOW_PLIES: usize = 4;
 
+/// Minimum win-probability (from the mover's POV, via [`win_chances`])
+/// for a material-losing line to count as a *sound* sacrifice rather
+/// than a plain blunder. At or above this, the sacrifice "worked" — the
+/// mover has at least full compensation — so we (a) may surface it as a
+/// played `Sacrifice` tactic and (b) suppress any spurious "you walked
+/// into …" claim arising from the opponent simply accepting the
+/// material. Below it, the material loss is just a loss.
+///
+/// `0.0` = "at least equal." This is the lever for the long-standing
+/// one-ply-guarantee misfire (a move that loses material at ply 0 but is
+/// winning by ply 4 is a played tactic, not a missed/walked-into one).
+/// It's a deliberately conservative tuning surface — the `win_chances`
+/// constant was fitted by lila on NNUE evals, not our classical eval, so
+/// revisit this threshold if/when the sigmoid is refit.
+const SOUND_SACRIFICE_WC: f64 = 0.0;
+
+/// Minimum win-probability the best move must gain over the user's move
+/// before we call the user's move a *missed* tactic. Below this gap the
+/// two moves are close enough that "you missed THE move" isn't honest.
+/// Ports lichess's generator uniqueness gate *in spirit* — it uses 0.7
+/// for "clearly the only move" in puzzle generation; teaching nags at a
+/// lower bar but still wants a real gap. Tuning surface.
+const MISS_MIN_WC_GAP: f64 = 0.15;
+
+/// At or above this win-probability *after the user's own move*, a missed
+/// improvement is noise: the student is already comfortably winning, so we
+/// don't nag about a stronger line. Ports the generator's "already winning
+/// / already up material" suppression. Tuning surface.
+const ALREADY_WINNING_WC: f64 = 0.80;
+
+/// "Don't nag" gate for the missed-tactic slot. Only flag a missed tactic
+/// when the best move was meaningfully better than what the user played
+/// (a real win-probability gap) AND the user isn't already comfortably
+/// winning. Ports lichess's generator suppression/uniqueness gates in
+/// spirit — they gate which positions become puzzles; we gate which
+/// retrospective claims a 1200 student is worth interrupting for.
+fn missed_tactic_worth_flagging(best_ma: &MoveAnalysis, user_ma: &MoveAnalysis) -> bool {
+    let user_wc = win_chances(user_ma.score);
+    win_chances(best_ma.score) - user_wc >= MISS_MIN_WC_GAP && user_wc < ALREADY_WINNING_WC
+}
+
 /// Compute the [`TacticsOutcome`] for a single analysed move.
 ///
 /// - `best_ma` — the engine's top line from `pre_move_pos`.
@@ -221,9 +308,24 @@ pub fn compute_tactic_outcome(
     root_stm: Color,
     prior_move: Option<PriorMove>,
 ) -> TacticsOutcome {
-    let user_played_tactic = detect_line_tactic(pre_move_pos, &user_ma.pv, root_stm, 0, prior_move);
+    // The user's move is a *sound sacrifice* when the line gives material
+    // away (`is_sacrifice`) yet the eval says the user is at least equal.
+    // This gates two things below: synthesizing a standalone `Sacrifice`
+    // played-hit, and suppressing a misfiring "you walked into …" claim.
+    let user_sacrifice_sound = is_sacrifice(pre_move_pos, &user_ma.pv, root_stm)
+        && win_chances(user_ma.score) >= SOUND_SACRIFICE_WC;
 
-    let user_missed_tactic = if user_ma.mv != best_ma.mv {
+    let user_played_tactic = detect_line_tactic(pre_move_pos, &user_ma.pv, root_stm, 0, prior_move)
+        // No geometric pattern, but a sound sacrifice — surface the
+        // sacrifice itself so a winning material-down combination reads as
+        // *played*, not as a blunder.
+        .or_else(|| {
+            user_sacrifice_sound.then(|| synthesize_sacrifice_hit(pre_move_pos, &user_ma.pv, root_stm))
+        });
+
+    let user_missed_tactic = if user_ma.mv != best_ma.mv
+        && missed_tactic_worth_flagging(best_ma, user_ma)
+    {
         detect_line_tactic(pre_move_pos, &best_ma.pv, root_stm, 0, prior_move)
     } else {
         None
@@ -234,20 +336,45 @@ pub fn compute_tactic_outcome(
     // pattern's key move sits at original PV ply 1. The move *into* that
     // sub-line's start position is the user's own move, so that — not
     // `prior_move` — is the relevant recapture context here.
+    //
+    // Suppressed when the user played a sound sacrifice: the opponent
+    // "winning" the offered material is the point of the sacrifice, not a
+    // tactic the user blundered into. This is the one-ply-guarantee
+    // misfire fix — without it, the opponent accepting a sound sac reads
+    // as "you walked into a free-piece capture."
     let user_walked_into = match user_ma.pv.first() {
-        Some(&first) => {
+        Some(&first) if !user_sacrifice_sound => {
             let mut after = pre_move_pos.clone();
             let sub_prior = PriorMove::new(pre_move_pos, first);
             after.do_move(first);
             detect_line_tactic(&after, &user_ma.pv[1..], !root_stm, 1, Some(sub_prior))
         }
-        None => None,
+        _ => None,
     };
 
     TacticsOutcome {
         user_played_tactic,
         user_missed_tactic,
         user_walked_into,
+    }
+}
+
+/// Build a standalone [`TacticPattern::Sacrifice`] hit for a line with no
+/// geometric pattern. `primary_piece` is where the combination opens (the
+/// mover's first destination); there is no single geometric target, so
+/// `targets` is empty. `material_gain` is the (negative) net over the
+/// window — honest about the material given. Caller must already have
+/// confirmed [`is_sacrifice`] and soundness.
+fn synthesize_sacrifice_hit(pre: &Position, pv: &[Move], mover: Color) -> TacticHit {
+    let material_gain = line_material_gain(pre, pv, mover);
+    TacticHit {
+        pattern: TacticPattern::Sacrifice,
+        pv_ply: 0,
+        primary_piece: pv[0].to(),
+        targets: Vec::new(),
+        material_gain,
+        confidence: confidence_for(material_gain),
+        sacrifice: true,
     }
 }
 
@@ -284,6 +411,63 @@ pub(super) fn line_material_gain(pre: &Position, pv: &[Move], owner: Color) -> O
         scratch.do_move(mv);
     }
     Some(net)
+}
+
+/// Material balance for `color` in lichess point units (P1 N3 B3 R5 Q9;
+/// kings are excluded — they always cancel). Positive = `color` is ahead.
+/// Mirrors `util.material_diff`.
+fn material_diff_points(pos: &Position, color: Color) -> i32 {
+    const VALUES: [(PieceType, i32); 5] = [
+        (PieceType::Pawn, 1),
+        (PieceType::Knight, 3),
+        (PieceType::Bishop, 3),
+        (PieceType::Rook, 5),
+        (PieceType::Queen, 9),
+    ];
+    VALUES
+        .iter()
+        .map(|&(pt, v)| (pos.count(color, pt) as i32 - pos.count(!color, pt) as i32) * v)
+        .sum()
+}
+
+/// Whether `pv` (played from `pre`, with `pv[0]` by `mover`) is a
+/// *sacrifice* for `mover` — port of `cook.py:sacrifice`.
+///
+/// True when, by the mover's **second** move or later, `mover` is down
+/// ≥ 2 points of material relative to the pre-move balance, and no
+/// *opponent* reply in the line is a promotion. (A promoting opponent
+/// reply means the material deficit came from the opponent queening, not
+/// from the mover giving material — lichess excludes that case.)
+///
+/// Framing map: lichess walks a `mainline` whose `pov` moves sit at odd
+/// indices, baselined on the position after the opponent's setup move.
+/// Our `pv` has the mover's own moves at even indices, baselined on the
+/// true root `pre`. So "mover's second move onward" is even indices
+/// `≥ 2`, and the opponent's replies (the promotion guard's subject) are
+/// the odd indices.
+///
+/// This is purely material/structural — it does not check that the
+/// sacrifice is *sound*. The caller gates soundness with
+/// [`super::win_chances`] on the line's eval before surfacing it as a
+/// played tactic.
+pub(super) fn is_sacrifice(pre: &Position, pv: &[Move], mover: Color) -> bool {
+    use crate::types::MoveKind;
+    let initial = material_diff_points(pre, mover);
+    let mut scratch = pre.clone();
+    let mut went_down = false;
+    for (i, &mv) in pv.iter().enumerate() {
+        // Odd index = opponent reply. A promoting one disqualifies the line.
+        if i % 2 == 1 && mv.kind() == MoveKind::Promotion {
+            return false;
+        }
+        scratch.do_move(mv);
+        // After the mover's second move onward (even index ≥ 2): is the
+        // mover down ≥ 2 points versus the pre-move balance?
+        if i >= 2 && i % 2 == 0 && material_diff_points(&scratch, mover) - initial <= -2 {
+            went_down = true;
+        }
+    }
+    went_down
 }
 
 /// `(captor colour, captured midgame value)` for a capturing move,

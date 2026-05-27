@@ -1,4 +1,4 @@
-use super::super::test_support::ma_with_pv;
+use super::super::test_support::{ma_with_pv, ma_with_pv_score};
 use super::*;
 use crate::types::{Color, Move, Square};
 
@@ -118,14 +118,38 @@ fn outcome_reports_user_played_fork() {
 #[test]
 fn outcome_reports_missed_fork_when_user_chose_another_move() {
     let pre = pos(ROYAL_FORK_FEN);
-    let best = ma_with_pv(vec![Move::normal(Square::B5, Square::C7)], Some(0));
-    // User shuffled the king instead of forking.
-    let user = ma_with_pv(vec![Move::normal(Square::G1, Square::F1)], Some(0));
+    // Best forks and wins material (a real eval edge); the user shuffled the
+    // king, keeping the position equal. The win-probability gap clears the
+    // "don't nag" gate.
+    let best = ma_with_pv_score(vec![Move::normal(Square::B5, Square::C7)], Some(0), Value(600));
+    let user = ma_with_pv_score(vec![Move::normal(Square::G1, Square::F1)], Some(0), Value::ZERO);
 
     let outcome = compute_tactic_outcome(&best, &user, &pre, Color::White, None);
     let missed = outcome.user_missed_tactic.expect("best line had a fork");
     assert_eq!(missed.pattern, TacticPattern::Fork);
     assert!(outcome.user_played_tactic.is_none());
+}
+
+#[test]
+fn missed_tactic_suppressed_when_user_move_nearly_as_good() {
+    // Same missed fork, but the user's move keeps a near-equal eval to best
+    // (tiny win% gap) — "you missed THE move" would be a lie, so suppress.
+    let pre = pos(ROYAL_FORK_FEN);
+    let best = ma_with_pv_score(vec![Move::normal(Square::B5, Square::C7)], Some(0), Value(60));
+    let user = ma_with_pv_score(vec![Move::normal(Square::G1, Square::F1)], Some(0), Value(40));
+    let outcome = compute_tactic_outcome(&best, &user, &pre, Color::White, None);
+    assert!(outcome.user_missed_tactic.is_none());
+}
+
+#[test]
+fn missed_tactic_suppressed_when_already_winning() {
+    // The user's own move already leaves them crushing; a faster win isn't
+    // worth nagging a 1200 about.
+    let pre = pos(ROYAL_FORK_FEN);
+    let best = ma_with_pv_score(vec![Move::normal(Square::B5, Square::C7)], Some(0), Value(3000));
+    let user = ma_with_pv_score(vec![Move::normal(Square::G1, Square::F1)], Some(0), Value(2000));
+    let outcome = compute_tactic_outcome(&best, &user, &pre, Color::White, None);
+    assert!(outcome.user_missed_tactic.is_none());
 }
 
 #[test]
@@ -464,3 +488,125 @@ fn no_pin_when_the_piece_is_not_pinned() {
     assert!(hit.map_or(true, |h| h.pattern != TacticPattern::Pin));
 }
 
+// ---- sacrifice classification (cook.py:sacrifice) -------------------
+
+// White queen on b1 takes the b7 pawn; the black rook on a7 recaptures,
+// leaving white down a queen for a pawn. A textbook "material down after
+// the second move" line (no geometric pattern fires on Qxb7 — it just
+// takes a pawn). Reused across the sacrifice tests.
+const QUEEN_SAC_FEN: &str = "6k1/rp6/8/8/8/8/8/1Q4K1 w - - 0 1";
+
+fn queen_sac_line() -> Vec<Move> {
+    vec![
+        Move::normal(Square::B1, Square::B7), // Qxb7 (takes a pawn)
+        Move::normal(Square::A7, Square::B7), // Rxb7 (wins the queen)
+        Move::normal(Square::G1, Square::F2), // white shuffles, down Q for P
+    ]
+}
+
+#[test]
+fn is_sacrifice_detects_material_down_after_second_move() {
+    let pre = pos(QUEEN_SAC_FEN);
+    assert!(is_sacrifice(&pre, &queen_sac_line(), Color::White));
+}
+
+#[test]
+fn is_sacrifice_false_for_a_winning_capture_line() {
+    // The royal-fork line wins the rook — material goes up, not down.
+    let pre = pos(ROYAL_FORK_FEN);
+    let pv = [
+        Move::normal(Square::B5, Square::C7),
+        Move::normal(Square::E8, Square::D8),
+        Move::normal(Square::C7, Square::A8),
+    ];
+    assert!(!is_sacrifice(&pre, &pv, Color::White));
+}
+
+#[test]
+fn is_sacrifice_excluded_by_an_opponent_promotion() {
+    // White rook takes b7, black rook recaptures (white down a rook for a
+    // pawn), then black promotes a2-a1. The opponent promotion means the
+    // deficit is the opponent queening, not a sacrifice — excluded.
+    let pre = pos("6k1/rp6/8/8/8/8/p7/1R4K1 w - - 0 1");
+    let pv = [
+        Move::normal(Square::B1, Square::B7), // Rxb7
+        Move::normal(Square::A7, Square::B7), // Rxb7
+        Move::normal(Square::G1, Square::F1), // Kf1
+        Move::promotion(Square::A2, Square::A1, PieceType::Queen), // a1=Q
+    ];
+    assert!(!is_sacrifice(&pre, &pv, Color::White));
+}
+
+#[test]
+fn sound_sacrifice_is_played_and_suppresses_walked_into() {
+    // Score 0 (equal) ⇒ the material-down line is a *sound* sacrifice. It
+    // surfaces as a played Sacrifice tactic, and the opponent winning the
+    // offered queen is NOT reported as "you walked into a free piece."
+    let pre = pos(QUEEN_SAC_FEN);
+    let ma = ma_with_pv(queen_sac_line(), Some(2));
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, None);
+
+    let played = outcome.user_played_tactic.expect("sound sacrifice plays a tactic");
+    assert_eq!(played.pattern, TacticPattern::Sacrifice);
+    assert!(played.sacrifice);
+    assert_eq!(played.confidence, Confidence::Medium); // material is down
+    assert!(outcome.user_walked_into.is_none(), "sound sac must not read as walked-into");
+}
+
+#[test]
+fn unsound_sacrifice_is_not_played_and_walked_into_fires() {
+    // Same line, but the eval says white is losing (score < 0) ⇒ it's a
+    // blunder, not a sacrifice. No played tactic; the opponent's Rxb7 is a
+    // genuine free-piece capture the user walked into.
+    let pre = pos(QUEEN_SAC_FEN);
+    let losing = ma_with_pv_score(queen_sac_line(), Some(2), Value(-500));
+    let outcome = compute_tactic_outcome(&losing, &losing, &pre, Color::White, None);
+
+    assert!(outcome.user_played_tactic.is_none(), "a losing dump isn't a played tactic");
+    assert_eq!(
+        outcome.user_walked_into.map(|h| h.pattern),
+        Some(TacticPattern::HangingCapture)
+    );
+}
+
+#[test]
+fn normal_tactic_hit_has_sacrifice_flag_false() {
+    // A plain winning fork is not a sacrifice — the flag stays false.
+    let pre = pos(ROYAL_FORK_FEN);
+    let nc7 = Move::normal(Square::B5, Square::C7);
+    let hit = detect_line_tactic(&pre, &[nc7], Color::White, 0, None).expect("fork");
+    assert_eq!(hit.pattern, TacticPattern::Fork);
+    assert!(!hit.sacrifice);
+}
+
+// ---- wave-4 multi-ply patterns --------------------------------------
+//
+// The per-detector fixtures (lichess-puzzler's own `tagger/test.py` cases)
+// live in `detectors_tests.rs`, where each `detect_*` can be called in
+// isolation. The full priority chain returns a single, highest-priority
+// hit, and for several of those lines a more immediate pattern (a
+// discovered check / skewer / removing-the-defender on the user's move
+// itself) legitimately wins the slot — lichess assigns multiple tags, we
+// surface one. The chain-level test below shows a wave-4 pattern reaching
+// the verdict when nothing more immediate fires.
+
+#[test]
+fn intermezzo_fires_on_an_inserted_check() {
+    // Black just played ...Bxd4 (capturing a knight); instead of recapturing
+    // with Rxd4, White inserts Bxf7+ (the zwischenzug), and only after the
+    // king moves does the rook take the bishop.
+    let pre = pos("6k1/5p2/8/8/3b4/1B6/8/3R2K1 w - - 0 1");
+    let pv = vec![
+        Move::normal(Square::B3, Square::F7), // Bxf7+ (in-between check)
+        Move::normal(Square::G8, Square::F7), // Kxf7
+        Move::normal(Square::D1, Square::D4), // Rxd4 (delayed recapture)
+    ];
+    let prior = PriorMove {
+        mv: Move::normal(Square::E5, Square::D4),
+        captured: Some(PieceType::Knight),
+    };
+    let hit = detect_line_tactic(&pre, &pv, Color::White, 0, Some(prior)).expect("intermezzo");
+    assert_eq!(hit.pattern, TacticPattern::Intermezzo);
+    assert_eq!(hit.pv_ply, 2);
+    assert_eq!(hit.primary_piece, Square::D4);
+}

@@ -20,8 +20,13 @@ use crate::analysis::tactic_util::{
 };
 use crate::attacks::{attacks_bb, between_bb, line_bb};
 use crate::bitboard::square_bb;
+use crate::movegen::legal_moves_vec;
 use crate::position::Position;
-use crate::types::{Color, Move, PieceType, Square};
+use crate::types::{Color, Move, MoveKind, PieceType, Square};
+
+#[cfg(test)]
+#[path = "detectors_tests.rs"]
+mod tests;
 
 /// Rook / bishop / queen — the pieces whose attacks travel along a ray, so
 /// they can pin, skewer, and be unmasked in a discovered attack.
@@ -47,6 +52,12 @@ pub(crate) fn detect_line_tactic(
 
     let material_gain = line_material_gain(pre, pv, mover);
 
+    // Multi-ply patterns (wave 4) read several plies of the line, so build
+    // the board sequence once and share it: `boards[0] == pre`, `boards[i]`
+    // = after `pv[0..i]`. Capped to the early window so a named tactic stays
+    // attributable to the user's move.
+    let boards = line_boards(pre, pv, WAVE4_MAX_PLIES);
+
     // Priority order: a fork teaches more than a plain free-piece capture,
     // and removing-the-defender is a more specific lesson than a piece left
     // hanging. The capture/threat patterns come first (concrete material),
@@ -65,6 +76,24 @@ pub(crate) fn detect_line_tactic(
         .or_else(|| detect_skewer(&post, key_move, mover, base_ply, material_gain))
         .or_else(|| detect_discovered_attack(&post, key_move, mover, base_ply, material_gain))
         .or_else(|| detect_pin(&post, key_move, mover, base_ply, material_gain))
+        // Wave-4 multi-ply patterns, in the agreed priority order. These fire
+        // only when no single-move pattern above claims the line — the
+        // immediate pattern is always the primary lesson.
+        .or_else(|| detect_intermezzo(&boards, pv, mover, base_ply, material_gain, prior))
+        .or_else(|| detect_deflection(&boards, pv, mover, base_ply, material_gain))
+        .or_else(|| detect_attraction(&boards, pv, mover, base_ply, material_gain))
+        .or_else(|| detect_interference(&boards, pv, mover, base_ply, material_gain))
+        .or_else(|| detect_clearance(&boards, pv, mover, base_ply, material_gain))
+        .or_else(|| detect_x_ray(&boards, pv, mover, base_ply, material_gain))
+        // A geometric pattern can co-occur with a sacrifice; record it on
+        // the flag while the pattern keeps naming the richer lesson. The
+        // *standalone* sacrifice case (no geometric pattern) is synthesized
+        // in `compute_tactic_outcome`, which has the eval needed to confirm
+        // the sacrifice is sound.
+        .map(|mut hit| {
+            hit.sacrifice = super::is_sacrifice(pre, pv, mover);
+            hit
+        })
 }
 
 // =========================================================================
@@ -128,6 +157,7 @@ fn detect_fork(
         targets,
         material_gain,
         confidence: confidence_for(material_gain),
+        sacrifice: false,
     })
 }
 
@@ -191,6 +221,7 @@ fn detect_hanging_capture(
         targets: vec![to],
         material_gain,
         confidence: confidence_for(material_gain),
+        sacrifice: false,
     })
 }
 
@@ -256,6 +287,7 @@ fn detect_removing_defender(
         targets: freed,
         material_gain,
         confidence: confidence_for(material_gain),
+        sacrifice: false,
     })
 }
 
@@ -293,6 +325,7 @@ fn detect_trapped_piece(
         targets: vec![trapped_sq],
         material_gain,
         confidence: confidence_for(material_gain),
+        sacrifice: false,
     })
 }
 
@@ -324,6 +357,7 @@ fn detect_double_check(
         targets: vec![king],
         material_gain,
         confidence: confidence_for(material_gain),
+        sacrifice: false,
     })
 }
 
@@ -353,6 +387,7 @@ fn detect_discovered_check(
         targets: vec![king],
         material_gain,
         confidence: confidence_for(material_gain),
+        sacrifice: false,
     })
 }
 
@@ -410,6 +445,7 @@ fn detect_skewer(
                     targets,
                     material_gain,
                     confidence: confidence_for(material_gain),
+                    sacrifice: false,
                 });
             }
         }
@@ -475,6 +511,7 @@ fn detect_discovered_attack(
                     targets: vec![t_sq],
                     material_gain,
                     confidence: confidence_for(material_gain),
+                    sacrifice: false,
                 });
             }
         }
@@ -558,5 +595,438 @@ fn pin_hit(
         targets: vec![pinned_sq],
         material_gain,
         confidence: confidence_for(material_gain),
+        sacrifice: false,
     }
+}
+
+// =========================================================================
+// Wave 4 patterns (multi-ply: read several plies of the line)
+//
+// Unlike the single-key-move patterns above, these describe a *sequence*:
+// the mover's move sets something up that resolves a move or two later.
+// lichess walks its `mainline` with `.parent` / `.parent.parent`
+// navigation; we mirror that by replaying the `pv` into a `boards` vector
+// (`boards[0] == pre`, `boards[i]` = after `pv[0..i]`) and indexing it.
+// The scan is bounded to the early window so a named tactic stays
+// attributable to the user's move.
+// =========================================================================
+
+/// Plies of the line wave-4 detectors look at. Bounds cost and keeps the
+/// lesson near the user's move. Covers a resolution at the mover's 2nd
+/// move (`pv[2]`) or 3rd move (`pv[4]`), plus attraction's follow-up.
+const WAVE4_MAX_PLIES: usize = 5;
+
+/// The `pv` indices a multi-ply pattern can resolve on — the mover's 2nd
+/// move (`pv[2]`) or 3rd move (`pv[4]`). lichess scans every solver move;
+/// we bound to the first two past the opener.
+const RESOLVE_PLIES: [usize; 2] = [2, 4];
+
+/// Replay `pv` from `pre`: `boards[0] == pre`, `boards[i]` = position after
+/// `pv[0..i]`, capped at `max_plies` moves.
+fn line_boards(pre: &Position, pv: &[Move], max_plies: usize) -> Vec<Position> {
+    let n = pv.len().min(max_plies);
+    let mut boards = Vec::with_capacity(n + 1);
+    let mut cur = pre.clone();
+    boards.push(cur.clone());
+    for &mv in pv.iter().take(n) {
+        cur.do_move(mv);
+        boards.push(cur.clone());
+    }
+    boards
+}
+
+fn wave4_hit(
+    pattern: TacticPattern,
+    pv_ply: usize,
+    primary_piece: Square,
+    targets: Vec<Square>,
+    material_gain: Option<i32>,
+) -> TacticHit {
+    TacticHit {
+        pattern,
+        pv_ply,
+        primary_piece,
+        targets,
+        material_gain,
+        confidence: confidence_for(material_gain),
+        sacrifice: false,
+    }
+}
+
+/// Intermezzo (zwischenzug) — port of `cook.py:intermezzo`.
+///
+/// The opponent's move into `pre` (`prior`) captured on a square. Instead
+/// of recapturing at once, the mover inserts a forcing move (`pv[0]`), the
+/// opponent replies (`pv[1]`), and only then takes the offered piece
+/// (`pv[2]`). The recapture was legal immediately, the in-between moves
+/// left the square uncontested, and the original capture was real. Needs
+/// the prior move; without history it can't fire.
+fn detect_intermezzo(
+    boards: &[Position],
+    pv: &[Move],
+    mover: Color,
+    base_ply: usize,
+    material_gain: Option<i32>,
+    prior: Option<PriorMove>,
+) -> Option<TacticHit> {
+    let prior = prior?;
+    if prior.captured.is_none() || pv.len() < 3 || boards.len() < 3 {
+        return None;
+    }
+    let capture_square = pv[2].to();
+    // The delayed move is a capture, on the square the opponent took on.
+    if !boards[2].is_capture(pv[2]) || prior.mv.to() != capture_square {
+        return None;
+    }
+    // The in-between move wasn't itself the recapture.
+    if pv[0].to() == capture_square {
+        return None;
+    }
+    // The opponent's reply didn't contest the square (its piece wasn't
+    // already attacking it).
+    let occ = boards[1].occupied();
+    let op_attackers =
+        boards[1].attackers_to(capture_square, occ) & boards[1].pieces_by_color(!mover);
+    if op_attackers.contains(pv[1].from()) {
+        return None;
+    }
+    // The recapture was available immediately (legal in `pre`).
+    let mut scratch = boards[0].clone();
+    let recapture_available = legal_moves_vec(&mut scratch)
+        .iter()
+        .any(|m| m.from() == pv[2].from() && m.to() == capture_square);
+    if !recapture_available {
+        return None;
+    }
+    Some(wave4_hit(
+        TacticPattern::Intermezzo,
+        base_ply + 2,
+        capture_square,
+        vec![capture_square],
+        material_gain,
+    ))
+}
+
+/// Deflection — port of `cook.py:deflection`.
+///
+/// The resolving move lands on a square an enemy piece *used to guard*, but
+/// which a forcing earlier move (a check, or a recapture the opponent had
+/// to make) pulled that guard away from. The guard attacked the square
+/// before moving and no longer does after.
+fn detect_deflection(
+    boards: &[Position],
+    pv: &[Move],
+    _mover: Color,
+    base_ply: usize,
+    material_gain: Option<i32>,
+) -> Option<TacticHit> {
+    for &k in &RESOLVE_PLIES {
+        if pv.len() <= k || boards.len() <= k + 1 {
+            continue;
+        }
+        let node = pv[k];
+        let square = node.to();
+        let is_promo = node.kind() == MoveKind::Promotion;
+        let captured = boards[k].piece_on(square);
+        if captured.is_none() && !is_promo {
+            continue;
+        }
+        let Some(capturing) = boards[k + 1].piece_on(square).map(|p| p.kind()) else {
+            continue;
+        };
+        // Capturing a strictly more valuable piece is just winning material.
+        if let Some(c) = captured {
+            if king_value(c.kind()) > king_value(capturing) {
+                continue;
+            }
+        }
+        let op_move = pv[k - 1];
+        let player_move = pv[k - 2];
+        // (a) the mover's earlier move wasn't a clearly-winning capture.
+        //     (lichess compares a piece value to a piece-type ordinal here —
+        //     a likely bug; we read the sensible "didn't win material".)
+        let prev_capture = boards[k - 2].piece_on(player_move.to());
+        let Some(moved1) = boards[k - 1].piece_on(player_move.to()).map(|p| p.kind()) else {
+            continue;
+        };
+        let move1_not_winning =
+            prev_capture.map_or(true, |c| king_value(c.kind()) < king_value(moved1));
+        if !move1_not_winning {
+            continue;
+        }
+        // (b,c) the deflection square isn't where the previous two moves landed.
+        if square == op_move.to() || square == player_move.to() {
+            continue;
+        }
+        // (d) the opponent's move was forced: it recaptured on the mover's
+        //     move-1 square, or that move gave check.
+        if !(op_move.to() == player_move.to() || boards[k - 1].checkers().any()) {
+            continue;
+        }
+        // (e) the deflected piece (at its origin) attacked the square — or the
+        //     promotion variant (same file, the piece guarded the push square).
+        let guarded_before = attacks_from_square(&boards[k - 1], op_move.from()).contains(square);
+        let promo_variant = is_promo
+            && square.file() == op_move.from().file()
+            && attacks_from_square(&boards[k - 1], op_move.from()).contains(node.from());
+        if !(guarded_before || promo_variant) {
+            continue;
+        }
+        // (f) after moving, the deflected piece no longer attacks the square.
+        if attacks_from_square(&boards[k], op_move.to()).contains(square) {
+            continue;
+        }
+        return Some(wave4_hit(
+            TacticPattern::Deflection,
+            base_ply + k,
+            square,
+            vec![square],
+            material_gain,
+        ));
+    }
+    None
+}
+
+/// Attraction — port of `cook.py:attraction`.
+///
+/// The mover puts a piece on a square (`pv[0]`); an enemy K/Q/R captures it
+/// (`pv[1]`, drawn onto that square); the mover then attacks the square
+/// (`pv[2]`). If the attracted piece is the king the attack is a check
+/// (done); otherwise the mover captures the square a move later (`pv[4]`).
+fn detect_attraction(
+    boards: &[Position],
+    pv: &[Move],
+    mover: Color,
+    base_ply: usize,
+    material_gain: Option<i32>,
+) -> Option<TacticHit> {
+    if pv.len() < 3 || boards.len() < 4 {
+        return None;
+    }
+    let square = pv[0].to();
+    // The opponent captures on the mover's square.
+    if pv[1].to() != square {
+        return None;
+    }
+    // The attracted piece (now on `square`) is an enemy K/Q/R.
+    let attracted = boards[2].piece_on(square)?;
+    if attracted.color() != !mover
+        || !matches!(
+            attracted.kind(),
+            PieceType::King | PieceType::Queen | PieceType::Rook
+        )
+    {
+        return None;
+    }
+    // The mover then attacks `square` with the piece it just moved (`pv[2]`).
+    let occ = boards[3].occupied();
+    let attackers = boards[3].attackers_to(square, occ) & boards[3].pieces_by_color(mover);
+    if !attackers.contains(pv[2].to()) {
+        return None;
+    }
+    let fire = || {
+        Some(wave4_hit(
+            TacticPattern::Attraction,
+            base_ply,
+            square,
+            vec![square],
+            material_gain,
+        ))
+    };
+    if attracted.kind() == PieceType::King {
+        return fire(); // attacking the king's square is a check
+    }
+    // Otherwise the mover must later capture on the square.
+    if pv.len() >= 5 && pv[4].to() == square {
+        return fire();
+    }
+    None
+}
+
+/// Interference — port of `cook.py:interference` (player) and
+/// `self_interference` (opponent). The mover captures a piece that hangs
+/// only because a defender's ray to it was blocked by an interposed piece:
+/// the mover's own (player interference) or the opponent's own
+/// (self-interference).
+fn detect_interference(
+    boards: &[Position],
+    pv: &[Move],
+    mover: Color,
+    base_ply: usize,
+    material_gain: Option<i32>,
+) -> Option<TacticHit> {
+    let enemy = !mover;
+    for &k in &RESOLVE_PLIES {
+        if pv.len() <= k || boards.len() <= k + 1 {
+            continue;
+        }
+        let square = pv[k].to();
+        let before = &boards[k];
+        let Some(captured) = before.piece_on(square) else {
+            continue;
+        };
+        if captured.color() != enemy || !is_hanging(before, square, enemy) {
+            continue;
+        }
+        // Self-interference: the defender stood (and attacked the square) in
+        // the board after the mover's previous move; the opponent's reply
+        // interposed on its ray.
+        if ray_defender_blocked(&boards[k - 1], square, enemy, pv[k - 1].to()) {
+            return Some(interference_hit(square, base_ply + k, material_gain));
+        }
+        // Player interference: the defender stood in the line's earlier board;
+        // the mover's own previous move interposed on its ray. (lichess also
+        // requires the capture square differ from the opponent's last move.)
+        if square != pv[k - 1].to()
+            && ray_defender_blocked(&boards[k - 2], square, enemy, pv[k - 2].to())
+        {
+            return Some(interference_hit(square, base_ply + k, material_gain));
+        }
+    }
+    None
+}
+
+/// Whether some ray piece of `defender_color` attacks `square` in `board`
+/// and `interpose_sq` lies strictly between them (so interposing there cuts
+/// the defense).
+fn ray_defender_blocked(
+    board: &Position,
+    square: Square,
+    defender_color: Color,
+    interpose_sq: Square,
+) -> bool {
+    let occ = board.occupied();
+    for d_sq in board.attackers_to(square, occ) & board.pieces_by_color(defender_color) {
+        if board
+            .piece_on(d_sq)
+            .is_some_and(|p| is_ray_piece(p.kind()))
+            && between_bb(square, d_sq).contains(interpose_sq)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn interference_hit(square: Square, pv_ply: usize, material_gain: Option<i32>) -> TacticHit {
+    wave4_hit(
+        TacticPattern::Interference,
+        pv_ply,
+        square,
+        vec![square],
+        material_gain,
+    )
+}
+
+/// Clearance — port of `cook.py:clearance`. The mover moves a ray piece to
+/// a square (no capture); a forcing earlier move had vacated a square on
+/// that ray (or its destination), clearing the line that makes it work.
+fn detect_clearance(
+    boards: &[Position],
+    pv: &[Move],
+    _mover: Color,
+    base_ply: usize,
+    material_gain: Option<i32>,
+) -> Option<TacticHit> {
+    for &k in &RESOLVE_PLIES {
+        if pv.len() <= k || boards.len() <= k + 1 {
+            continue;
+        }
+        let node = pv[k];
+        // A non-capturing move of a ray piece.
+        if boards[k].piece_on(node.to()).is_some() {
+            continue;
+        }
+        let Some(piece) = boards[k + 1].piece_on(node.to()) else {
+            continue;
+        };
+        if !is_ray_piece(piece.kind()) {
+            continue;
+        }
+        let prev = pv[k - 2]; // the mover's earlier (clearing) move
+        if prev.kind() == MoveKind::Promotion
+            || prev.to() == node.from()
+            || prev.to() == node.to()
+            || boards[k].checkers().any()
+        {
+            continue;
+        }
+        // If the move gives check, the opponent's reply mustn't have been a
+        // king move (else it's a king walk, not a clearance).
+        if boards[k + 1].checkers().any()
+            && boards[k]
+                .piece_on(pv[k - 1].to())
+                .is_some_and(|p| p.kind() == PieceType::King)
+        {
+            continue;
+        }
+        // The cleared-from square is the destination, or lies on the ray.
+        let on_ray = prev.from() == node.to()
+            || between_bb(node.from(), node.to()).contains(prev.from());
+        if !on_ray {
+            continue;
+        }
+        // The clearing move either vacated an empty-in-`pre` square (quiet
+        // repositioning) or left its piece in a bad spot.
+        let vacated_was_quiet = boards[k - 2].piece_on(prev.to()).is_none();
+        let cleared_piece_bad = is_in_bad_spot(&boards[k - 1], prev.to());
+        if !(vacated_was_quiet || cleared_piece_bad) {
+            continue;
+        }
+        return Some(wave4_hit(
+            TacticPattern::Clearance,
+            base_ply + k,
+            node.to(),
+            vec![node.to()],
+            material_gain,
+        ));
+    }
+    None
+}
+
+/// X-ray / battery — port of `cook.py:x_ray`. A run of captures on one
+/// square: the mover captures, the opponent recaptures from a square that
+/// lay between the mover's next attacker and the target, and the mover
+/// recaptures through that line.
+fn detect_x_ray(
+    boards: &[Position],
+    pv: &[Move],
+    _mover: Color,
+    base_ply: usize,
+    material_gain: Option<i32>,
+) -> Option<TacticHit> {
+    for &k in &RESOLVE_PLIES {
+        if pv.len() <= k || boards.len() <= k + 1 {
+            continue;
+        }
+        let node = pv[k];
+        if !boards[k].is_capture(node) {
+            continue;
+        }
+        let op = pv[k - 1];
+        // The opponent's recapture landed on the same square, and wasn't a king.
+        if op.to() != node.to()
+            || boards[k]
+                .piece_on(op.to())
+                .is_some_and(|p| p.kind() == PieceType::King)
+        {
+            continue;
+        }
+        // The mover's earlier move also resolved on that square.
+        if pv[k - 2].to() != op.to() {
+            continue;
+        }
+        // The recapturer came from between the mover's final attacker and the
+        // square — it was x-rayed.
+        if between_bb(node.from(), node.to()).contains(op.from()) {
+            return Some(wave4_hit(
+                TacticPattern::XRay,
+                base_ply + k,
+                node.to(),
+                vec![node.to()],
+                material_gain,
+            ));
+        }
+    }
+    None
 }
