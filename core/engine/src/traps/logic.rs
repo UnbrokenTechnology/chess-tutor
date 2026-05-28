@@ -425,7 +425,7 @@ impl TriggerPattern {
         mover == self.mover
             && piece_type == self.piece_type
             && to == self.to
-            && self.from.map_or(true, |required| required == from)
+            && self.from.is_none_or(|required| required == from)
     }
 }
 

@@ -35,8 +35,8 @@ pub(crate) fn stat_bonus(depth: i32) -> i32 {
 /// per SF (default-initialised).
 pub(crate) static SF11_REDUCTIONS: std::sync::LazyLock<[i32; 256]> = std::sync::LazyLock::new(|| {
     let mut arr = [0i32; 256];
-    for i in 1..256 {
-        arr[i] = (24.8 * (i as f64).ln()) as i32;
+    for (i, slot) in arr.iter_mut().enumerate().skip(1) {
+        *slot = (24.8 * (i as f64).ln()) as i32;
     }
     arr
 });
@@ -265,9 +265,7 @@ impl<'a> Search<'a> {
         // *after* Step 13 in SF11, so the gate is keyed on
         // pre-extension depth (search.cpp:994, 1008).
         let lmr_d = ((depth - 1) - lmr_r).max(0);
-        if lmr_d >= 6 {
-            false
-        } else if static_eval.0 + 235 + 172 * lmr_d > alpha.0 {
+        if lmr_d >= 6 || static_eval.0 + 235 + 172 * lmr_d > alpha.0 {
             false
         } else {
             // Post-`do_move` this read was `pos.side_to_move()`

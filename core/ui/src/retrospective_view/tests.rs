@@ -330,7 +330,7 @@
         // favor.
         use chess_tutor_engine::analysis::CaptureEvent;
         use chess_tutor_engine::types::{PieceType, Square};
-        let events_storage = vec![
+        let events_storage = [
             CaptureEvent {
                 ply: 0,
                 captor: Color::White,
@@ -369,7 +369,7 @@
         // the note should not fire (nothing pedagogical to add).
         use chess_tutor_engine::analysis::CaptureEvent;
         use chess_tutor_engine::types::{PieceType, Square};
-        let events_storage = vec![
+        let events_storage = [
             CaptureEvent {
                 ply: 0,
                 captor: Color::White,

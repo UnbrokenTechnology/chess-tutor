@@ -443,7 +443,7 @@ fn no_skewer_when_back_piece_is_not_less_valuable() {
     let pre = pos("4n2k/8/8/8/4b3/8/8/R5K1 w - - 0 1");
     let re1 = Move::normal(Square::A1, Square::E1);
     let hit = detect_line_tactic(&pre, &[re1], Color::White, 0, None);
-    assert!(hit.map_or(true, |h| h.pattern != TacticPattern::Skewer));
+    assert!(hit.is_none_or(|h| h.pattern != TacticPattern::Skewer));
 }
 
 // ---- detect_discovered_attack ---------------------------------------
@@ -485,7 +485,7 @@ fn no_pin_when_the_piece_is_not_pinned() {
     let pre = pos("k7/8/3n4/2P5/8/8/8/R5K1 w - - 0 1");
     let rd1 = Move::normal(Square::A1, Square::D1);
     let hit = detect_line_tactic(&pre, &[rd1], Color::White, 0, None);
-    assert!(hit.map_or(true, |h| h.pattern != TacticPattern::Pin));
+    assert!(hit.is_none_or(|h| h.pattern != TacticPattern::Pin));
 }
 
 // ---- sacrifice classification (cook.py:sacrifice) -------------------

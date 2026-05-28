@@ -222,9 +222,9 @@ fn is_anastasia_mate(board: &Position, mover: Color, king: Square, mating: Move)
     else {
         return false;
     };
-    if !board
+    if board
         .piece_on(blocker_sq)
-        .is_some_and(|p| p.color() != mover)
+        .is_none_or(|p| p.color() == mover)
     {
         return false;
     }

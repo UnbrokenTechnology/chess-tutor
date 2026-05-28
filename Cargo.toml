@@ -5,7 +5,10 @@ members = ["core/engine", "core/narration", "core/ui", "core/cli", "desktop"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+# 1.82 for `Box::new_uninit` (movepick / history zero-init without a stack
+# copy). The toolchain is `stable` (latest); nothing external pins an older
+# MSRV, so this just tracks the API the code actually uses.
+rust-version = "1.82"
 
 [workspace.lints.clippy]
 # Lint opt-ins go here. Keep the engine lint-clean.

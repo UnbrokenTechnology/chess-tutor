@@ -115,9 +115,9 @@ pub(super) fn build_threat_items(
 ///    trade as a mistake.
 ///
 /// 2. **Compensating counter-attack**: there's a guaranteed
-///    higher-value win elsewhere on the board (`counter_threat_pts`
-///    > our hanging piece's points). The opponent can't both
-///    address the bigger threat and capture our piece — they have
+///    higher-value win elsewhere on the board — `counter_threat_pts`
+///    is greater than our hanging piece's points. The opponent can't
+///    both address the bigger threat and capture our piece — they have
 ///    to choose the bigger problem, so our piece isn't really
 ///    hanging. This catches the classic "leave the bishop hanging,
 ///    threatening the queen" zwischenzug pattern, when the queen

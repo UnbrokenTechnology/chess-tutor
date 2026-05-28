@@ -79,6 +79,7 @@ pub fn list_hanging(pos: &Position, side: Color) -> Vec<HangingPiece> {
 ///   doesn't represent the promotion. `see_ge` short-circuits
 ///   non-`Normal` moves to `Value::ZERO >= threshold`, so a
 ///   threshold of 1 returns false.
+///
 /// List pieces of `side` that are attacked, defended, but still lose
 /// material in an SEE-assessed exchange initiated by the enemy. Public
 /// for the same reason as [`list_hanging`].

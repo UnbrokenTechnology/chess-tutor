@@ -275,7 +275,7 @@ impl CachedPawnsEval {
     /// read it (the teaching layer goes through a different code path
     /// that computes the real breakdowns fresh).
     #[inline(always)]
-    fn to_full(&self) -> PawnsEval {
+    fn to_full(self) -> PawnsEval {
         PawnsEval {
             scores: self.scores,
             breakdowns: [PawnsBreakdown::zero(); 2],

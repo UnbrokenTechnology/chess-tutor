@@ -389,10 +389,10 @@ fn assess_teaching(
         // Maintain top1/top2 by magnitude. A new entry might displace
         // top1 (in which case the old top1 becomes top2), or land
         // between them (becoming top2), or be smaller than both.
-        if top1.map_or(true, |(_, m)| magnitude > m) {
+        if top1.is_none_or(|(_, m)| magnitude > m) {
             top2 = top1;
             top1 = Some((td.term, magnitude));
-        } else if top2.map_or(true, |(_, m)| magnitude > m) {
+        } else if top2.is_none_or(|(_, m)| magnitude > m) {
             top2 = Some((td.term, magnitude));
         }
     }

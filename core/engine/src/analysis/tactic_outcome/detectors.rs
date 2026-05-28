@@ -774,7 +774,7 @@ fn detect_deflection(
             continue;
         };
         let move1_not_winning =
-            prev_capture.map_or(true, |c| king_value(c.kind()) < king_value(moved1));
+            prev_capture.is_none_or(|c| king_value(c.kind()) < king_value(moved1));
         if !move1_not_winning {
             continue;
         }

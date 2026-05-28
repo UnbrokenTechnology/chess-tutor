@@ -382,6 +382,6 @@ fn guarantee_filter_keeps_target_when_opponent_is_in_stalemate() {
         },
         attackers: Vec::new(),
     };
-    let kept = filter_guaranteed_targets(&pos, &[synthetic.clone()], Color::White);
+    let kept = filter_guaranteed_targets(&pos, std::slice::from_ref(&synthetic), Color::White);
     assert_eq!(kept.len(), 1, "stalemate branch must keep all targets");
 }
