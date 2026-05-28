@@ -2,7 +2,7 @@
 
 Forward-looking UX context. The product surface is teaching feedback, not the engine. See [`HANDOFF.md`](HANDOFF.md) for the index, [`CLAUDE.md`](CLAUDE.md) for the mission and ground rules, and [`HANDOFF-perf.md`](HANDOFF-perf.md) for engine perf state (read only if perf becomes relevant to a UX task).
 
-> ⏸️ **This work is PARKED behind [`ROADMAP.md`](ROADMAP.md) — resume after W4.** Everything described below is the in-progress teaching layer as of 2026-05-25, merged into the working branch so it doesn't bit-rot, but **not actively iterated on** until the parity → refactor → lichess-port detour completes. It is, in fact, *why* the roadmap exists: this layer can only teach from static positional eval, so it can't honestly say "you missed a tactic" or "you had a forced mate" — that needs PV-based tactic detection (the lichess port, W3), which first needs a correct (W1 ✅) and clean (W2) engine. When you return here post-W4, the new capability to lean on is the tactic library producing structured `TacticHit`s the coaching/retrospective surfaces can name. **Do not start new UX features here mid-roadmap** — the refactor (W2) will move much of this code, and the tactic port (W3) changes what the surfaces can claim.
+> ▶️ **This is now the ACTIVE work (unparked 2026-05-27).** The parity → refactor → lichess-tactic-port detour that parked this layer is **complete**: the engine is SF11-faithful, the code is refactored, and the full lichess tactic library is ported and engine-available. The capability to lean on now: `compute_tactic_outcome` produces structured `TacticHit`s (named geometric + mate patterns, plus a sacrifice flag) the coaching/retrospective surfaces can name; there's also `find_overloaded` (pre-move scan) and the trapped-piece overlay engine side. See [`HANDOFF.md`](HANDOFF.md) "Engine-available tactic surface" for the full inventory and the UI-wiring TODOs. Everything described below was merged from `main` so it didn't bit-rot while parked (state as of 2026-05-25) — **re-validate each surface against the current tree as you resume**, since the refactor moved code and the tactic library changed what the surfaces can honestly claim.
 
 ## Current state: learning-mode workflows (2026-05-25)
 
@@ -213,7 +213,7 @@ Three explicit anti-patterns to write into `compute_tactic_outcome`:
 
 ## Backlog: future teaching surfaces (post-W4)
 
-Confirmed-but-deferred teaching features surfaced in discussion (2026-05-27). None are in the active W4-impl waves; recorded here so they survive the deletion of `ROADMAP.md`. Roughly ordered by readiness, not priority.
+Confirmed-but-deferred teaching features surfaced in discussion (2026-05-27). None were in the W4-impl engine waves (now complete); this is their durable home. Roughly ordered by readiness, not priority.
 
 1. **`win_chances` adoption (near-term).** Port lichess/lila's cp→win-probability sigmoid (`win% = 2/(1+e^(k·cp)) − 1`, `k = −0.00368208`, lila PR #11148 — an empirically *fitted* constant, a numerical fact). Primary use the user endorsed: **a threshold to gate which retrospective cards show**, and to express blunder / missed-tactic thresholds in win-probability lost rather than raw cp (so the bar means the same thing at equality and at +1500). Folds into W4-impl wave 3 (it's also the lever for the one-ply-guarantee misfire fix). **Gotcha:** our internal cp scale is PawnEG ≈ 213, not the conventional pawn = 100 the constant assumes — normalize to pawn = 100 before applying, and sanity-check / consider refitting `k` against our SF11-classical eval (lila fit it on NNUE evals). See memory `project_win_chances_adoption`.
 
@@ -280,6 +280,10 @@ POV-flip: `Session::user_color()` returns `!engine_side` when engine plays one c
 Engine cost: one full `Evaluator` priming per frame (initialize × 2 + pieces::evaluate × 2) plus a 64-square `attackers_to` walk for the heatmap. Tens of µs in release. Skipped entirely when `active_overlays.is_empty()` — no overhead when off.
 
 What an overlay needs to add later (per signal): a bitboard on `OverlayData`, a new `OverlayKind` variant + label/description, a `match` arm in `overlays_view::push_overlay_annotations`, and (if a new colour is needed) an `AnnotationKind` variant + entry in `desktop/src/draw/board.rs::annotation_square_colors`.
+
+#### Trapped-piece overlay — flagship, engine side DONE, UI TODO
+
+The standout teaching overlay (memory `project_trapped_piece_visual_goal`): a 1200 can't *see* when a piece — especially a deep enemy queen — has run out of safe squares. **Engine side landed (W4-impl wave 1):** `OverlayData.{white,black}_trapped` (bitboards of trapped pieces) and `analysis::trapped_cages(pos, colour) -> Vec<(Square, Bitboard)>` (per trapped piece, the "cage" = its legal destinations, *all* of which are unsafe — that's the definition). `compute_overlays` already null-move-flips the turn (user-approved) so a trapped *enemy* piece shows on *your* move (skipped when the side to move is in check). **UI TODO** (the flagship deliverable): `OverlayKind::TrappedPieces` + an `AnnotationKind` for the cage (reuse `BadPiece` tint for the piece, a new muted-red for the dead escape squares), a `match` arm in `push_overlay_annotations`, and optionally an `Arrow { Attacker }` from the covering attacker(s). The student watches the box close around the queen. The per-escape-square bad/safe classification *is* the surfaceable intermediate data — that was the design question, and the answer is yes.
 
 ### Data flow at a glance
 
