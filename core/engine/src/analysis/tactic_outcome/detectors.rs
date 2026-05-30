@@ -108,6 +108,13 @@ pub(crate) fn detect_line_tactic(
         // A forced mate with no geometric pattern: surface it as a standalone
         // `Checkmate` hit carrying the named geometry.
         .or_else(|| mate.map(|m| super::mate::synthesize_checkmate_hit(pre, pv, mover, base_ply, m)))
+        // Stamp the move occupying the hit's ply within this line — `pv[0]`
+        // for a single-move pattern, the resolving move for a multi-ply one.
+        // Escape detection and CLI move-naming read this.
+        .map(|mut hit| {
+            hit.key_move = hit.pv_ply.checked_sub(base_ply).and_then(|i| pv.get(i)).copied();
+            hit
+        })
 }
 
 // =========================================================================
@@ -173,6 +180,7 @@ fn detect_fork(
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     })
 }
 
@@ -238,6 +246,7 @@ fn detect_hanging_capture(
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     })
 }
 
@@ -305,6 +314,7 @@ fn detect_removing_defender(
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     })
 }
 
@@ -344,6 +354,7 @@ fn detect_trapped_piece(
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     })
 }
 
@@ -377,6 +388,7 @@ fn detect_double_check(
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     })
 }
 
@@ -408,6 +420,7 @@ fn detect_discovered_check(
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     })
 }
 
@@ -467,6 +480,7 @@ fn detect_skewer(
                     confidence: confidence_for(material_gain),
                     sacrifice: false,
                     mate_pattern: None,
+                    key_move: None,
                 });
             }
         }
@@ -534,6 +548,7 @@ fn detect_discovered_attack(
                     confidence: confidence_for(material_gain),
                     sacrifice: false,
                     mate_pattern: None,
+                    key_move: None,
                 });
             }
         }
@@ -619,6 +634,7 @@ fn pin_hit(
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     }
 }
 
@@ -674,6 +690,7 @@ fn wave4_hit(
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     }
 }
 
@@ -1094,6 +1111,7 @@ fn detect_attacking_f2_f7(
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     })
 }
 
@@ -1136,5 +1154,6 @@ fn under_promo_hit(mv: Move, pv_ply: usize, material_gain: Option<i32>) -> Tacti
         confidence: confidence_for(material_gain),
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     }
 }

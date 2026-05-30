@@ -15,6 +15,7 @@
 //! tag becomes `[search d=N]` so the agent doesn't confuse a deep
 //! search figure with a one-ply static one.
 
+use chess_tutor_engine::analysis::{find_latent_threats, LatentThreat, TriggerShape};
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::openings;
@@ -22,6 +23,7 @@ use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, PieceType, Value};
 use serde::Serialize;
 
+use crate::piece_fmt::piece_label;
 use crate::units::{headline_triple, to_white_pov};
 
 /// Source of the score reported in the summary header. Distinguishes a
@@ -48,6 +50,33 @@ pub struct PositionSummary {
     pub opening: Option<OpeningBlock>,
     pub legal_move_count: usize,
     pub terminal: Option<&'static str>,
+    /// Standing (latent) threats the opponent has pre-loaded against the
+    /// side to move. This is the header's load-bearing safety net: a
+    /// positive→negative eval swing means "you let the opponent do
+    /// something devastating", and these are the static fingerprints of
+    /// exactly that — a discovered attack / pin / skewer / loose
+    /// defender the opponent can cash in if you play a move that doesn't
+    /// address it. Check this BEFORE concluding "I have a strong move":
+    /// the geometry that looks like *your* opportunity is often *their*
+    /// threat aimed the other way down the same line. Empty when none.
+    pub danger: Vec<DangerLine>,
+}
+
+/// One standing-threat line for the summary header's `danger:` block,
+/// resolved to printable labels so both the text and JSON surfaces can
+/// use it without touching raw engine square indices.
+#[derive(Debug, Clone, Serialize)]
+pub struct DangerLine {
+    /// Pattern name (`DiscoveredAttack` / `Pin` / `Skewer` /
+    /// `RemovingDefender`).
+    pub pattern: String,
+    /// The piece the threat bears on, e.g. `"Re1"` — *your* piece, the
+    /// one about to be won.
+    pub target: String,
+    /// Classical-points estimate of what the opponent wins (P=1 … Q=9).
+    pub min_gain: i32,
+    /// Plain-English description of the opponent move that fires it.
+    pub trigger: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +142,21 @@ pub fn build(pos: &Position, source: ScoreSource, external_score: Option<Value>)
         _ => None,
     };
 
+    // Standing latent threats aimed at the side to move. Surfaced in the
+    // header of every command so an agent can't reason about the
+    // position without first seeing what the opponent has loaded against
+    // it. `find_latent_threats(pos, side)` returns the threats whose
+    // *target* belongs to `side`, i.e. the threats `side` must defuse.
+    // Skipped at terminal nodes (no move to make them matter).
+    let danger: Vec<DangerLine> = if terminal.is_some() {
+        Vec::new()
+    } else {
+        find_latent_threats(pos, stm)
+            .into_iter()
+            .map(|t| build_danger_line(pos, &t))
+            .collect()
+    };
+
     // Score: either the explicit override (search) or the static eval.
     let stm_value = match external_score {
         Some(v) => v,
@@ -154,6 +198,44 @@ pub fn build(pos: &Position, source: ScoreSource, external_score: Option<Value>)
         opening,
         legal_move_count,
         terminal,
+        danger,
+    }
+}
+
+/// Resolve a [`LatentThreat`] (engine squares) into a printable
+/// [`DangerLine`]. The trigger text names the concrete opponent move
+/// that fires the threat, mirroring the phrasing the `tactics --latent`
+/// surface uses so the two never read inconsistently.
+fn build_danger_line(pos: &Position, t: &LatentThreat) -> DangerLine {
+    let target = pos
+        .piece_on(t.target)
+        .map(|p| piece_label(p, t.target))
+        .unwrap_or_else(|| t.target.to_algebraic());
+    let vehicle = t
+        .vehicle
+        .and_then(|v| pos.piece_on(v).map(|p| piece_label(p, v)));
+    let trigger = match t.trigger_shape {
+        TriggerShape::VehicleMoves => format!(
+            "any move by {} unmasks the attack",
+            vehicle.unwrap_or_else(|| "the blocking piece".to_string()),
+        ),
+        TriggerShape::VehicleConstrained => format!(
+            "{} can't move without exposing it",
+            vehicle.unwrap_or_else(|| "the blocking piece".to_string()),
+        ),
+        TriggerShape::DefenderRemoved { defender } => {
+            let d = pos
+                .piece_on(defender)
+                .map(|p| piece_label(p, defender))
+                .unwrap_or_else(|| defender.to_algebraic());
+            format!("capturing the defender {d} leaves it unguarded")
+        }
+    };
+    DangerLine {
+        pattern: format!("{:?}", t.pattern),
+        target,
+        min_gain: t.min_gain,
+        trigger,
     }
 }
 
@@ -199,6 +281,34 @@ pub fn render_text(summary: &PositionSummary) -> String {
         source_label,
     )
     .unwrap();
+
+    // Danger block sits directly under the score because the two are
+    // causally linked: if the agent plays a move that ignores these
+    // standing threats, the score it just read is the score it is about
+    // to lose. Silent when there are none, so a clean header still reads
+    // clean.
+    if !summary.danger.is_empty() {
+        writeln!(
+            out,
+            "danger:   !! {} standing threat(s) against {} (side to move) — a move that ignores these will likely swing the eval against you:",
+            summary.danger.len(),
+            summary.to_move,
+        )
+        .unwrap();
+        for d in &summary.danger {
+            writeln!(
+                out,
+                "            - opponent's {} on your {} (~{} pts) — fires when {}",
+                d.pattern, d.target, d.min_gain, d.trigger,
+            )
+            .unwrap();
+        }
+        writeln!(
+            out,
+            "          (static scan; confirm with `chess-tutor tactics --latent` or `chess-tutor explain`)",
+        )
+        .unwrap();
+    }
 
     match &summary.opening {
         Some(op) => writeln!(out, "opening:  {}  {}", op.eco, op.name).unwrap(),

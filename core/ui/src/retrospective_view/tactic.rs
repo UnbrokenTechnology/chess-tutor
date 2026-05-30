@@ -18,10 +18,12 @@
 //!   move arrow.
 
 use chess_tutor_engine::analysis::{
-    compute_tactic_outcome, MatePattern, MoveAnalysis, PriorMove, TacticHit, TacticPattern,
+    compute_tactic_outcome, EscapeKind, MatePattern, MoveAnalysis, PriorMove, TacticEscape,
+    TacticHit, TacticPattern, TacticsOutcome,
 };
 use chess_tutor_engine::position::Position;
-use chess_tutor_engine::types::Color;
+use chess_tutor_engine::san;
+use chess_tutor_engine::types::{Color, Move};
 
 use crate::view::{
     AnnotationKind, BoardAnnotation, RetrospectiveCategory, RetrospectiveItem, Sentiment,
@@ -48,41 +50,96 @@ pub(super) fn build_tactic_items(
     reveal_best_moves: bool,
 ) -> Vec<RetrospectiveItem> {
     let outcome = compute_tactic_outcome(best, user, pre_move_pos, root_stm, prior_move);
+    let TacticsOutcome {
+        user_played_tactic,
+        user_missed_tactic,
+        user_walked_into,
+        user_played_escape,
+        user_missed_escape,
+        user_walked_into_escape,
+    } = outcome;
     let mut items = Vec::new();
-    if let Some(hit) = outcome.user_played_tactic {
-        items.push(played_item(&hit));
+    // Played / missed escapes are scored along the user's / best line;
+    // the walked-into escape is the user's own out, found along the user
+    // line too (the opponent's tactic sits on the reply).
+    if let Some(hit) = user_played_tactic {
+        let esc = user_played_escape.map(|e| escape_text(pre_move_pos, &user.pv, &hit, &e));
+        items.push(played_item(&hit, esc.as_ref()));
     }
-    if let Some(hit) = outcome.user_missed_tactic {
-        items.push(missed_item(&hit, reveal_best_moves));
+    if let Some(hit) = user_missed_tactic {
+        let esc = user_missed_escape.map(|e| escape_text(pre_move_pos, &best.pv, &hit, &e));
+        items.push(missed_item(&hit, esc.as_ref(), reveal_best_moves));
     }
-    if let Some(hit) = outcome.user_walked_into {
-        items.push(walked_into_item(&hit));
+    if let Some(hit) = user_walked_into {
+        let esc = user_walked_into_escape.map(|e| escape_text(pre_move_pos, &user.pv, &hit, &e));
+        items.push(walked_into_item(&hit, esc.as_ref()));
     }
     items
+}
+
+/// A tactic card's escape annotation, rendered for display: the refuting
+/// move in SAN plus its kind. For played/missed tactics this is the
+/// *opponent's* out; for walked-into it's the *user's* own escape.
+struct EscapeText {
+    san: String,
+    kind: EscapeKind,
+}
+
+/// Render an [`TacticEscape`] for `hit`, formatting the refutation in SAN
+/// from the position it is played in (the pre-move position advanced
+/// through the hit's key move).
+fn escape_text(pre: &Position, full_pv: &[Move], hit: &TacticHit, esc: &TacticEscape) -> EscapeText {
+    let mut board = pre.clone();
+    for &mv in full_pv.iter().take(hit.pv_ply) {
+        board.do_move(mv);
+    }
+    if let Some(km) = hit.key_move {
+        board.do_move(km);
+    }
+    EscapeText {
+        san: san::format(&board, esc.refutation),
+        kind: esc.kind,
+    }
+}
+
+/// Perspective-neutral phrase for why a refutation works, reused across
+/// all three card framings.
+fn escape_kind_phrase(kind: EscapeKind) -> &'static str {
+    match kind {
+        EscapeKind::ForcingCheck => "a forcing check",
+        EscapeKind::Zwischenzug => "an in-between capture",
+        EscapeKind::DefendsBothTargets => "a single move defending both threats",
+        EscapeKind::AdequateRetreat => "moving the attacked piece to safety",
+        EscapeKind::CounterAttack => "a counter-threat",
+    }
 }
 
 // ------------------------------------------------------------------------
 // Card builders
 // ------------------------------------------------------------------------
 
-fn played_item(hit: &TacticHit) -> RetrospectiveItem {
+fn played_item(hit: &TacticHit, escape: Option<&EscapeText>) -> RetrospectiveItem {
     RetrospectiveItem {
         category: RetrospectiveCategory::Tactic,
         heading: played_heading(hit),
         summary: played_summary(hit),
-        detail: played_detail(hit),
+        detail: played_detail(hit, escape),
         score_delta_pawns: hit.material_gain.map(|cp| cp as f32 / 100.0),
         sentiment: Sentiment::Positive,
         annotations: tactic_annotations(hit),
     }
 }
 
-fn missed_item(hit: &TacticHit, reveal_best_moves: bool) -> RetrospectiveItem {
+fn missed_item(
+    hit: &TacticHit,
+    escape: Option<&EscapeText>,
+    reveal_best_moves: bool,
+) -> RetrospectiveItem {
     RetrospectiveItem {
         category: RetrospectiveCategory::Tactic,
         heading: missed_heading(hit),
         summary: missed_summary(hit),
-        detail: missed_detail(hit, reveal_best_moves),
+        detail: missed_detail(hit, escape, reveal_best_moves),
         // Show the gap as a negative number — the student missed *that*
         // much material.
         score_delta_pawns: hit.material_gain.map(|cp| -(cp as f32) / 100.0),
@@ -97,7 +154,7 @@ fn missed_item(hit: &TacticHit, reveal_best_moves: bool) -> RetrospectiveItem {
     }
 }
 
-fn walked_into_item(hit: &TacticHit) -> RetrospectiveItem {
+fn walked_into_item(hit: &TacticHit, escape: Option<&EscapeText>) -> RetrospectiveItem {
     // "Walked into" framing: the opponent now has the tactic on the
     // best reply. Pattern names the lesson; targets are *our* pieces
     // (from the opponent's POV) that the tactic hits. Always surface
@@ -109,7 +166,7 @@ fn walked_into_item(hit: &TacticHit) -> RetrospectiveItem {
         category: RetrospectiveCategory::Tactic,
         heading: walked_into_heading(hit),
         summary: walked_into_summary(hit),
-        detail: walked_into_detail(hit),
+        detail: walked_into_detail(hit, escape),
         score_delta_pawns: hit.material_gain.map(|cp| -(cp as f32) / 100.0),
         sentiment: Sentiment::Negative,
         annotations: tactic_annotations(hit),
@@ -249,7 +306,7 @@ fn walked_into_summary(hit: &TacticHit) -> String {
 // Details — expanded prose shown when the card is selected
 // ------------------------------------------------------------------------
 
-fn played_detail(hit: &TacticHit) -> String {
+fn played_detail(hit: &TacticHit, escape: Option<&EscapeText>) -> String {
     let lesson = pattern_lesson(hit.pattern);
     let mate = mate_detail(hit);
     let sac = if hit.sacrifice && hit.pattern != TacticPattern::Sacrifice {
@@ -259,10 +316,19 @@ fn played_detail(hit: &TacticHit) -> String {
     } else {
         ""
     };
-    format!("{lesson}{mate}{sac}")
+    let escape_note = match escape {
+        Some(e) => format!(
+            " Watch out, though — it isn't forced: the opponent can wriggle \
+             out with {} ({}).",
+            e.san,
+            escape_kind_phrase(e.kind),
+        ),
+        None => String::new(),
+    };
+    format!("{lesson}{mate}{sac}{escape_note}")
 }
 
-fn missed_detail(hit: &TacticHit, reveal_best_moves: bool) -> String {
+fn missed_detail(hit: &TacticHit, escape: Option<&EscapeText>, reveal_best_moves: bool) -> String {
     let lesson = pattern_lesson(hit.pattern);
     let mate = mate_detail(hit);
     let location = if reveal_best_moves {
@@ -272,16 +338,34 @@ fn missed_detail(hit: &TacticHit, reveal_best_moves: bool) -> String {
         " Look for this pattern in your own moves next time — the engine \
          saw one here."
     };
-    format!("{lesson}{mate}{location}")
+    let escape_note = match escape {
+        Some(e) => format!(
+            " That said, it wasn't a clean win: the opponent could have met \
+             it with {} ({}).",
+            e.san,
+            escape_kind_phrase(e.kind),
+        ),
+        None => String::new(),
+    };
+    format!("{lesson}{mate}{location}{escape_note}")
 }
 
-fn walked_into_detail(hit: &TacticHit) -> String {
+fn walked_into_detail(hit: &TacticHit, escape: Option<&EscapeText>) -> String {
     let lesson = pattern_lesson(hit.pattern);
     let mate = mate_detail(hit);
+    let escape_note = match escape {
+        Some(e) => format!(
+            " The good news: you're not forced to lose material — {} ({}) \
+             gets out of it.",
+            e.san,
+            escape_kind_phrase(e.kind),
+        ),
+        None => String::new(),
+    };
     format!(
         "After your move, the opponent's best response lands this pattern. \
          {lesson}{mate} They may decide not to play it, but if they do, \
-         this is the cost."
+         this is the cost.{escape_note}"
     )
 }
 
@@ -465,12 +549,13 @@ mod tests {
             confidence: Confidence::High,
             sacrifice: false,
             mate_pattern: None,
+            key_move: None,
         }
     }
 
     #[test]
     fn played_card_heading_uses_phrase_form() {
-        let card = played_item(&fork_hit());
+        let card = played_item(&fork_hit(), None);
         assert_eq!(card.heading, "You played a fork");
         assert_eq!(card.sentiment, Sentiment::Positive);
         assert_eq!(card.score_delta_pawns, Some(3.0));
@@ -478,7 +563,7 @@ mod tests {
 
     #[test]
     fn missed_card_inverts_score_and_drops_annotations_when_reveal_off() {
-        let card = missed_item(&fork_hit(), /*reveal_best_moves=*/ false);
+        let card = missed_item(&fork_hit(), None, /*reveal_best_moves=*/ false);
         assert_eq!(card.heading, "You missed a fork");
         assert_eq!(card.sentiment, Sentiment::Negative);
         assert_eq!(card.score_delta_pawns, Some(-3.0));
@@ -488,7 +573,7 @@ mod tests {
 
     #[test]
     fn missed_card_keeps_annotations_when_reveal_on() {
-        let card = missed_item(&fork_hit(), /*reveal_best_moves=*/ true);
+        let card = missed_item(&fork_hit(), None, /*reveal_best_moves=*/ true);
         assert!(!card.annotations.is_empty());
     }
 
@@ -496,11 +581,11 @@ mod tests {
     fn mate_suffix_only_for_default_surfaced_patterns() {
         let mut hit = fork_hit();
         hit.mate_pattern = Some(MatePattern::BackRank);
-        let card = played_item(&hit);
+        let card = played_item(&hit, None);
         assert!(card.heading.ends_with("back-rank mate"));
 
         hit.mate_pattern = Some(MatePattern::Anastasia);
-        let card = played_item(&hit);
+        let card = played_item(&hit, None);
         // Anastasia is engine-known but not surfaced_by_default; no
         // heading suffix.
         assert_eq!(card.heading, "You played a fork");
@@ -517,17 +602,46 @@ mod tests {
             confidence: Confidence::High,
             sacrifice: false,
             mate_pattern: Some(MatePattern::BackRank),
+            key_move: None,
         };
-        let card = played_item(&hit);
+        let card = played_item(&hit, None);
         assert_eq!(card.heading, "You played checkmate — back-rank mate");
         assert_eq!(card.summary, "forced mate");
     }
 
     #[test]
     fn walked_into_card_is_negative_with_warning_framing() {
-        let card = walked_into_item(&fork_hit());
+        let card = walked_into_item(&fork_hit(), None);
         assert_eq!(card.sentiment, Sentiment::Negative);
         assert!(card.heading.starts_with("If they reply"));
+    }
+
+    #[test]
+    fn played_card_appends_opponent_escape_note() {
+        let esc = EscapeText {
+            san: "Qxe5".to_string(),
+            kind: EscapeKind::Zwischenzug,
+        };
+        let card = played_item(&fork_hit(), Some(&esc));
+        assert!(card.detail.contains("Qxe5"), "{}", card.detail);
+        assert!(card.detail.contains("wriggle out"), "{}", card.detail);
+        assert!(card.detail.contains("in-between capture"), "{}", card.detail);
+    }
+
+    #[test]
+    fn walked_into_card_frames_escape_as_good_news() {
+        let esc = EscapeText {
+            san: "Nf6".to_string(),
+            kind: EscapeKind::AdequateRetreat,
+        };
+        let card = walked_into_item(&fork_hit(), Some(&esc));
+        assert!(card.detail.contains("Nf6"), "{}", card.detail);
+        assert!(card.detail.contains("good news"), "{}", card.detail);
+        assert!(
+            card.detail.contains("moving the attacked piece to safety"),
+            "{}",
+            card.detail
+        );
     }
 
     #[test]
@@ -554,6 +668,7 @@ mod tests {
             confidence: Confidence::High,
             sacrifice: false,
             mate_pattern: None,
+            key_move: None,
         };
         let anns = tactic_annotations(&hit);
         // No degenerate arrow, but both highlights still emit.

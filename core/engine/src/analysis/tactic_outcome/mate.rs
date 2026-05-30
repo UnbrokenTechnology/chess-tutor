@@ -118,6 +118,7 @@ pub(super) fn synthesize_checkmate_hit(
         confidence: Confidence::High,
         sacrifice: super::is_sacrifice(pre, pv, mover),
         mate_pattern: Some(info.pattern),
+        key_move: None,
     }
 }
 

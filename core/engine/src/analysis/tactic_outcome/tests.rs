@@ -668,6 +668,7 @@ fn static_scan_prefers_mate_over_material_fork() {
         confidence: Confidence::High,
         sacrifice: false,
         mate_pattern: Some(MatePattern::BackRank),
+        key_move: None,
     };
     let fork = TacticHit {
         pattern: TacticPattern::Fork,
@@ -678,6 +679,7 @@ fn static_scan_prefers_mate_over_material_fork() {
         confidence: Confidence::High,
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     };
     assert!(super::hit_outranks(&mate, &fork));
     assert!(!super::hit_outranks(&fork, &mate));

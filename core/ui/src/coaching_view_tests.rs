@@ -135,6 +135,7 @@ fn coaching_tactic_card_names_pattern_without_square_annotations() {
         confidence: Confidence::High,
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     };
     let view = build_coaching_view(&pos, Color::White, Some(&hit));
     let card = view
@@ -166,6 +167,7 @@ fn coaching_tactic_card_suppressed_when_medium_confidence() {
         confidence: Confidence::Medium,
         sacrifice: false,
         mate_pattern: None,
+        key_move: None,
     };
     let view = build_coaching_view(&pos, Color::White, Some(&hit));
     assert!(
@@ -216,6 +218,7 @@ fn coaching_mate_hint_uses_named_heading_for_back_rank() {
         confidence: Confidence::High,
         sacrifice: false,
         mate_pattern: Some(MatePattern::BackRank),
+        key_move: None,
     };
     let view = build_coaching_view(&pos, Color::White, Some(&hit));
     assert!(

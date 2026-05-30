@@ -867,9 +867,34 @@ fn main() -> Result<()> {
                         gain,
                         hit.confidence,
                     );
+                    // When the tactic fires on the first PV move, check for a
+                    // forcing escape so the line doesn't read as a clean win
+                    // when the opponent has a tricky out.
+                    if hit.pv_ply == 0 {
+                        use chess_tutor_engine::analysis::find_tactic_escape;
+                        if let Some(esc) = find_tactic_escape(&pos, &hit, mover) {
+                            let mut post = pos.clone();
+                            if let Some(km) = hit.key_move {
+                                post.do_move(km);
+                            }
+                            println!(
+                                "escape:   opponent can break it with {} — the tactic doesn't fully cash (run `tactics` for detail)",
+                                san::format(&post, esc.refutation),
+                            );
+                        }
+                    }
                 } else {
                     println!();
-                    println!("tactic:   (no pattern detected in top PV)");
+                    // This scans only the engine's chosen line. It does
+                    // NOT mean the position is tactically quiet: the
+                    // opponent may have a standing threat against the
+                    // side to move (surfaced in the `danger:` header
+                    // above and by `tactics --latent`). Word it so an
+                    // agent doesn't read "no pattern" as "all clear".
+                    println!(
+                        "tactic:   (no pattern in the engine's top PV — this does NOT clear the position; \
+                         see the `danger:` header + `chess-tutor tactics --latent` for the opponent's standing threats)"
+                    );
                 }
             }
         }

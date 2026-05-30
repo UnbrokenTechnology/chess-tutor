@@ -126,6 +126,8 @@ The `chess-tutor` CLI is **designed for agent consumption**. Before reasoning ab
 
 All FEN-taking commands print a self-describing summary header (POV, score units, opening, legal-move count) and accept `--json` for machine-parseable output. Score POV defaults to white-POV (matches chess.com); pass `--stm` for engine-side-to-move. Score scale is pawns (chess.com-comparable) alongside engine-cp (PawnEG=213 scale).
 
+The header also carries a **`danger:` block** when the side to move faces a *standing (latent) threat* — a discovered attack, pin, skewer, or loose defender the opponent can cash if you play a move that doesn't address it. This is the load-bearing line for the most common agent failure mode here: analysing what *you* can do while missing what the *opponent* has loaded against you. **A positive→negative eval swing means you *allowed* one of these** — so read `danger:` before trusting any "I have a good move" conclusion.
+
 | Command | Use it when |
 |---|---|
 | `chess-tutor board [FEN]` | render a position as ANSI board |
@@ -137,13 +139,17 @@ All FEN-taking commands print a self-describing summary header (POV, score units
 | `chess-tutor forcing [FEN]` | every check / capture / promotion for both sides (opponent's options via null-move) |
 | `chess-tutor attacks [FEN]` | full (attacker, target) ledger, sorted by highest-value target first |
 | `chess-tutor alignments [FEN]` | pure geometric ray scan — every discovered-attack / pin / skewer candidate on the board |
-| `chess-tutor search [FEN]` | depth-N search with PV + score; `--annotate` adds a tactic-pattern summary line |
+| `chess-tutor tactics [FEN]` | named-pattern detector for both sides + overloaded-defender scan. The side-to-move's best tactic is **escape-checked**: a real pin/fork with a forcing out shows an `escape:` line, so you won't trust a move that loses to a zwischenzug. `--latent` adds standing threats; `--check-followups` adds two-step forcing lines |
+| `chess-tutor explain [FEN]` | one-shot aggregator: summary + threats + tactics (latent + check-followups) + a depth-N search. "Give me everything on this position" — the right first call when you're unsure which surface you need |
+| `chess-tutor search [FEN]` | depth-N search with PV + score; `--annotate` adds a tactic-pattern summary line (plus an `escape:` line when the top-PV tactic has a forcing refutation) |
 
 **Rule of thumb — use the tool, don't reason by hand**: if you find yourself thinking *"the rook on e1 sees through the bishop to attack the queen"*, stop and run `chess-tutor square e5 <FEN>` or `chess-tutor alignments <FEN>` first. Trust the tool over mental reconstruction.
 
 **Rule of thumb — chess.com is accurate but opaque; we are transparent**: chess.com's eval bar uses NNUE Stockfish, which beats our classical SF11 port in head-to-head. When chess.com and our engine disagree on a position's evaluation, **default to "chess.com is right, why did we miss it"**, not "chess.com is wrong". The most common *apparent* disagreement is POV / scale confusion (chess.com is white-POV pawns; our raw engine `Value` is side-to-move engine-cp at PawnEG=213 — both surfaces are now labelled in the CLI, but earlier debugging sessions burned hours on this). Our engine isn't *more right* than chess.com — **it knows *why* it's right**, which is the whole product surface. The teaching layer's job is to extract chess-com-level conclusions *with explanations a 1200 player can learn from*; "more accurate than chess.com" is never the goal.
 
-Phase C/D/E commands coming: `tactics` (named-pattern detector), `explain` (one-shot aggregator), latent-threat scanner. See [`PLAN-cli.md`](PLAN-cli.md) for the full design.
+**Rule of thumb — a detected tactic with an escape is still real.** The `escape:` line on `tactics` / `search --annotate` names the opponent's *forcing out* (a check, an in-between capture, a both-defending move, a retreat, a counter-threat) — it does **not** void the pattern. "There's a pin, but they can break it with `…Bxh2+`" is the lesson, not "there's no pin." Likewise the `danger:` header names the opponent's standing resource against *you*. Read both before concluding a position is won or lost.
+
+Full design + roadmap: [`PLAN-cli.md`](PLAN-cli.md) (the command surface) and [`PLAN-tactic-escape.md`](PLAN-tactic-escape.md) (the escape-detection model). The named-pattern detector (`tactics`), the aggregator (`explain`), the latent-threat scanner (`--latent` / `danger:`), and escape detection have all landed.
 
 ## What we learned from the prior attempt (chess-tutor/)
 

@@ -192,6 +192,7 @@ fn pattern_rank(p: TacticPattern) -> u8 {
     }
 }
 
+use super::tactic_escape::{find_tactic_escape, TacticEscape};
 use super::MoveAnalysis;
 use crate::analysis::win_chances::win_chances;
 use crate::position::Position;
@@ -426,6 +427,11 @@ pub struct TacticHit {
     /// `pattern == TacticPattern::Checkmate` (the standalone unnamed-by-
     /// geometry case); otherwise `None` for a non-mating line.
     pub mate_pattern: Option<MatePattern>,
+    /// The move that delivers the pattern's key move within the analysed
+    /// line (`pv[pv_ply]`). `Some` for any hit produced by the detector
+    /// chain or the sacrifice synthesizer; lets callers name the move and
+    /// feeds escape detection ([`crate::analysis::find_tactic_escape`]).
+    pub key_move: Option<Move>,
 }
 
 /// The tactic story for one analysed move. Each slot is independent;
@@ -440,6 +446,19 @@ pub struct TacticsOutcome {
     /// A tactic the *opponent* gets to play on their best reply — i.e.
     /// the user walked into it.
     pub user_walked_into: Option<TacticHit>,
+    /// A clean defensive resource against [`Self::user_played_tactic`] —
+    /// the opponent's refuting reply. `Some` only when that slot is
+    /// `Some` and a forcing escape exists. The tactic is still real; this
+    /// records the out (e.g. "your pin, but they have …Qxe5").
+    pub user_played_escape: Option<TacticEscape>,
+    /// A clean defensive resource against [`Self::user_missed_tactic`] —
+    /// the out the opponent had, so "you missed a fork" can soften to
+    /// "…but it wasn't a clean win."
+    pub user_missed_escape: Option<TacticEscape>,
+    /// A clean defensive resource against [`Self::user_walked_into`] —
+    /// here the owner of the tactic is the *opponent*, so this is **the
+    /// user's** escape from it ("you walked into a fork, but you have …").
+    pub user_walked_into_escape: Option<TacticEscape>,
 }
 
 use crate::types::Square;
@@ -598,11 +617,43 @@ pub fn compute_tactic_outcome(
         _ => None,
     };
 
+    // Verify each detected tactic against the opponent's forcing
+    // resources (Phase 2 of PLAN-tactic-escape) — the same structural
+    // probe the `tactics` CLI surface uses. A real pin/fork the opponent
+    // can dodge gets its out recorded; the hit itself is never suppressed.
+    let user_played_escape = escape_for(pre_move_pos, &user_ma.pv, &user_played_tactic, root_stm);
+    let user_missed_escape = escape_for(pre_move_pos, &best_ma.pv, &user_missed_tactic, root_stm);
+    // For "walked into", the tactic's owner is the opponent, so the escape
+    // is the *user's* defensive resource — owner = !root_stm.
+    let user_walked_into_escape =
+        escape_for(pre_move_pos, &user_ma.pv, &user_walked_into, !root_stm);
+
     TacticsOutcome {
         user_played_tactic,
         user_missed_tactic,
         user_walked_into,
+        user_played_escape,
+        user_missed_escape,
+        user_walked_into_escape,
     }
+}
+
+/// Run [`find_tactic_escape`] for a detected hit from the board its key
+/// move is played from — the pre-move position advanced through
+/// `full_pv[..pv_ply]`. `owner` is the side that owns the tactic.
+/// `None` when the slot is empty or no escape exists.
+fn escape_for(
+    pre: &Position,
+    full_pv: &[Move],
+    slot: &Option<TacticHit>,
+    owner: Color,
+) -> Option<TacticEscape> {
+    let hit = slot.as_ref()?;
+    let mut board = pre.clone();
+    for &mv in full_pv.iter().take(hit.pv_ply) {
+        board.do_move(mv);
+    }
+    find_tactic_escape(&board, hit, owner)
 }
 
 /// Build a standalone [`TacticPattern::Sacrifice`] hit for a line with no
@@ -622,6 +673,7 @@ fn synthesize_sacrifice_hit(pre: &Position, pv: &[Move], mover: Color) -> Tactic
         confidence: confidence_for(material_gain),
         sacrifice: true,
         mate_pattern: None,
+        key_move: Some(pv[0]),
     }
 }
 

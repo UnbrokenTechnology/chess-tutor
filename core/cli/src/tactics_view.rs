@@ -29,8 +29,9 @@
 
 use chess_tutor_engine::analysis::{
     find_best_tactic_in_position, find_check_followups, find_latent_threats, find_overloaded,
-    CheckFollowup, Confidence, LatentThreat, MatePattern, OverloadedPiece, PriorMove,
-    ReplyFollowup, TacticHit, TacticPattern, TriggerShape,
+    find_tactic_escape, CheckFollowup, Confidence, EscapeKind, LatentThreat, MatePattern,
+    OverloadedPiece, PriorMove, ReplyFollowup, TacticEscape, TacticHit, TacticPattern,
+    TriggerShape,
 };
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
@@ -182,6 +183,26 @@ pub struct TacticHitView {
     pub material_gain: Option<i32>,
     pub confidence: String,
     pub pv_ply: usize,
+    /// A clean defensive resource against this tactic, when one exists.
+    /// Populated only for the side-to-move's best tactic — the surface
+    /// with the pre-move position + owner needed to verify it. A pin or
+    /// fork the opponent can wriggle out of with a forcing move is still
+    /// a real tactic; this annotates the out, it doesn't suppress the hit.
+    pub escape: Option<EscapeView>,
+}
+
+/// A refutation of a [`TacticHitView`] — the opponent's first reply that
+/// prevents the tactic's expected capture (see
+/// [`chess_tutor_engine::analysis::find_tactic_escape`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct EscapeView {
+    /// The refuting reply in SAN (`Qxe5`).
+    pub refutation_san: String,
+    pub refutation_uci: String,
+    /// Why it works, in plain English ("forcing check", …).
+    pub kind: String,
+    /// The piece/square the tactic expected to win but no longer can.
+    pub expected_target: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -385,7 +406,14 @@ fn build_side(
 
     let (best_tactic, skipped) = if is_stm {
         let hit = find_best_tactic_in_position(pos, side, prior_move);
-        (hit.map(|h| build_tactic_hit_view(pos, &h)), None)
+        let view = hit.map(|h| {
+            let mut v = build_tactic_hit_view(pos, &h);
+            // Verify the tactic against the opponent's forcing resources —
+            // a real pin/fork the opponent can dodge gets its out named.
+            v.escape = find_tactic_escape(pos, &h, side).map(|e| build_escape_view(pos, &h, &e));
+            v
+        });
+        (view, None)
     } else if stm_in_check {
         // The side-to-move is in check; a null-move pivot to ask "what
         // could the opponent play with a free tempo" is unsound (you
@@ -444,6 +472,38 @@ fn build_tactic_hit_view(pos: &Position, hit: &TacticHit) -> TacticHitView {
         material_gain: hit.material_gain,
         confidence: confidence_name(hit.confidence).to_string(),
         pv_ply: hit.pv_ply,
+        escape: None,
+    }
+}
+
+/// Map an [`EscapeKind`] to a plain-English phrase for the report.
+fn escape_kind_str(k: EscapeKind) -> &'static str {
+    match k {
+        EscapeKind::ForcingCheck => "forcing check",
+        EscapeKind::Zwischenzug => "in-between capture",
+        EscapeKind::DefendsBothTargets => "defends both targets",
+        EscapeKind::AdequateRetreat => "the piece escapes to safety",
+        EscapeKind::CounterAttack => "counter-attack",
+    }
+}
+
+/// Build the [`EscapeView`] for `esc` against `hit`. SAN for the
+/// refutation needs the position *after* the tactic's key move, which is
+/// where the opponent replies from.
+fn build_escape_view(pos: &Position, hit: &TacticHit, esc: &TacticEscape) -> EscapeView {
+    let mut post = pos.clone();
+    if let Some(km) = hit.key_move {
+        post.do_move(km);
+    }
+    let target = post
+        .piece_on(esc.expected_target)
+        .map(|p| piece_label(p, esc.expected_target))
+        .unwrap_or_else(|| esc.expected_target.to_algebraic());
+    EscapeView {
+        refutation_san: san::format(&post, esc.refutation),
+        refutation_uci: crate::uci::format(esc.refutation),
+        kind: escape_kind_str(esc.kind).to_string(),
+        expected_target: target,
     }
 }
 
@@ -663,6 +723,14 @@ fn render_hit(out: &mut String, hit: &TacticHitView) {
     };
     writeln!(out, "    gain:       {gain}").unwrap();
     writeln!(out, "    confidence: {}", hit.confidence).unwrap();
+    if let Some(esc) = &hit.escape {
+        writeln!(
+            out,
+            "    escape:     opponent breaks it with {} ({}) — expected to win {}",
+            esc.refutation_san, esc.kind, esc.expected_target,
+        )
+        .unwrap();
+    }
 }
 
 #[cfg(test)]

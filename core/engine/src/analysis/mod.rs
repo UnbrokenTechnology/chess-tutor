@@ -115,6 +115,7 @@ pub mod pawn_structure_outcome;
 pub mod pieces_positional_outcome;
 pub mod space_outcome;
 pub mod surprise;
+pub mod tactic_escape;
 pub mod tactic_outcome;
 pub mod tactic_util;
 pub mod term_delta;
@@ -165,6 +166,7 @@ pub use pawn_structure_outcome::{compute_pawn_structure_outcome, PawnStructureOu
 pub use pieces_positional_outcome::{compute_pieces_positional_outcome, PiecesPositionalOutcome};
 pub use space_outcome::{compute_space_outcome, SpaceOutcome};
 pub use surprise::{detect_surprise, SurpriseKind};
+pub use tactic_escape::{find_tactic_escape, EscapeKind, TacticEscape};
 pub use tactic_outcome::{
     compute_tactic_outcome, find_best_tactic_in_position, find_tactic_in_line, Confidence,
     MatePattern, PriorMove, TacticHit, TacticPattern, TacticsOutcome,
