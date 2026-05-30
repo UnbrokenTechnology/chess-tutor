@@ -220,6 +220,12 @@ pub enum OverlayKind {
     /// Each pinned piece's square — `Position::blockers_for_king(us)`
     /// for both sides.
     Pins,
+    /// Every trapped piece on the board (either side) plus the "cage"
+    /// of dead escape squares closing in on each one. A trapped piece
+    /// is attacked, has no safe square, and no favourable trade out;
+    /// the engine null-flips the turn so an enemy piece you're about
+    /// to win shows up on your own move (the flagship case).
+    TrappedPieces,
     /// Per-square attacker imbalance. Squares with a net advantage
     /// for you tint green; squares with a net advantage for the
     /// opponent tint red; even-but-contested squares stay clear.
@@ -229,12 +235,13 @@ pub enum OverlayKind {
 }
 
 impl OverlayKind {
-    pub const ALL: [OverlayKind; 6] = [
+    pub const ALL: [OverlayKind; 7] = [
         OverlayKind::MySpace,
         OverlayKind::OpponentSpace,
         OverlayKind::MyMobilityArea,
         OverlayKind::KingRings,
         OverlayKind::Pins,
+        OverlayKind::TrappedPieces,
         OverlayKind::AttackHeatmap,
     ];
 
@@ -245,6 +252,7 @@ impl OverlayKind {
             OverlayKind::MyMobilityArea => "Mobility area (excluded)",
             OverlayKind::KingRings => "King rings",
             OverlayKind::Pins => "Pins",
+            OverlayKind::TrappedPieces => "Trapped pieces",
             OverlayKind::AttackHeatmap => "Attack heatmap",
         }
     }
@@ -272,6 +280,11 @@ impl OverlayKind {
             OverlayKind::Pins => {
                 "Pieces pinned to their own king — pieces whose movement would \
                  expose the king to a slider's attack."
+            }
+            OverlayKind::TrappedPieces => {
+                "Pieces with no safe square — attacked, every legal move loses \
+                 material. The piece itself is tinted; the surrounding \"cage\" \
+                 paints the dead escape squares it can't run to. Both sides shown."
             }
             OverlayKind::AttackHeatmap => {
                 "Per-square attacker imbalance. Green = you have more attackers; \

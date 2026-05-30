@@ -49,6 +49,14 @@ pub struct OverlayData {
     /// squares closing in), call [`trapped_cages`].
     pub white_trapped: Bitboard,
     pub black_trapped: Bitboard,
+    /// Union of every trapped white piece's "cage" — the squares it could
+    /// legally move to but which are all unsafe, closing in on it. Pairs
+    /// with [`Self::white_trapped`] so renderers can paint the box around
+    /// the doomed piece in one pass without re-running [`trapped_cages`].
+    /// Use [`trapped_cages`] when you need the per-piece breakdown
+    /// (e.g. drawing arrows from each cage to its owning piece).
+    pub white_trapped_cage: Bitboard,
+    pub black_trapped_cage: Bitboard,
     /// Squares where the white-attacker count exceeds the black-
     /// attacker count by exactly 1.
     pub heat_white_1: Bitboard,
@@ -81,8 +89,8 @@ pub fn compute_overlays(pos: &Position) -> OverlayData {
     let white_pinned = pos.blockers_for_king(Color::White) & pos.pieces_by_color(Color::White);
     let black_pinned = pos.blockers_for_king(Color::Black) & pos.pieces_by_color(Color::Black);
 
-    let white_trapped = trapped_squares(pos, Color::White);
-    let black_trapped = trapped_squares(pos, Color::Black);
+    let (white_trapped, white_trapped_cage) = trapped_pieces_and_cage(pos, Color::White);
+    let (black_trapped, black_trapped_cage) = trapped_pieces_and_cage(pos, Color::Black);
 
     let (heat_white_1, heat_white_2plus, heat_black_1, heat_black_2plus) = attack_heat(pos);
 
@@ -99,6 +107,8 @@ pub fn compute_overlays(pos: &Position) -> OverlayData {
         black_pinned,
         white_trapped,
         black_trapped,
+        white_trapped_cage,
+        black_trapped_cage,
         heat_white_1,
         heat_white_2plus,
         heat_black_1,
@@ -131,19 +141,24 @@ fn with_colour_to_move<R>(
     }
 }
 
-/// Squares of every trapped piece of `colour`, handling the side-to-move
-/// requirement via [`with_colour_to_move`].
-fn trapped_squares(pos: &Position, colour: Color) -> Bitboard {
+/// Bitboards for every trapped piece of `colour` paired with the union of
+/// their cages (dead escape squares), in one walk. Handles the side-to-move
+/// requirement via [`with_colour_to_move`]. The piece set and the cage union
+/// are always disjoint: a trapped piece's cage is the set of squares it
+/// could legally move *to*, never its own square.
+fn trapped_pieces_and_cage(pos: &Position, colour: Color) -> (Bitboard, Bitboard) {
     with_colour_to_move(pos, colour, |p| {
-        let mut out = Bitboard::EMPTY;
+        let mut pieces = Bitboard::EMPTY;
+        let mut cage = Bitboard::EMPTY;
         for sq in p.pieces_by_color(colour) {
-            if trapped_cage(p, sq).is_some() {
-                out = out.with(sq);
+            if let Some(c) = trapped_cage(p, sq) {
+                pieces = pieces.with(sq);
+                cage |= c;
             }
         }
-        out
+        (pieces, cage)
     })
-    .unwrap_or(Bitboard::EMPTY)
+    .unwrap_or((Bitboard::EMPTY, Bitboard::EMPTY))
 }
 
 /// Per-trapped-piece "cage": for each trapped piece of `colour`, its
@@ -272,6 +287,25 @@ mod tests {
         let d = compute_overlays(&Position::startpos());
         assert!(d.white_trapped.is_empty());
         assert!(d.black_trapped.is_empty());
+        assert!(d.white_trapped_cage.is_empty());
+        assert!(d.black_trapped_cage.is_empty());
+    }
+
+    #[test]
+    fn trapped_cage_bitboard_collects_every_dead_square() {
+        // Same trapped-knight fixture: the knight is on a8 and its only
+        // legal moves (b6, c7) are both covered. The cage bitboard must
+        // hold exactly those two squares, and stay disjoint from the
+        // piece's own square.
+        let pos = Position::from_fen(TRAPPED_KNIGHT_FEN).unwrap();
+        let d = compute_overlays(&pos);
+        assert!(d.black_trapped.contains(Square::A8));
+        assert_eq!(d.black_trapped_cage.popcount(), 2);
+        assert!(d.black_trapped_cage.contains(Square::B6));
+        assert!(d.black_trapped_cage.contains(Square::C7));
+        // Cage is always disjoint from the trapped piece's own square.
+        assert!((d.black_trapped & d.black_trapped_cage).is_empty());
+        assert!(d.white_trapped_cage.is_empty());
     }
 
     #[test]

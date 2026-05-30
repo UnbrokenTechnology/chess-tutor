@@ -52,6 +52,146 @@ mod detectors;
 mod mate;
 pub(crate) use detectors::detect_line_tactic;
 
+/// Detect the most instructive tactic in a single principal variation,
+/// without the played / missed / walked-into framing of
+/// [`compute_tactic_outcome`]. The pre-move coaching surface uses
+/// this — given the analytical engine's predicted continuation from
+/// the position the user is about to move from (sourced from a previous
+/// retrospective's PV by walking past the played moves), report whether
+/// a tactic is available so the coach can name the pattern without
+/// revealing the squares.
+///
+/// - `pre_move_pos` — the position `line[0]` is played from.
+/// - `line` — the moves to scan, `line[0]` played by `mover`.
+/// - `mover` — the side `line[0]` belongs to.
+/// - `prior_move` — the opponent's move that produced `pre_move_pos`,
+///   used by the hanging-capture recapture guard. Pass `None` when
+///   unknown.
+///
+/// Returns `None` when no pattern fires (the silent case is the right
+/// default — the coach surfaces nothing rather than nag).
+pub fn find_tactic_in_line(
+    pre_move_pos: &Position,
+    line: &[Move],
+    mover: Color,
+    prior_move: Option<PriorMove>,
+) -> Option<TacticHit> {
+    detect_line_tactic(pre_move_pos, line, mover, 0, prior_move)
+}
+
+/// Static fork-shape scan over every legal move from `pos`.
+///
+/// Companion to [`find_tactic_in_line`] for the case when no PV is
+/// available (move 1 of a game, or any time the engine's predicted
+/// reply was bypassed). The per-pattern predicates the
+/// [`compute_tactic_outcome`] chain runs are **static** — they look at
+/// `(pre_move_position, candidate_move)` and check attacker bitboards
+/// after applying that one move. No search is involved. So we can
+/// enumerate the mover's legal moves, run the detector chain on each
+/// 1-ply line, and pick the best hit.
+///
+/// Ranking: a mating hit always wins (a forced mate trumps any material
+/// fork); after that, the hit with the largest [`TacticHit::material_gain`]
+/// (treating `None` as zero) wins. Ties broken by legal-move order.
+///
+/// Only [`Confidence::High`] hits are returned — the coaching surface
+/// wants high-signal pre-move hints. Medium-confidence hits (positional
+/// patterns whose material gain is delayed beyond one ply) stay silent.
+///
+/// Caveat: this only sees the user's own move and its immediate
+/// consequences. A two-move combination (e.g. a clearance preparing a
+/// fork next turn) needs a real PV from a search. Add a worker-based
+/// fallback search for that case if real play demands it.
+pub fn find_best_tactic_in_position(
+    pos: &Position,
+    mover: Color,
+    prior_move: Option<PriorMove>,
+) -> Option<TacticHit> {
+    use crate::movegen::legal_moves_vec;
+    // legal_moves_vec borrows mutably; we work on a clone so the
+    // caller's position is untouched.
+    let mut scratch = pos.clone();
+    let legal = legal_moves_vec(&mut scratch);
+    let mut best: Option<TacticHit> = None;
+    for m in legal {
+        let line = [m];
+        if let Some(hit) = detect_line_tactic(pos, &line, mover, 0, prior_move) {
+            if hit.confidence != Confidence::High {
+                continue;
+            }
+            best = match best {
+                None => Some(hit),
+                Some(prev) => {
+                    Some(if hit_outranks(&hit, &prev) { hit } else { prev })
+                }
+            };
+        }
+    }
+    best
+}
+
+/// `a` outranks `b` for pre-move coaching surfacing.
+///
+/// Three tiers in order:
+/// 1. **Mate wins over non-mate.** A forced mate trumps any material
+///    tactic.
+/// 2. **Larger material gain.** `None` treated as zero.
+/// 3. **Pattern severity** (tiebreaker). A 1-ply line caps material at
+///    the immediate capture, so two moves that each capture a pawn but
+///    enable different tactics (one a fork, one a trapped-piece trap)
+///    arrive here tied on gain — even though the fork wins more in
+///    practice. Mirror [`detectors::detect_line_tactic`]'s priority
+///    order so the more instructive lesson surfaces.
+fn hit_outranks(a: &TacticHit, b: &TacticHit) -> bool {
+    let a_mate = a.pattern == TacticPattern::Checkmate;
+    let b_mate = b.pattern == TacticPattern::Checkmate;
+    if a_mate != b_mate {
+        return a_mate;
+    }
+    let a_gain = a.material_gain.unwrap_or(0);
+    let b_gain = b.material_gain.unwrap_or(0);
+    if a_gain != b_gain {
+        return a_gain > b_gain;
+    }
+    pattern_rank(a.pattern) < pattern_rank(b.pattern)
+}
+
+/// Pattern severity ranking — lower = more instructive. Mirrors the
+/// `or_else` chain order in [`detectors::detect_line_tactic`]: that
+/// order was chosen so when two patterns fire on the *same* line, the
+/// more instructive lesson is named. We reuse it here as the tiebreaker
+/// for two patterns firing on *different* moves with equal material
+/// gain.
+fn pattern_rank(p: TacticPattern) -> u8 {
+    match p {
+        // Checkmate is handled by the mate-vs-non-mate gate above; this
+        // arm only fires if both compared hits are Checkmate, in which
+        // case the tie stays unbroken by severity.
+        TacticPattern::Checkmate => 0,
+        TacticPattern::Fork => 1,
+        TacticPattern::RemovingDefender => 2,
+        TacticPattern::HangingCapture => 3,
+        TacticPattern::TrappedPiece => 4,
+        TacticPattern::DoubleCheck => 5,
+        TacticPattern::DiscoveredCheck => 6,
+        TacticPattern::Skewer => 7,
+        TacticPattern::DiscoveredAttack => 8,
+        TacticPattern::Pin => 9,
+        TacticPattern::Intermezzo => 10,
+        TacticPattern::Deflection => 11,
+        TacticPattern::Attraction => 12,
+        TacticPattern::Interference => 13,
+        TacticPattern::Clearance => 14,
+        TacticPattern::XRay => 15,
+        TacticPattern::AttackingF2F7 => 16,
+        TacticPattern::UnderPromotion => 17,
+        // Sacrifice is only synthesized standalone in
+        // `compute_tactic_outcome`; ranking it last is academic but
+        // documented for completeness.
+        TacticPattern::Sacrifice => 18,
+    }
+}
+
 use super::MoveAnalysis;
 use crate::analysis::win_chances::win_chances;
 use crate::position::Position;
@@ -356,29 +496,41 @@ const MATERIAL_WINDOW_PLIES: usize = 4;
 /// revisit this threshold if/when the sigmoid is refit.
 const SOUND_SACRIFICE_WC: f64 = 0.0;
 
-/// Minimum win-probability the best move must gain over the user's move
-/// before we call the user's move a *missed* tactic. Below this gap the
-/// two moves are close enough that "you missed THE move" isn't honest.
-/// Ports lichess's generator uniqueness gate *in spirit* — it uses 0.7
-/// for "clearly the only move" in puzzle generation; teaching nags at a
-/// lower bar but still wants a real gap. Tuning surface.
+/// Minimum win-probability gap between the best move and the user's
+/// move before we call the user's move a *missed* tactic. Below this
+/// gap the two moves are close enough that "you missed THE move" isn't
+/// honest. Tuning surface.
 const MISS_MIN_WC_GAP: f64 = 0.15;
 
-/// At or above this win-probability *after the user's own move*, a missed
-/// improvement is noise: the student is already comfortably winning, so we
-/// don't nag about a stronger line. Ports the generator's "already winning
-/// / already up material" suppression. Tuning surface.
-const ALREADY_WINNING_WC: f64 = 0.80;
+/// Minimum absolute cp gap (engine-internal scale, where pawn ≈ PAWN_EG
+/// = 213) between the best move's score and the user's move's score
+/// before we flag a missed tactic. Catches the "winning-position
+/// saturation" case [`MISS_MIN_WC_GAP`] misses: when the user is up a
+/// queen, every move sits near the asymptote of the win% sigmoid even
+/// when one move is +1000 cp better than another. EITHER threshold
+/// being met is sufficient. 200 cp ≈ 1 pawn — a clearly material
+/// improvement is worth teaching about regardless of how saturated
+/// win% is.
+const MISS_MIN_CP_GAP: i32 = 200;
 
-/// "Don't nag" gate for the missed-tactic slot. Only flag a missed tactic
-/// when the best move was meaningfully better than what the user played
-/// (a real win-probability gap) AND the user isn't already comfortably
-/// winning. Ports lichess's generator suppression/uniqueness gates in
-/// spirit — they gate which positions become puzzles; we gate which
-/// retrospective claims a 1200 student is worth interrupting for.
+/// "Don't nag" gate for the missed-tactic slot. Only flag a missed
+/// tactic when the best move was meaningfully better than what the user
+/// played — either by win-probability gap (sensitive in even
+/// positions) OR by raw cp gap (sensitive in winning ones).
+///
+/// Deliberately drops lichess's puzzle-generator "already winning /
+/// already up material" gate: that suppression was about which
+/// positions become puzzles, not which lessons a student deserves.
+/// When a named tactic exists and the student missed it, that's a
+/// teaching moment even from a winning position. The user complaint
+/// that surfaced this fix: at a custom FEN where black had no queen,
+/// every white move kept win% near the asymptote and every cp gap
+/// stayed below 0.15 win%, so the named-fork "you missed" card never
+/// fired despite a +1000 cp improvement being on the table.
 fn missed_tactic_worth_flagging(best_ma: &MoveAnalysis, user_ma: &MoveAnalysis) -> bool {
-    let user_wc = win_chances(user_ma.score);
-    win_chances(best_ma.score) - user_wc >= MISS_MIN_WC_GAP && user_wc < ALREADY_WINNING_WC
+    let wc_gap = win_chances(best_ma.score) - win_chances(user_ma.score);
+    let cp_gap = best_ma.score.0 - user_ma.score.0;
+    wc_gap >= MISS_MIN_WC_GAP || cp_gap >= MISS_MIN_CP_GAP
 }
 
 /// Compute the [`TacticsOutcome`] for a single analysed move.

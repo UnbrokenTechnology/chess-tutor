@@ -25,6 +25,7 @@ mod pawn_structure;
 mod pieces;
 mod secondary;
 mod space;
+mod tactic;
 mod threats;
 
 #[cfg(test)]
@@ -35,7 +36,7 @@ use chess_tutor_engine::analysis::{
     compute_king_safety_outcome, compute_material_outcome, compute_mobility_outcome,
     compute_passed_pawns_outcome, compute_pawn_structure_outcome,
     compute_pieces_positional_outcome, compute_space_outcome, compute_threats_outcome,
-    MoveAnalysis, TermId,
+    MoveAnalysis, PriorMove, TermId,
 };
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::position::Position;
@@ -55,6 +56,7 @@ use pawn_structure::*;
 use pieces::*;
 use secondary::*;
 use space::*;
+use tactic::*;
 use threats::*;
 use helpers::*;
 
@@ -77,12 +79,18 @@ use helpers::*;
 /// understanding over rote memorisation. When off, the four fields are
 /// suppressed at this layer so renderers don't need to know about the
 /// preference.
+///
+/// `prior_move` is the opponent's move that produced `pre_move_pos`,
+/// used by the tactic detector's hanging-capture recapture guard so a
+/// trade isn't mis-labelled "free piece." Pass `None` at game start /
+/// for ad-hoc analyses without history; the guard simply isn't applied.
 pub fn build_retrospective_view(
     pre_move_pos: &Position,
     analyses: &[MoveAnalysis],
     user_move: Move,
     show_all: bool,
     reveal_best_moves: bool,
+    prior_move: Option<PriorMove>,
 ) -> RetrospectiveViewModel {
     if analyses.is_empty() {
         return RetrospectiveViewModel::default();
@@ -188,6 +196,22 @@ pub fn build_retrospective_view(
     // ply past the user's move; surfaces e.g. doubled h-pawns after
     // gxh6.
     for it in build_forced_consequences_items(user, pre_move_pos, root_stm) {
+        items.push(it);
+    }
+
+    // Tactic cards: played / missed / walked-into named patterns
+    // (fork, pin, free piece, …). Compute-tactic-outcome handles
+    // the three-slot dispatch internally; we forward `prior_move`
+    // so the hanging-capture recapture guard fires when history
+    // exists.
+    for it in build_tactic_items(
+        pre_move_pos,
+        best,
+        user,
+        root_stm,
+        prior_move,
+        reveal_best_moves,
+    ) {
         items.push(it);
     }
 

@@ -118,9 +118,9 @@ fn outcome_reports_user_played_fork() {
 #[test]
 fn outcome_reports_missed_fork_when_user_chose_another_move() {
     let pre = pos(ROYAL_FORK_FEN);
-    // Best forks and wins material (a real eval edge); the user shuffled the
-    // king, keeping the position equal. The win-probability gap clears the
-    // "don't nag" gate.
+    // Best forks and wins material (a real eval edge); the user shuffled
+    // the king, keeping the position equal. Both the win-probability gap
+    // and the cp gap clear the "don't nag" gate.
     let best = ma_with_pv_score(vec![Move::normal(Square::B5, Square::C7)], Some(0), Value(600));
     let user = ma_with_pv_score(vec![Move::normal(Square::G1, Square::F1)], Some(0), Value::ZERO);
 
@@ -142,14 +142,23 @@ fn missed_tactic_suppressed_when_user_move_nearly_as_good() {
 }
 
 #[test]
-fn missed_tactic_suppressed_when_already_winning() {
-    // The user's own move already leaves them crushing; a faster win isn't
-    // worth nagging a 1200 about.
+fn missed_tactic_surfaces_even_when_already_winning() {
+    // Regression: in winning positions win% saturates near the asymptote,
+    // so the original "win% gap" gate suppressed missed cards even when
+    // the absolute cp gap was huge. The student deserves to learn about
+    // the named tactic regardless of how crushing the position already
+    // is — so an absolute-cp gate (200 cp ≈ 1 pawn) backs up the win%
+    // gate. User-reported FEN: white up a queen, every move keeps win%
+    // above 0.9; the +1000 cp improvement (winning a rook via Nxc7+)
+    // would silently disappear without the cp gate.
     let pre = pos(ROYAL_FORK_FEN);
     let best = ma_with_pv_score(vec![Move::normal(Square::B5, Square::C7)], Some(0), Value(3000));
     let user = ma_with_pv_score(vec![Move::normal(Square::G1, Square::F1)], Some(0), Value(2000));
     let outcome = compute_tactic_outcome(&best, &user, &pre, Color::White, None);
-    assert!(outcome.user_missed_tactic.is_none());
+    let missed = outcome.user_missed_tactic.expect(
+        "named fork on the best line must surface despite the user already winning",
+    );
+    assert_eq!(missed.pattern, TacticPattern::Fork);
 }
 
 #[test]
@@ -609,4 +618,67 @@ fn intermezzo_fires_on_an_inserted_check() {
     assert_eq!(hit.pattern, TacticPattern::Intermezzo);
     assert_eq!(hit.pv_ply, 2);
     assert_eq!(hit.primary_piece, Square::D4);
+}
+
+
+// ---- find_best_tactic_in_position: static scan ---------------------
+
+#[test]
+fn static_scan_finds_user_reported_nxc7_fork() {
+    // User-reported case: a custom FEN with the white knight on b5 and
+    // a black pawn on c7 (no defender of c7). Nxc7+ forks the king on
+    // e8 and the rook on a8 — a one-look-ahead fork detectable without
+    // any search. This is the coaching-panel's move-1 fallback path.
+    let pos = pos(
+        "rnb1kbnr/pppppppp/8/1N6/8/8/PPPPPPPP/R1BQKBNR w KQkq - 0 1",
+    );
+    let hit = find_best_tactic_in_position(&pos, Color::White, None)
+        .expect("Nxc7+ fork should be found by static scan");
+    assert_eq!(hit.pattern, TacticPattern::Fork);
+    assert_eq!(hit.primary_piece, Square::C7);
+    assert!(hit.targets.contains(&Square::A8));
+    assert!(hit.targets.contains(&Square::E8));
+    assert_eq!(hit.confidence, Confidence::High);
+}
+
+#[test]
+fn static_scan_returns_none_when_no_tactic_exists() {
+    // Standard starting position has no winnable tactic for white.
+    // The static scan should fall silent rather than nag.
+    let pos = Position::startpos();
+    assert!(find_best_tactic_in_position(&pos, Color::White, None).is_none());
+}
+
+#[test]
+fn static_scan_prefers_mate_over_material_fork() {
+    // White to move has both a fork available AND a mate-in-1; the
+    // ranker should pick the mate. Position: white queen on h5, black
+    // king on f8 with the back rank cleared by both knight-on-g6 (mate-in-1
+    // via Qh8#) AND a clear knight fork available.
+    //
+    // Simpler hand-built variant: a one-move mate alongside a less-
+    // urgent fork by another piece is hard to set up cleanly; instead
+    // assert the rank ordering via a synthetic side-by-side comparison.
+    let mate = TacticHit {
+        pattern: TacticPattern::Checkmate,
+        pv_ply: 0,
+        primary_piece: Square::H8,
+        targets: vec![Square::F8],
+        material_gain: None,
+        confidence: Confidence::High,
+        sacrifice: false,
+        mate_pattern: Some(MatePattern::BackRank),
+    };
+    let fork = TacticHit {
+        pattern: TacticPattern::Fork,
+        pv_ply: 0,
+        primary_piece: Square::C7,
+        targets: vec![Square::A8, Square::E8],
+        material_gain: Some(500),
+        confidence: Confidence::High,
+        sacrifice: false,
+        mate_pattern: None,
+    };
+    assert!(super::hit_outranks(&mate, &fork));
+    assert!(!super::hit_outranks(&fork, &mate));
 }

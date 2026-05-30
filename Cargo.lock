@@ -381,6 +381,8 @@ dependencies = [
  "chess-tutor-ui",
  "clap",
  "dhat",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

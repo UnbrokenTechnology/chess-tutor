@@ -226,6 +226,11 @@ pub enum AnnotationKind {
     /// A pinned piece — `Position::blockers_for_king(us)` membership.
     /// Painted by the pin overlay.
     Pin,
+    /// A "dead" escape square in a trapped piece's cage — a square the
+    /// piece could legally move to, but every option in the cage is
+    /// unsafe. Painted by the trapped-piece overlay around the doomed
+    /// piece itself (which uses [`Self::BadPiece`]).
+    TrappedEscape,
     /// One net attacker advantage for our side at this square.
     HeatOurs1,
     /// Two or more net attacker advantage for our side at this square.
@@ -347,6 +352,12 @@ pub enum RetrospectiveCategory {
     BlockedCenter,
     Castling,
     Space,
+    /// A named tactic — `Fork`, `Pin`, `Skewer`, `Checkmate`, etc. —
+    /// played by the user or missed by the user. Drives the
+    /// retrospective "you played a fork" / "you missed a tactic" cards.
+    /// Walked-into tactics surface as a separate forced-consequences
+    /// card and don't use this category.
+    Tactic,
     /// Secondary / fallback eval-term shifts (the old "Helped" /
     /// "Hurt" lines).
     Secondary,

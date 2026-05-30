@@ -23,6 +23,20 @@ const DEFAULT_RETROSPECTIVE_DEPTH: u32 = 12;
     about = "Classical chess engine + teaching tool."
 )]
 pub struct Cli {
+    /// Emit machine-readable JSON instead of human-readable text on the
+    /// FEN-taking subcommands. Each command's JSON shape mirrors the
+    /// text rendering — same fields, more structure. Schema is local to
+    /// the CLI crate today; will move to a shared types crate when FFI
+    /// work begins.
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// Render scores from the side-to-move's POV instead of the default
+    /// white-POV. Chess.com / lichess / UCI all use white-POV — keeping
+    /// our default matches them and removes one of the documented agent
+    /// failure modes (see PLAN-cli.md "Output policy").
+    #[arg(long, global = true)]
+    pub stm: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -45,15 +59,131 @@ pub enum Command {
         #[arg(default_value = STARTPOS)]
         fen: String,
     },
-    /// Print the classical-eval per-term trace for a FEN.
+    /// Print the classical-eval per-term trace for a FEN. With
+    /// `--glossary`, emit only the term-id glossary table (every
+    /// granular sub-term's one-line description) and ignore the FEN —
+    /// useful as a standalone reference for what each term name means.
     Eval {
         #[arg(default_value = STARTPOS)]
         fen: String,
+        /// Dump the term-id glossary table standalone. With this flag
+        /// the FEN is ignored and only the glossary is printed.
+        #[arg(long)]
+        glossary: bool,
     },
     /// Identify the opening (ECO code + name) of a position, if known.
     Opening {
         #[arg(default_value = STARTPOS)]
         fen: String,
+    },
+    /// Per-square dossier: who attacks `square`, who defends it, is the
+    /// piece on it pinned, is it the moving blocker of a standing
+    /// discovered attack, and the SEE verdict for the cheapest
+    /// enemy-initiated capture. The agent's foundational geometric
+    /// query — answers "what's actually happening at this square"
+    /// without having to reason about ray geometry by hand.
+    Square {
+        /// Target square in algebraic notation (`e5`, `a1`, `h8`).
+        square: String,
+        #[arg(default_value = STARTPOS)]
+        fen: String,
+    },
+    /// Unified threats snapshot for both sides: hanging pieces,
+    /// SEE-losing exchanges, pinned pieces, overloaded defenders,
+    /// trapped pieces. Composes the engine's existing threat scanners
+    /// into one report so the agent doesn't have to remember which
+    /// command surfaces which flavour of weakness.
+    Threats {
+        #[arg(default_value = STARTPOS)]
+        fen: String,
+    },
+    /// Every forcing move (check, capture, promotion) for both sides.
+    /// For the side not to move, a null-move trick reveals their
+    /// standing forcing options ("what threats are loaded against me").
+    /// Captures are annotated with the cheapest-attacker SEE verdict.
+    Forcing {
+        #[arg(default_value = STARTPOS)]
+        fen: String,
+    },
+    /// Full attack ledger: every (attacker, target) pair where one of
+    /// our pieces hits one of theirs. Annotated with target piece
+    /// value, defender count, and SEE verdict. Sorted by highest-
+    /// value target first so an agent scanning for "what threatens
+    /// the queen" lands on it immediately.
+    Attacks {
+        #[arg(default_value = STARTPOS)]
+        fen: String,
+    },
+    /// Pure geometric ray-walk: for each slider, every line through
+    /// exactly one blocker to a piece on the far side. Reports
+    /// discovered-attack candidates (same-colour blocker) and pin /
+    /// skewer candidates (enemy blocker). Default-filters to "target
+    /// more valuable than blocker"; `--all` includes the noisier
+    /// low-value alignments too.
+    Alignments {
+        #[arg(default_value = STARTPOS)]
+        fen: String,
+        /// Include alignments where the target is less valuable than
+        /// the blocker (noisy — most won't win material if fired).
+        #[arg(long)]
+        all: bool,
+    },
+    /// One-block aggregator: position summary, threats snapshot,
+    /// tactics (per-side + latent + check-followups), and a
+    /// depth-N search. The "give me everything you've got on this
+    /// position" entry point — equivalent to running `board`,
+    /// `threats`, `tactics --latent --check-followups`, and
+    /// `search` in sequence, but bundled. Phase E of the agent-
+    /// facing CLI plan.
+    Explain {
+        #[arg(default_value = STARTPOS)]
+        fen: String,
+        /// Iterative-deepening depth for the embedded search.
+        /// Matches the retrospective default; raise for stronger
+        /// reads, lower for faster responses.
+        #[arg(long, default_value_t = DEFAULT_RETROSPECTIVE_DEPTH)]
+        depth: u32,
+    },
+    /// Engine tactic-detector chain run for both sides + the
+    /// overloaded-defender scan. For the side to move we enumerate
+    /// every legal move and report the best high-confidence pattern;
+    /// for the side not to move we null-move the position first and
+    /// run the same scan ("if granted a free tempo, what would they
+    /// play?"). Phase C of the agent-facing CLI plan (see
+    /// `PLAN-cli.md`); does not yet include `--latent` or
+    /// `--check-followups` (Phases D and E).
+    Tactics {
+        #[arg(default_value = STARTPOS)]
+        fen: String,
+        /// UCI of the opponent's move that produced this FEN, used by
+        /// the hanging-capture recapture guard so a real exchange isn't
+        /// mistaken for free material. Optional — when omitted the
+        /// guard runs in lenient mode (extra HangingCapture false
+        /// positives possible when the prior move was a capture).
+        /// Format: UCI only (`g7g6`, `e7e8q`); SAN is not accepted
+        /// here because the prior position isn't known.
+        #[arg(long = "prior-move", value_name = "UCI")]
+        prior_move: Option<String>,
+        /// Add a section listing the opponent's **standing** tactics —
+        /// discovered-attack / pin / skewer alignments and
+        /// remove-the-defender shapes the opponent has pre-loaded and
+        /// is waiting for the right trigger to execute. The companion
+        /// to the per-side "best tactic now" scan; together they
+        /// cover both "what can I play" and "what can they play."
+        /// Phase D of the agent-facing CLI plan; backed by
+        /// [`chess_tutor_engine::analysis::find_latent_threats`].
+        #[arg(long)]
+        latent: bool,
+        /// Add a section listing **two-step forcing sequences**: for
+        /// each side, enumerate that side's checks, the opponent's
+        /// forced replies, and the follow-up tactic (if any) that
+        /// then fires. Catches the "look one ply past the check"
+        /// case — sequences like the `…Nd3+ → …Nf2` double-fork in
+        /// `teaching-positions/double-fork-after-qd8.md`, which a
+        /// single-ply detector misses. Phase E of the agent-facing
+        /// CLI plan.
+        #[arg(long = "check-followups")]
+        check_followups: bool,
     },
     /// Run an engine search; print the principal variation and the leaf
     /// [`EvalTrace`]. With `--multi-pv N > 1`, prints N ranked lines
@@ -113,6 +243,13 @@ pub enum Command {
         /// pathological positions.
         #[arg(long)]
         verbose_progress: bool,
+        /// Run the engine's tactic-detector chain on the top PV's
+        /// first move and append a `(Pattern via Move; +N pts)` summary
+        /// line after the search output. Cheap on top of an already-
+        /// completed search. Mirrors `chess-tutor tactics` from Phase
+        /// C but bound to whatever the search already chose.
+        #[arg(long)]
+        annotate: bool,
     },
     /// Multi-position search benchmark. Argument order and defaults
     /// mirror Stockfish 11's `bench` command: `tt_mb threads limit

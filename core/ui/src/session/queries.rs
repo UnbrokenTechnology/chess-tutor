@@ -133,6 +133,109 @@ impl Session {
         }
     }
 
+    /// The opponent's move that produced the position for history
+    /// entry `i` (i.e. `history[i-1]`), paired with the piece it
+    /// captured. Feeds the tactic detector's hanging-capture recapture
+    /// guard so a trade isn't mis-labelled as a free piece. `None` at
+    /// the start of the game (i = 0) where no prior move exists.
+    pub(crate) fn prior_move_for(
+        &self,
+        i: usize,
+    ) -> Option<chess_tutor_engine::analysis::PriorMove> {
+        if i == 0 {
+            return None;
+        }
+        let prior_entry = &self.history[i - 1];
+        let pos_before_prior = if i == 1 {
+            self.start_position.clone()
+        } else {
+            self.history[i - 2].position_after.clone()
+        };
+        Some(chess_tutor_engine::analysis::PriorMove::new(
+            &pos_before_prior,
+            prior_entry.mv,
+        ))
+    }
+
+    /// Pre-move tactic hint for the live coaching panel.
+    ///
+    /// Two paths, tried in order:
+    ///
+    /// 1. **PV-reuse** — when a previous user-move retrospective exists
+    ///    and the bot followed the analytical engine's predicted reply
+    ///    (`history[u+1].mv == pv[1]`), `pv[2..]` is the engine's best
+    ///    continuation from the live position. No new search.
+    /// 2. **Static fork-shape scan** — when PV-reuse can't fire (move
+    ///    1 of a game, bot deviated, retrospective still arriving),
+    ///    enumerate the user's legal moves and run the same static
+    ///    detectors on each one. No search either — the detectors look
+    ///    at the post-move position's attacker bitboards. Catches
+    ///    1-ply tactics (forks, hanging captures, pins/skewers,
+    ///    discovered checks, mate-in-1). Multi-ply combinations stay
+    ///    missed; a worker-based fallback search would be the next step
+    ///    if real play surfaces them.
+    pub(crate) fn coaching_tactic_hint(
+        &self,
+    ) -> Option<chess_tutor_engine::analysis::TacticHit> {
+        self.coaching_tactic_hint_pv_reuse()
+            .or_else(|| self.coaching_tactic_hint_static_scan())
+    }
+
+    /// PV-reuse path: see [`Self::coaching_tactic_hint`] for the
+    /// design. Returns `None` on any freshness-gate failure, falling
+    /// through to the static-scan fallback.
+    fn coaching_tactic_hint_pv_reuse(
+        &self,
+    ) -> Option<chess_tutor_engine::analysis::TacticHit> {
+        use chess_tutor_engine::analysis::{find_tactic_in_line, PriorMove};
+        let (u, user_entry) = self
+            .history
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, e)| self.is_user_move(e))?;
+        let bot_reply = self.history.get(u + 1)?;
+        let retro = user_entry.retrospective.as_ref()?;
+        let user_analysis = retro
+            .analyses
+            .iter()
+            .find(|a| a.mv == retro.user_move)?;
+        if user_analysis.pv.len() < 3 {
+            return None;
+        }
+        if user_analysis.pv[1] != bot_reply.mv {
+            return None;
+        }
+        let live_pos = &bot_reply.position_after;
+        let prior = PriorMove::new(&user_entry.position_after, bot_reply.mv);
+        find_tactic_in_line(
+            live_pos,
+            &user_analysis.pv[2..],
+            self.user_color(),
+            Some(prior),
+        )
+    }
+
+    /// Static scan path: enumerate the user's legal moves and pick the
+    /// best 1-ply tactic via [`find_best_tactic_in_position`]. No PV
+    /// needed; the detectors are static predicates over `(pos, move)`.
+    /// Prior move (for the hanging-capture recapture guard) is the
+    /// opponent's last move into the live position, or `None` at game
+    /// start.
+    fn coaching_tactic_hint_static_scan(
+        &self,
+    ) -> Option<chess_tutor_engine::analysis::TacticHit> {
+        use chess_tutor_engine::analysis::{find_best_tactic_in_position, PriorMove};
+        let prior = if let Some(last_entry) = self.history.last() {
+            let last_idx = self.history.len() - 1;
+            let pre = self.pre_move_position(last_idx);
+            Some(PriorMove::new(&pre, last_entry.mv))
+        } else {
+            None
+        };
+        find_best_tactic_in_position(&self.position, self.user_color(), prior)
+    }
+
     pub(crate) fn is_user_move(&self, entry: &HistoryEntry) -> bool {
         match self.engine_plays {
             EngineMode::None => true,

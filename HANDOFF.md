@@ -12,7 +12,7 @@ A **chess tutor**, not a chess engine. The product surface is move-by-move teach
 
 UIs: CLI (`chess-tutor`), egui desktop (`chess-tutor-desktop`), planned Apple + Android. FFI crate (`core/ffi/`) is the prerequisite for the platform apps and doesn't exist yet.
 
-Tests: **822 engine (+4 ignored) + 105 narration + 33 cli + 27 ui = 987 passing**, clippy clean across all targets.
+Tests: **826 engine (+4 ignored) + 105 narration + 33 cli + 41 ui = 1005 passing**, clippy clean across all targets.
 
 ## Status: the engine detour is COMPLETE — teaching UX is the active work
 
@@ -26,17 +26,29 @@ The teaching UX (below) was parked behind a three-part engine detour (the coach 
 
 All in [`core/engine/src/analysis/`](core/engine/src/analysis/); [`tactic_outcome/mod.rs`](core/engine/src/analysis/tactic_outcome/mod.rs) `//!` carries provenance (hand-transliterated from lichess `cook.py` under the idea/expression dichotomy — see CLAUDE.md).
 
-- **`compute_tactic_outcome(best_ma, user_ma, pre_pos, root_stm, prior_move) -> TacticsOutcome`** — three independent `Option<TacticHit>` slots: `user_played_tactic`, `user_missed_tactic` (gated by a don't-nag win% test so it doesn't cry wolf), `user_walked_into`. `prior_move: Option<PriorMove>` feeds the recapture guard (a real retrospective caller passes the opponent's actual prior move).
+- **`compute_tactic_outcome(best_ma, user_ma, pre_pos, root_stm, prior_move) -> TacticsOutcome`** — three independent `Option<TacticHit>` slots: `user_played_tactic`, `user_missed_tactic` (gated by **win% gap OR absolute cp gap** so winning-position saturation doesn't suppress real misses), `user_walked_into`. `prior_move: Option<PriorMove>` feeds the recapture guard (a real retrospective caller passes the opponent's actual prior move). Consumed by `core/ui/src/retrospective_view/tactic.rs`.
+- **`find_tactic_in_line(pre, line, mover, prior_move) -> Option<TacticHit>`** — single-line variant for the coaching surface, no played/missed/walked-into framing. Consumed by `Session::coaching_tactic_hint()` (PV-reuse path) to mine the previous retrospective's PV for a pre-move tactic name.
+- **`find_best_tactic_in_position(pos, mover, prior_move) -> Option<TacticHit>`** — static fork-shape scan over every legal move (the detector chain is purely predicate-based; no search needed). Consumed by `Session::coaching_tactic_hint()`'s **static-scan fallback** when PV-reuse can't fire (move 1 of a game, bot deviated). Pattern-severity tiebreaker (Fork beats TrappedPiece at equal material gain) mirrors the detector chain's priority order.
 - **`TacticHit`** = `{ pattern: TacticPattern, mate_pattern: Option<MatePattern>, sacrifice: bool, primary_piece, targets, material_gain, confidence, pv_ply }`. `pattern` names the lesson; `mate_pattern` / `sacrifice` are orthogonal annotations that ride alongside (a fork-into-back-rank-mate is `Fork` + `Some(BackRank)`, exactly as lichess tags both).
 - **`TacticPattern`** (each has `heading()`): Fork, HangingCapture, RemovingDefender, TrappedPiece, Pin, Skewer, DiscoveredAttack, DiscoveredCheck, DoubleCheck, Sacrifice, Intermezzo, Deflection, Attraction, Interference, Clearance, XRay, AttackingF2F7, UnderPromotion, Checkmate.
 - **`MatePattern`** (terminal-node mates; `heading()` + `surfaced_by_default()` → `true` only for BackRank/Smothered, the rest engine-available but a named-library for later): BackRank, Smothered, Anastasia, Hook, Arabian, Boden, DoubleBishop, Dovetail.
-- **`find_overloaded(pos, victim) -> Vec<OverloadedPiece>`** ([`overloading.rs`](core/engine/src/analysis/overloading.rs)) — a *pre-move scan* (strict sole-defender-of-≥2), deliberately **not** in the tactic chain; its own analytical surface (a future coaching card / overlay).
-- **Trapped-piece overlay, engine side:** `OverlayData.{white,black}_trapped` + `analysis::trapped_cages(pos, colour)` (per-piece dead-escape "cage").
+- **`find_overloaded(pos, victim) -> Vec<OverloadedPiece>`** ([`overloading.rs`](core/engine/src/analysis/overloading.rs)) — a *pre-move scan* (strict sole-defender-of-≥2), deliberately **not** in the tactic chain; its own analytical surface. Consumed by `coaching_view::overloaded_card`.
+- **Trapped-piece overlay, engine side:** `OverlayData.{white,black}_trapped` + `{white,black}_trapped_cage` (cage-union bitboards) + `analysis::trapped_cages(pos, colour)` (per-piece dead-escape "cage" — kept for any future arrow surface). Consumed by `overlays_view` via `OverlayKind::TrappedPieces`.
 - **`win_chances(Value) -> f64`** ([`win_chances.rs`](core/engine/src/analysis/win_chances.rs)) — lila cp→win% sigmoid (normalizes our PAWN_EG=213 → conventional pawn=100 first).
 
-### NEXT: surface all of this in the UI (the now-active teaching UX)
+### First UI wiring pass landed (2026-05-27)
 
-None of the engine surface above is wired into the UI yet. The work: a `RetrospectiveCategory::Tactic` card; the `Checkmate`/`MatePattern` mate cards; the flagship **`TrappedPieces` board overlay** (engine side done — see HANDOFF-ux "Trapped-piece overlay"); an overloaded-piece coaching card/overlay; coaching-panel pattern names. Start from **[`HANDOFF-ux.md`](HANDOFF-ux.md)**. The product has three teaching surfaces below, all card-based and all reading the same engine outcomes — merged from `main` while parked, so re-validate against the current tree as you go:
+The five surfaces from the prior NEXT list shipped end-to-end:
+
+- **TrappedPieces overlay** ✅ — `OverlayData.{white,black}_trapped_cage` (union of dead escape squares), `OverlayKind::TrappedPieces`, `AnnotationKind::TrappedEscape` (muted-red cage tint over `BadPiece` on the doomed piece). Toggle checkbox auto-renders via `OverlayKind::ALL`.
+- **Retrospective Tactic card** ✅ — `RetrospectiveCategory::Tactic` + `core/ui/src/retrospective_view/tactic.rs` builder, fed by `compute_tactic_outcome`. `prior_move` threaded into `build_retrospective_view` via the new `Session::prior_move_for`. Played/missed/walked-into all surface; missed card suppresses spatial annotations when `reveal_best_moves` is off.
+- **Mate cards** ✅ — `MatePattern::surfaced_by_default()` drives the back-rank / smothered heading suffix on Checkmate hits; non-default named mates are still detected, just don't pop a card.
+- **Coaching tactic hint** (E, PV-reuse variant) ✅ — `Session::coaching_tactic_hint()` mines the previous user-move retrospective's `analyses[user_move].pv[2..]` and gates on `history[u+1].mv == pv[1]`. New public `find_tactic_in_line(pre, line, mover, prior)` does the detection. Confidence::High only, no annotations (pedagogical rule).
+- **Overloaded coaching card** (D) ✅ — `find_overloaded(pos, !user_color)` consumed in `coaching_view::overloaded_card`. Defender → `BadPiece`, each duty → `Threat`, defender→duty arrow → `Defender`. Strict sole-defender-of-≥2 predicate keeps misfires low.
+
+### NEXT: tuning + the surfaces not yet wired
+
+Pick up from **[`HANDOFF-ux.md`](HANDOFF-ux.md)**. The product has three teaching surfaces below, all card-based and all reading the same engine outcomes:
 
 1. **Retrospective panel** — after-the-fact analysis of the user's last move. Cards per signal (material, threats, king safety, mobility, pawn structure, passed pawns, piece placement, secondary, **forced consequences of opponent's best reply**). Best-move reveal is opt-in (`LearningPreferences.reveal_best_moves`, default off).
 2. **Coaching panel** (live) — features-to-notice for the position the user is about to move from. Shown when `AssistanceLevel::Coached` is active. Surfaces hanging-piece opportunities (filtered through legal moves so in-check / pinned cases don't lie), en-passant captures, pawn weaknesses on either side, and a "your king is in check" card. Never names a move.

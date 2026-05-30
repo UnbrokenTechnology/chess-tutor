@@ -47,6 +47,17 @@ pub fn push_overlay_annotations(
                 push_squares(out, data.white_pinned, AnnotationKind::Pin);
                 push_squares(out, data.black_pinned, AnnotationKind::Pin);
             }
+            OverlayKind::TrappedPieces => {
+                // Both sides painted under one toggle (mirrors KingRings
+                // / Pins). The piece itself reads as "weak / about to be
+                // lost" → BadPiece; the surrounding cage squares paint
+                // in a muted red so the box closing in is visible at a
+                // glance.
+                push_squares(out, data.white_trapped, AnnotationKind::BadPiece);
+                push_squares(out, data.black_trapped, AnnotationKind::BadPiece);
+                push_squares(out, data.white_trapped_cage, AnnotationKind::TrappedEscape);
+                push_squares(out, data.black_trapped_cage, AnnotationKind::TrappedEscape);
+            }
             OverlayKind::AttackHeatmap => push_attack_heat(out, data, us),
         }
     }
@@ -117,5 +128,56 @@ fn push_attack_heat(out: &mut Vec<BoardAnnotation>, data: &OverlayData, us: Colo
 fn push_squares(out: &mut Vec<BoardAnnotation>, bb: Bitboard, kind: AnnotationKind) {
     for sq in bb {
         out.push(BoardAnnotation::SquareHighlight { square: sq, kind });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chess_tutor_engine::analysis::compute_overlays;
+    use chess_tutor_engine::position::Position;
+    use chess_tutor_engine::types::Square;
+
+    use crate::view::OverlayKind;
+
+    /// Black knight on a8, cage = {b6, c7}, white's turn. The trapped
+    /// overlay must emit BadPiece on a8 and TrappedEscape on the cage.
+    #[test]
+    fn trapped_overlay_paints_piece_then_cage() {
+        let pos = Position::from_fen("n6k/8/3P4/2PB4/8/8/8/6K1 w - - 0 1").unwrap();
+        let data = compute_overlays(&pos);
+        let mut out = Vec::new();
+        let active: HashSet<OverlayKind> =
+            std::iter::once(OverlayKind::TrappedPieces).collect();
+        // `us` is irrelevant for trapped (both sides painted under one
+        // toggle), so just hand it the side to move.
+        push_overlay_annotations(&mut out, &data, Color::White, &active);
+
+        let on = |sq, kind| {
+            out.iter().any(|a| {
+                matches!(a, &BoardAnnotation::SquareHighlight { square, kind: k }
+                    if square == sq && k == kind)
+            })
+        };
+        assert!(on(Square::A8, AnnotationKind::BadPiece));
+        assert!(on(Square::B6, AnnotationKind::TrappedEscape));
+        assert!(on(Square::C7, AnnotationKind::TrappedEscape));
+        // Nothing for the white side at this position.
+        let any_white_trap = out
+            .iter()
+            .any(|a| matches!(a, BoardAnnotation::SquareHighlight { square, .. }
+                if *square == Square::D5 || *square == Square::C5 || *square == Square::D6));
+        assert!(!any_white_trap);
+    }
+
+    #[test]
+    fn trapped_overlay_off_by_default_emits_nothing_for_that_kind() {
+        let pos = Position::from_fen("n6k/8/3P4/2PB4/8/8/8/6K1 w - - 0 1").unwrap();
+        let data = compute_overlays(&pos);
+        let mut out = Vec::new();
+        let active: HashSet<OverlayKind> = HashSet::new();
+        push_overlay_annotations(&mut out, &data, Color::White, &active);
+        // No annotations at all when no overlay is toggled on.
+        assert!(out.is_empty());
     }
 }

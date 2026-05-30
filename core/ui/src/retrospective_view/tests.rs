@@ -33,7 +33,7 @@
         // the view model.
         let user_move = analyses[0].mv;
         let pre = Position::startpos();
-        let vm = build_retrospective_view(&pre, &analyses, user_move, false, false);
+        let vm = build_retrospective_view(&pre, &analyses, user_move, false, false, None);
         assert!(!vm.headline.user_san.is_empty());
         assert!(!vm.headline.verdict_label.is_empty());
         assert!(!vm.headline.user_score.is_empty());
@@ -67,7 +67,7 @@
             analyses.iter().any(|a| a.mv == mating_move),
             "force_include should have analyzed the mating move"
         );
-        let vm = build_retrospective_view(&pre, &analyses, mating_move, false, false);
+        let vm = build_retrospective_view(&pre, &analyses, mating_move, false, false, None);
         assert!(!vm.headline.user_san.is_empty(), "headline still populated");
         assert!(
             vm.items.is_empty(),
@@ -98,7 +98,7 @@
             chess_tutor_engine::types::Square::A2,
         );
         let pre = Position::startpos();
-        let vm = build_retrospective_view(&pre, &analyses, bogus, false, false);
+        let vm = build_retrospective_view(&pre, &analyses, bogus, false, false, None);
         assert!(vm.headline.user_san.is_empty());
         assert!(vm.items.is_empty());
     }

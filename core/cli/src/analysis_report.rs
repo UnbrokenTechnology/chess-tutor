@@ -77,11 +77,15 @@ fn render_one(out: &mut String, root: &Position, a: &MoveAnalysis, rank: usize, 
     .unwrap();
 
     for d in prefix {
+        // Tapered delta is engine-internal cp (PAWN_EG=213). Convert
+        // to conventional pawns via the shared `units` helper so the
+        // numbers here match what the position-summary header shows.
+        let pawns = crate::units::engine_cp_to_pawns(Value(d.delta_tapered)) as f32;
         writeln!(
             out,
             "        {:<26}  {:>+6.2}  ({:>+4} mg, {:>+4} eg)",
             d.term.label(),
-            d.delta_tapered as f32 / 100.0,
+            pawns,
             d.delta_mg,
             d.delta_eg,
         )
@@ -112,19 +116,11 @@ fn pv_to_san(root: &Position, pv: &[Move]) -> Vec<String> {
 }
 
 fn format_score_pawns(score: Value) -> String {
-    let abs = score.0.abs();
-    let mate_threshold = Value::MATE.0 - Value::MAX_PLY;
-    if abs >= mate_threshold {
-        let plies = Value::MATE.0 - abs;
-        let moves = (plies + 1) / 2;
-        if score.0 >= 0 {
-            format!("#{}", moves)
-        } else {
-            format!("-#{}", moves)
-        }
-    } else {
-        format!("{:+.2}", score.0 as f32 / 100.0)
-    }
+    // Route through the shared units module so the engine-cp →
+    // conventional-pawn conversion (PAWN_EG=213) matches every other
+    // CLI surface. Side-to-move POV is preserved here — the caller
+    // re-signs to white-POV if desired.
+    crate::units::format_pawns(score)
 }
 
 fn format_settled_suffix(pv: &[Move], settled: Option<usize>) -> String {

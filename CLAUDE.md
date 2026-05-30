@@ -120,6 +120,31 @@ Confirmed decisions (2026-04-22):
 - **The CLI keeps the prior repo's ANSI board renderer.** The old project at `~/Repos/work/chess-tutor/core/chess-tutor-cli/src/board.rs` renders a chess board in the terminal using 256-color ANSI backgrounds (chequered squares), Unicode chess glyphs with an `--ascii` fallback, amber highlight for last-move squares, board flip for Black's perspective, and a Windows-specific pawn workaround (Windows Terminal forces U+265F to an emoji, so both pawns use U+2659 with SGR foreground colors to distinguish sides). It looks really good and the user wants it preserved. Port that file over mostly verbatim — it takes a FEN string as input, so it's decoupled from engine types, and it's the user's own code (no license concerns).
 - **egui for Windows desktop.** Chosen over .NET/MAUI/Tauri/etc. for two reasons: (1) Rust toolchain is already installed, no second development environment; (2) egui compiles to a single stand-alone binary — no runtime install burden on the user. macOS is covered by the Swift app. Linux is likely free as a side effect of egui being cross-platform; not a primary target.
 
+## Agent-facing CLI commands
+
+The `chess-tutor` CLI is **designed for agent consumption**. Before reasoning about a chess position by hand (who attacks what, what's pinned, what tactics exist), run the relevant subcommand — the engine already knows, and the answer is one command away. The case-study post-mortems in [`teaching-positions/`](teaching-positions/) show what happens when an agent skips this and reconstructs geometry by hand: it gets pins and discovered-attack alignments wrong, repeatedly.
+
+All FEN-taking commands print a self-describing summary header (POV, score units, opening, legal-move count) and accept `--json` for machine-parseable output. Score POV defaults to white-POV (matches chess.com); pass `--stm` for engine-side-to-move. Score scale is pawns (chess.com-comparable) alongside engine-cp (PawnEG=213 scale).
+
+| Command | Use it when |
+|---|---|
+| `chess-tutor board [FEN]` | render a position as ANSI board |
+| `chess-tutor moves [FEN]` | list legal moves, each annotated with `(check, captures Xy (N pts), promotion, en passant)` |
+| `chess-tutor eval [FEN]` | per-term eval trace with directional gloss on every term; `--glossary` for the standalone term dictionary |
+| `chess-tutor opening [FEN]` | identify the ECO opening |
+| `chess-tutor square <SQ> [FEN]` | per-square dossier — who attacks/defends, pin status, discovered-attack vehicle status, SEE for cheapest capture |
+| `chess-tutor threats [FEN]` | unified hanging / SEE-losing / pinned / overloaded / trapped, for both sides |
+| `chess-tutor forcing [FEN]` | every check / capture / promotion for both sides (opponent's options via null-move) |
+| `chess-tutor attacks [FEN]` | full (attacker, target) ledger, sorted by highest-value target first |
+| `chess-tutor alignments [FEN]` | pure geometric ray scan — every discovered-attack / pin / skewer candidate on the board |
+| `chess-tutor search [FEN]` | depth-N search with PV + score; `--annotate` adds a tactic-pattern summary line |
+
+**Rule of thumb — use the tool, don't reason by hand**: if you find yourself thinking *"the rook on e1 sees through the bishop to attack the queen"*, stop and run `chess-tutor square e5 <FEN>` or `chess-tutor alignments <FEN>` first. Trust the tool over mental reconstruction.
+
+**Rule of thumb — chess.com is accurate but opaque; we are transparent**: chess.com's eval bar uses NNUE Stockfish, which beats our classical SF11 port in head-to-head. When chess.com and our engine disagree on a position's evaluation, **default to "chess.com is right, why did we miss it"**, not "chess.com is wrong". The most common *apparent* disagreement is POV / scale confusion (chess.com is white-POV pawns; our raw engine `Value` is side-to-move engine-cp at PawnEG=213 — both surfaces are now labelled in the CLI, but earlier debugging sessions burned hours on this). Our engine isn't *more right* than chess.com — **it knows *why* it's right**, which is the whole product surface. The teaching layer's job is to extract chess-com-level conclusions *with explanations a 1200 player can learn from*; "more accurate than chess.com" is never the goal.
+
+Phase C/D/E commands coming: `tactics` (named-pattern detector), `explain` (one-shot aggregator), latent-threat scanner. See [`PLAN-cli.md`](PLAN-cli.md) for the full design.
+
 ## What we learned from the prior attempt (chess-tutor/)
 
 The prior repo tried two strategies, both failed:

@@ -16,21 +16,36 @@
 
 use std::fmt::Write;
 
+use chess_tutor_engine::analysis::TermId;
 use chess_tutor_engine::eval::{
     EvalTrace, KingBreakdown, MobilityBreakdown, PassedBreakdown, PawnsBreakdown, PiecesBreakdown,
     ThreatsBreakdown,
 };
 use chess_tutor_engine::types::Score;
 
+use crate::glossary;
+
 /// Render an [`EvalTrace`] as a multi-line report.
 pub fn render(trace: &EvalTrace) -> String {
     let mut out = String::new();
+    // Every number below this point is **engine-internal cp** (SF11
+    // scale: PawnEG = 213, PawnMG = 128). That's deliberate — the
+    // tapered eval combines per-term `(mg, eg)` Score components
+    // pre-conversion, and the only honest way to render the
+    // decomposition is at the scale the engine actually uses. The
+    // headline summary above the table already shows pawns (= chess.com
+    // scale) for the human-comparable read.
     writeln!(out, "phase:        {} / 128", trace.phase).unwrap();
     writeln!(out, "scale factor: {} / 64", trace.scale_factor).unwrap();
-    writeln!(out, "tempo:        {}", trace.tempo.0).unwrap();
     writeln!(
         out,
-        "final value:  {} cp (side-to-move POV)",
+        "tempo:        {:+} cp  (engine-internal, PawnEG=213 scale)",
+        trace.tempo.0
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "final value:  {:+} cp  (engine-internal, side-to-move POV)",
         trace.final_value.0
     )
     .unwrap();
@@ -44,95 +59,111 @@ pub fn render(trace: &EvalTrace) -> String {
     .unwrap();
     writeln!(out, "{}", "-".repeat(24 + 2 + 9 * 6 + 2 * 5)).unwrap();
 
-    // Pawn-structure: aggregate row plus indented sub-terms.
+    // Pawn-structure: aggregate row plus indented sub-terms with gloss.
     let pw = &trace.pawns[0];
     let pb = &trace.pawns[1];
-    write_pair_row(&mut out, "pawns", pw.total(), pb.total());
-    for (name, w, b) in pawns_sub_rows(pw, pb) {
-        write_pair_row(&mut out, &format!("  {}", name), w, b);
+    write_pair_row(&mut out, "pawns", pw.total(), pb.total(), None);
+    for (name, id, w, b) in pawns_sub_rows(pw, pb) {
+        write_pair_row(&mut out, &format!("  {}", name), w, b, Some(id));
     }
 
-    // Per-piece positional: same shape — aggregate row plus indented
-    // sub-terms.
+    // Per-piece positional.
     let mw = &trace.pieces[0];
     let mb = &trace.pieces[1];
-    write_pair_row(&mut out, "pieces", mw.total(), mb.total());
-    for (name, w, b) in pieces_sub_rows(mw, mb) {
-        write_pair_row(&mut out, &format!("  {}", name), w, b);
+    write_pair_row(&mut out, "pieces", mw.total(), mb.total(), None);
+    for (name, id, w, b) in pieces_sub_rows(mw, mb) {
+        write_pair_row(&mut out, &format!("  {}", name), w, b, Some(id));
     }
 
-    // Mobility: aggregate row plus indented per-piece-type sub-terms.
+    // Mobility.
     let mbw = &trace.mobility[0];
     let mbb = &trace.mobility[1];
-    write_pair_row(&mut out, "mobility", mbw.total(), mbb.total());
-    for (name, w, b) in mobility_sub_rows(mbw, mbb) {
-        write_pair_row(&mut out, &format!("  {}", name), w, b);
+    write_pair_row(&mut out, "mobility", mbw.total(), mbb.total(), None);
+    for (name, id, w, b) in mobility_sub_rows(mbw, mbb) {
+        write_pair_row(&mut out, &format!("  {}", name), w, b, Some(id));
     }
 
-    // Threats: aggregate row plus indented per-sub-term rows.
+    // Threats.
     let tw = &trace.threats[0];
     let tb = &trace.threats[1];
-    write_pair_row(&mut out, "threats", tw.total(), tb.total());
-    for (name, w, b) in threats_sub_rows(tw, tb) {
-        write_pair_row(&mut out, &format!("  {}", name), w, b);
+    write_pair_row(&mut out, "threats", tw.total(), tb.total(), None);
+    for (name, id, w, b) in threats_sub_rows(tw, tb) {
+        write_pair_row(&mut out, &format!("  {}", name), w, b, Some(id));
     }
 
-    // King safety: aggregate row plus indented per-sub-term rows.
+    // King safety.
     let kw = &trace.king[0];
     let kb = &trace.king[1];
-    write_pair_row(&mut out, "king", kw.total(), kb.total());
-    for (name, w, b) in king_sub_rows(kw, kb) {
-        write_pair_row(&mut out, &format!("  {}", name), w, b);
+    write_pair_row(&mut out, "king", kw.total(), kb.total(), None);
+    for (name, id, w, b) in king_sub_rows(kw, kb) {
+        write_pair_row(&mut out, &format!("  {}", name), w, b, Some(id));
     }
 
-    // Passed pawns: aggregate row plus indented per-sub-term rows.
+    // Passed pawns.
     let paw = &trace.passed[0];
     let pab = &trace.passed[1];
-    write_pair_row(&mut out, "passed", paw.total(), pab.total());
-    for (name, w, b) in passed_sub_rows(paw, pab) {
-        write_pair_row(&mut out, &format!("  {}", name), w, b);
+    write_pair_row(&mut out, "passed", paw.total(), pab.total(), None);
+    for (name, id, w, b) in passed_sub_rows(paw, pab) {
+        write_pair_row(&mut out, &format!("  {}", name), w, b, Some(id));
     }
 
-    // Space is still an aggregate single-row term.
-    let aggregates: &[(&str, [Score; 2])] = &[("space", trace.space)];
-    for (name, scores) in aggregates {
-        write_pair_row(&mut out, name, scores[0], scores[1]);
-    }
+    // Space is still an aggregate single-row term (one TermId, one row).
+    write_pair_row(&mut out, "space", trace.space[0], trace.space[1], Some(TermId::Space));
 
     // Single-sided (already net) terms — show only the net columns.
     // `material` is shown as an aggregate row above the two split
     // sub-rows (piece value + PSQ positional) so the eval report
     // mirrors the run-time decomposition without losing the legacy
     // single-row sum that older snapshots compared against.
-    let singles: &[(&str, Score)] = &[
-        ("material", trace.material.total()),
-        ("  piece-value", trace.material.piece_value),
-        ("  psq-positional", trace.material.psq_positional),
-        ("imbalance", trace.imbalance),
-        ("initiative", trace.initiative),
-        ("TOTAL", trace.total),
+    let singles: &[(&str, Score, Option<TermId>)] = &[
+        ("material", trace.material.total(), None),
+        (
+            "  piece-value",
+            trace.material.piece_value,
+            Some(TermId::MaterialPieceValue),
+        ),
+        (
+            "  psq-positional",
+            trace.material.psq_positional,
+            Some(TermId::MaterialPsqPositional),
+        ),
+        ("imbalance", trace.imbalance, Some(TermId::Imbalance)),
+        ("initiative", trace.initiative, Some(TermId::Initiative)),
+        ("TOTAL", trace.total, None),
     ];
     writeln!(out).unwrap();
-    writeln!(out, "{:<24}  {:>9}  {:>9}", "term (net)", "mg", "eg").unwrap();
-    writeln!(out, "{}", "-".repeat(24 + 2 + 9 * 2 + 2)).unwrap();
-    for (name, score) in singles {
+    writeln!(out, "{:<24}  {:>9}  {:>9}  description", "term (net)", "mg", "eg").unwrap();
+    writeln!(out, "{}", "-".repeat(24 + 2 + 9 * 2 + 2 + 80)).unwrap();
+    for (name, score, id) in singles {
+        let gloss_str = match id {
+            Some(t) => format!("  // {}", glossary::description(*t)),
+            None => String::new(),
+        };
         writeln!(
             out,
-            "{:<24}  {:>9}  {:>9}",
+            "{:<24}  {:>9}  {:>9}{}",
             name,
             score.mg().0,
-            score.eg().0
+            score.eg().0,
+            gloss_str,
         )
         .unwrap();
     }
     out
 }
 
-fn write_pair_row(out: &mut String, name: &str, w: Score, b: Score) {
+fn write_pair_row(out: &mut String, name: &str, w: Score, b: Score, id: Option<TermId>) {
     let net = w - b;
+    // The gloss prints as a trailing `  // description` so a regex /
+    // column-parser can ignore everything past the first `//` and still
+    // parse the numeric block deterministically.
+    let gloss_str = match id {
+        Some(t) => format!("  // {}", glossary::description(t)),
+        None => String::new(),
+    };
     writeln!(
         out,
-        "{:<24}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "{:<24}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}{}",
         name,
         w.mg().0,
         w.eg().0,
@@ -140,21 +171,26 @@ fn write_pair_row(out: &mut String, name: &str, w: Score, b: Score) {
         b.eg().0,
         net.mg().0,
         net.eg().0,
+        gloss_str,
     )
     .unwrap();
 }
 
+// Each sub_rows iterator yields `(short-label, TermId, white_score,
+// black_score)`. The TermId feeds the gloss lookup so `write_pair_row`
+// can append a `// description` trailer.
+
 fn king_sub_rows<'a>(
     w: &'a KingBreakdown,
     b: &'a KingBreakdown,
-) -> impl Iterator<Item = (&'static str, Score, Score)> + 'a {
+) -> impl Iterator<Item = (&'static str, TermId, Score, Score)> + 'a {
     [
-        ("pawn-shield", w.pawn_shield, b.pawn_shield),
-        ("pawn-storm", w.pawn_storm, b.pawn_storm),
-        ("pawn-distance", w.king_pawn_distance, b.king_pawn_distance),
-        ("danger", w.danger, b.danger),
-        ("pawnless-flank", w.pawnless_flank, b.pawnless_flank),
-        ("flank-attacks", w.flank_attacks, b.flank_attacks),
+        ("pawn-shield", TermId::KingPawnShield, w.pawn_shield, b.pawn_shield),
+        ("pawn-storm", TermId::KingPawnStorm, w.pawn_storm, b.pawn_storm),
+        ("pawn-distance", TermId::KingPawnDistance, w.king_pawn_distance, b.king_pawn_distance),
+        ("danger", TermId::KingDanger, w.danger, b.danger),
+        ("pawnless-flank", TermId::KingPawnlessFlank, w.pawnless_flank, b.pawnless_flank),
+        ("flank-attacks", TermId::KingFlankAttacks, w.flank_attacks, b.flank_attacks),
     ]
     .into_iter()
 }
@@ -162,12 +198,12 @@ fn king_sub_rows<'a>(
 fn passed_sub_rows<'a>(
     w: &'a PassedBreakdown,
     b: &'a PassedBreakdown,
-) -> impl Iterator<Item = (&'static str, Score, Score)> + 'a {
+) -> impl Iterator<Item = (&'static str, TermId, Score, Score)> + 'a {
     [
-        ("rank-bonus", w.rank_bonus, b.rank_bonus),
-        ("king-proximity", w.king_proximity, b.king_proximity),
-        ("free-advance", w.free_advance, b.free_advance),
-        ("stopper-penalty", w.stopper_penalty, b.stopper_penalty),
+        ("rank-bonus", TermId::PassedRankBonus, w.rank_bonus, b.rank_bonus),
+        ("king-proximity", TermId::PassedKingProximity, w.king_proximity, b.king_proximity),
+        ("free-advance", TermId::PassedFreeAdvance, w.free_advance, b.free_advance),
+        ("stopper-penalty", TermId::PassedStopperPenalty, w.stopper_penalty, b.stopper_penalty),
     ]
     .into_iter()
 }
@@ -175,12 +211,12 @@ fn passed_sub_rows<'a>(
 fn mobility_sub_rows<'a>(
     w: &'a MobilityBreakdown,
     b: &'a MobilityBreakdown,
-) -> impl Iterator<Item = (&'static str, Score, Score)> + 'a {
+) -> impl Iterator<Item = (&'static str, TermId, Score, Score)> + 'a {
     [
-        ("knight", w.knight, b.knight),
-        ("bishop", w.bishop, b.bishop),
-        ("rook", w.rook, b.rook),
-        ("queen", w.queen, b.queen),
+        ("knight", TermId::MobilityKnight, w.knight, b.knight),
+        ("bishop", TermId::MobilityBishop, w.bishop, b.bishop),
+        ("rook", TermId::MobilityRook, w.rook, b.rook),
+        ("queen", TermId::MobilityQueen, w.queen, b.queen),
     ]
     .into_iter()
 }
@@ -188,17 +224,17 @@ fn mobility_sub_rows<'a>(
 fn threats_sub_rows<'a>(
     w: &'a ThreatsBreakdown,
     b: &'a ThreatsBreakdown,
-) -> impl Iterator<Item = (&'static str, Score, Score)> + 'a {
+) -> impl Iterator<Item = (&'static str, TermId, Score, Score)> + 'a {
     [
-        ("by-minor", w.by_minor, b.by_minor),
-        ("by-rook", w.by_rook, b.by_rook),
-        ("by-king", w.by_king, b.by_king),
-        ("hanging", w.hanging, b.hanging),
-        ("restricted", w.restricted, b.restricted),
-        ("by-safe-pawn", w.by_safe_pawn, b.by_safe_pawn),
-        ("by-pawn-push", w.by_pawn_push, b.by_pawn_push),
-        ("knight-on-queen", w.knight_on_queen, b.knight_on_queen),
-        ("slider-on-queen", w.slider_on_queen, b.slider_on_queen),
+        ("by-minor", TermId::ThreatsByMinor, w.by_minor, b.by_minor),
+        ("by-rook", TermId::ThreatsByRook, w.by_rook, b.by_rook),
+        ("by-king", TermId::ThreatsByKing, w.by_king, b.by_king),
+        ("hanging", TermId::ThreatsHanging, w.hanging, b.hanging),
+        ("restricted", TermId::ThreatsRestricted, w.restricted, b.restricted),
+        ("by-safe-pawn", TermId::ThreatsBySafePawn, w.by_safe_pawn, b.by_safe_pawn),
+        ("by-pawn-push", TermId::ThreatsByPawnPush, w.by_pawn_push, b.by_pawn_push),
+        ("knight-on-queen", TermId::ThreatsKnightOnQueen, w.knight_on_queen, b.knight_on_queen),
+        ("slider-on-queen", TermId::ThreatsSliderOnQueen, w.slider_on_queen, b.slider_on_queen),
     ]
     .into_iter()
 }
@@ -206,14 +242,14 @@ fn threats_sub_rows<'a>(
 fn pawns_sub_rows<'a>(
     w: &'a PawnsBreakdown,
     b: &'a PawnsBreakdown,
-) -> impl Iterator<Item = (&'static str, Score, Score)> + 'a {
+) -> impl Iterator<Item = (&'static str, TermId, Score, Score)> + 'a {
     [
-        ("connected", w.connected, b.connected),
-        ("isolated", w.isolated, b.isolated),
-        ("backward", w.backward, b.backward),
-        ("doubled", w.doubled, b.doubled),
-        ("weak-unopposed", w.weak_unopposed, b.weak_unopposed),
-        ("weak-lever", w.weak_lever, b.weak_lever),
+        ("connected", TermId::PawnsConnected, w.connected, b.connected),
+        ("isolated", TermId::PawnsIsolated, w.isolated, b.isolated),
+        ("backward", TermId::PawnsBackward, w.backward, b.backward),
+        ("doubled", TermId::PawnsDoubled, w.doubled, b.doubled),
+        ("weak-unopposed", TermId::PawnsWeakUnopposed, w.weak_unopposed, b.weak_unopposed),
+        ("weak-lever", TermId::PawnsWeakLever, w.weak_lever, b.weak_lever),
     ]
     .into_iter()
 }
@@ -221,43 +257,19 @@ fn pawns_sub_rows<'a>(
 fn pieces_sub_rows<'a>(
     w: &'a PiecesBreakdown,
     b: &'a PiecesBreakdown,
-) -> impl Iterator<Item = (&'static str, Score, Score)> + 'a {
+) -> impl Iterator<Item = (&'static str, TermId, Score, Score)> + 'a {
     [
-        ("outposts", w.outposts, b.outposts),
-        (
-            "reachable-outposts",
-            w.reachable_outposts,
-            b.reachable_outposts,
-        ),
-        (
-            "minor-behind-pawn",
-            w.minor_behind_pawn,
-            b.minor_behind_pawn,
-        ),
-        ("king-protector", w.king_protector, b.king_protector),
-        ("bishop-pawns", w.bishop_pawns, b.bishop_pawns),
-        (
-            "long-diagonal-bishop",
-            w.long_diagonal_bishop,
-            b.long_diagonal_bishop,
-        ),
-        (
-            "rook-on-queen-file",
-            w.rook_on_queen_file,
-            b.rook_on_queen_file,
-        ),
-        (
-            "rook-on-open-file",
-            w.rook_on_open_file,
-            b.rook_on_open_file,
-        ),
-        (
-            "rook-on-semiopen-file",
-            w.rook_on_semiopen_file,
-            b.rook_on_semiopen_file,
-        ),
-        ("trapped-rook", w.trapped_rook, b.trapped_rook),
-        ("weak-queen", w.weak_queen, b.weak_queen),
+        ("outposts", TermId::PiecesOutposts, w.outposts, b.outposts),
+        ("reachable-outposts", TermId::PiecesReachableOutposts, w.reachable_outposts, b.reachable_outposts),
+        ("minor-behind-pawn", TermId::PiecesMinorBehindPawn, w.minor_behind_pawn, b.minor_behind_pawn),
+        ("king-protector", TermId::PiecesKingProtector, w.king_protector, b.king_protector),
+        ("bishop-pawns", TermId::PiecesBishopPawns, w.bishop_pawns, b.bishop_pawns),
+        ("long-diagonal-bishop", TermId::PiecesLongDiagonalBishop, w.long_diagonal_bishop, b.long_diagonal_bishop),
+        ("rook-on-queen-file", TermId::PiecesRookOnQueenFile, w.rook_on_queen_file, b.rook_on_queen_file),
+        ("rook-on-open-file", TermId::PiecesRookOnOpenFile, w.rook_on_open_file, b.rook_on_open_file),
+        ("rook-on-semiopen-file", TermId::PiecesRookOnSemiopenFile, w.rook_on_semiopen_file, b.rook_on_semiopen_file),
+        ("trapped-rook", TermId::PiecesTrappedRook, w.trapped_rook, b.trapped_rook),
+        ("weak-queen", TermId::PiecesWeakQueen, w.weak_queen, b.weak_queen),
     ]
     .into_iter()
 }

@@ -19,7 +19,10 @@
 
 use std::collections::HashSet;
 
-use chess_tutor_engine::analysis::{list_hanging, HangingPiece};
+use chess_tutor_engine::analysis::{
+    find_overloaded, list_hanging, Confidence, HangingPiece, MatePattern, OverloadedPiece,
+    TacticHit, TacticPattern,
+};
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::pawns::PawnsEval;
 use chess_tutor_engine::position::Position;
@@ -35,8 +38,31 @@ use crate::view::{
 /// opportunities and "ours" cards as risks. The view model is empty
 /// (no items) when nothing notable is on the board, in which case
 /// the renderer paints an encouraging neutral message.
-pub fn build_coaching_view(pos: &Position, user_color: Color) -> CoachingViewModel {
+///
+/// `tactic_hint` is an optional named tactic the analytical engine
+/// flagged on the user's predicted best line (pre-move tactic surface).
+/// When present and of [`Confidence::High`], a "There's a … available"
+/// card surfaces first — pattern named, location withheld (per the
+/// pedagogical rule that coaching never names squares). Medium-
+/// confidence hits are dropped here; the retrospective is where the
+/// student studies the actual line.
+pub fn build_coaching_view(
+    pos: &Position,
+    user_color: Color,
+    tactic_hint: Option<&TacticHit>,
+) -> CoachingViewModel {
     let mut items: Vec<CoachingItem> = Vec::new();
+
+    // Tactic card first when one fires — it's the strongest signal
+    // ("look for a fork here") and the rest of the panel becomes
+    // secondary context once the student knows there's a combination
+    // to find. The High-confidence gate keeps misfires off this
+    // pre-move surface (see HANDOFF-ux Tactic library design brief).
+    if let Some(hit) = tactic_hint {
+        if hit.confidence == Confidence::High {
+            items.push(tactic_card(hit));
+        }
+    }
 
     // Compute legal moves once. Used for:
     //   - Surfacing the "you're in check" card with concrete
@@ -86,6 +112,18 @@ pub fn build_coaching_view(pos: &Position, user_color: Color) -> CoachingViewMod
         items.push(opportunity_card(&theirs_capturable));
     }
 
+    // Overloaded enemy pieces: a defender doing two jobs at once. A
+    // pre-move structural observation (not a found combination), so
+    // we name the squares the same way `opportunity_card` does — the
+    // student still has to find the *move* that forces the choice.
+    // The strict sole-defender-of-≥2 predicate keeps misfires low (see
+    // overloading.rs //!); even so the surface is conservative for
+    // now — no retrospective version yet, just coaching.
+    let theirs_overloaded = find_overloaded(pos, !user_color);
+    if !theirs_overloaded.is_empty() {
+        items.push(overloaded_card(pos, &theirs_overloaded));
+    }
+
     // Risk scan: our undefended pieces. We don't legal-move-filter
     // these because the threat is about the opponent's *next* turn
     // (which the engine can't fully evaluate without searching) —
@@ -104,6 +142,105 @@ pub fn build_coaching_view(pos: &Position, user_color: Color) -> CoachingViewMod
     items.extend(pawn_weakness_cards(&pawns, !user_color, false));
 
     CoachingViewModel { items }
+}
+
+/// Build the "There's a fork available" pre-move tactic card.
+///
+/// **No square annotations** by design — the pedagogical rule for
+/// pre-move coaching is to name the pattern (so the student knows
+/// what shape to look for) without telling them where it is (so they
+/// do the work of finding it). The detail text echoes the
+/// retrospective's per-pattern lesson so the surface terminology stays
+/// consistent across the two panels.
+fn tactic_card(hit: &TacticHit) -> CoachingItem {
+    let heading = if hit.pattern == TacticPattern::Checkmate {
+        match hit.mate_pattern {
+            Some(MatePattern::BackRank) => "Look for a back-rank mate".to_string(),
+            Some(MatePattern::Smothered) => "Look for a smothered mate".to_string(),
+            _ => "There's a forced mate".to_string(),
+        }
+    } else {
+        format!("There's {} available", coaching_pattern_phrase(hit.pattern))
+    };
+    let summary = if hit.pattern == TacticPattern::Checkmate {
+        "the engine sees a forced mate from here".to_string()
+    } else if hit.material_gain.is_some_and(|g| g > 0) {
+        "the engine sees a winning combination".to_string()
+    } else {
+        "the engine sees the pattern in this position".to_string()
+    };
+    let detail = format!(
+        "{} Look for it before you move. If you can't find it, play your best \
+         move and come back to the retrospective afterwards — the card will \
+         show the line.",
+        coaching_pattern_lesson(hit.pattern)
+    );
+    CoachingItem {
+        category: RetrospectiveCategory::Tactic,
+        heading,
+        summary,
+        detail,
+        sentiment: Sentiment::Positive,
+        // Pedagogically: no annotations on the coaching surface — the
+        // student should locate the pattern themselves.
+        annotations: Vec::new(),
+    }
+}
+
+fn coaching_pattern_phrase(pattern: TacticPattern) -> &'static str {
+    // Coaching prose mirrors the retrospective's pattern_phrase, kept
+    // separate so the two surfaces can iterate independently if needed
+    // (e.g. coaching might add "you might have"/"you may have a … here"
+    // hedges).
+    match pattern {
+        TacticPattern::Fork => "a fork",
+        TacticPattern::HangingCapture => "a free piece",
+        TacticPattern::RemovingDefender => "a removing-the-defender tactic",
+        TacticPattern::TrappedPiece => "a trapped piece",
+        TacticPattern::Pin => "a pin",
+        TacticPattern::Skewer => "a skewer",
+        TacticPattern::DiscoveredAttack => "a discovered attack",
+        TacticPattern::DiscoveredCheck => "a discovered check",
+        TacticPattern::DoubleCheck => "a double-check tactic",
+        TacticPattern::Sacrifice => "a sound sacrifice",
+        TacticPattern::Intermezzo => "an in-between move",
+        TacticPattern::Deflection => "a deflection",
+        TacticPattern::Attraction => "an attraction",
+        TacticPattern::Interference => "an interference tactic",
+        TacticPattern::Clearance => "a clearance",
+        TacticPattern::XRay => "an x-ray battery",
+        TacticPattern::AttackingF2F7 => "an attack on f2/f7",
+        TacticPattern::UnderPromotion => "an under-promotion",
+        // Mate is handled at the call site (different heading shape).
+        TacticPattern::Checkmate => "checkmate",
+    }
+}
+
+fn coaching_pattern_lesson(pattern: TacticPattern) -> &'static str {
+    // One-sentence reminder of the pattern shape. Distinct from the
+    // retrospective's longer lesson — keep coaching brief so the
+    // student isn't reading more than thinking.
+    match pattern {
+        TacticPattern::Fork => "A single piece can attack two of your opponent's pieces at once.",
+        TacticPattern::HangingCapture => "One of your opponent's pieces is attacked and undefended.",
+        TacticPattern::RemovingDefender => "If you capture the only defender of an enemy piece, that piece falls next.",
+        TacticPattern::TrappedPiece => "An enemy piece has no safe square — every move it can make loses material.",
+        TacticPattern::Pin => "A piece in your opponent's army can't move without exposing a more valuable one (or its king) behind it.",
+        TacticPattern::Skewer => "Two enemy pieces line up — the more valuable one in front must move, exposing what's behind.",
+        TacticPattern::DiscoveredAttack => "Moving a piece can unmask an attack from a friend behind it. Two threats land at once.",
+        TacticPattern::DiscoveredCheck => "Moving a piece can unmask a check from a friend behind it. The moving piece is free to do something extra.",
+        TacticPattern::DoubleCheck => "Two pieces deliver check at once — the king must move; blocking and capturing don't work.",
+        TacticPattern::Sacrifice => "Give up material now to gain something more important later — winning attack, decisive position, more material.",
+        TacticPattern::Intermezzo => "Instead of the expected recapture, insert a forcing move first. The opponent must respond before the trade resumes.",
+        TacticPattern::Deflection => "Pull an enemy defender off its duty — what it was guarding falls.",
+        TacticPattern::Attraction => "Lure an enemy piece (often the king) onto a square where it can be attacked decisively.",
+        TacticPattern::Interference => "Block the line between an enemy piece and what it's defending — the defender's reach is broken.",
+        TacticPattern::Clearance => "Move a piece off its square to clear the line for a piece behind it.",
+        TacticPattern::XRay => "Stack two of your pieces on the same file or diagonal — when the front one captures, the back one recaptures.",
+        TacticPattern::AttackingF2F7 => "f2 and f7 are the weak points by an uncastled king — only the king itself defends them.",
+        TacticPattern::UnderPromotion => "Promoting to a knight (or rook/bishop) is sometimes stronger than to a queen — usually for an immediate mate or to avoid stalemate.",
+        TacticPattern::Checkmate => "There's a forced mating sequence available from here.",
+    }
 }
 
 /// Build the "Your king is in check" card. Highlights the king and
@@ -305,6 +442,83 @@ fn opportunity_card(hangs: &[HangingPiece]) -> CoachingItem {
     CoachingItem {
         category: RetrospectiveCategory::Threats,
         heading: "Look for a capture".to_string(),
+        summary,
+        detail: detail_lines.join("\n"),
+        sentiment: Sentiment::Positive,
+        annotations,
+    }
+}
+
+/// Overloaded enemy defender(s) — a piece holding up ≥ 2 of its own
+/// pieces under attack. The card names the defender + the squares it
+/// is the *sole* protector of, leaving the student to find the move
+/// that forces the choice (deflection, capture-and-pin, etc.).
+///
+/// Single-card-for-all-defenders even if multiple fire, so the panel
+/// stays scannable. Annotations: BadPiece on each overloaded defender
+/// (the piece about to lose its juggling act) + Threat on each duty
+/// (our opportunity squares).
+fn overloaded_card(pos: &Position, overloaded: &[OverloadedPiece]) -> CoachingItem {
+    let mut annotations: Vec<BoardAnnotation> = Vec::new();
+    let mut detail_lines = Vec::new();
+    for op in overloaded {
+        // Defender — the overloaded piece itself.
+        annotations.push(BoardAnnotation::SquareHighlight {
+            square: op.piece,
+            kind: AnnotationKind::BadPiece,
+        });
+        // Duties — pieces the defender is the only thing protecting.
+        for &duty in &op.duties {
+            annotations.push(BoardAnnotation::SquareHighlight {
+                square: duty,
+                kind: AnnotationKind::Threat,
+            });
+            // Arrow from defender to duty so the load-bearing geometry
+            // is visible at a glance.
+            annotations.push(BoardAnnotation::Arrow {
+                from: op.piece,
+                to: duty,
+                kind: AnnotationKind::Defender,
+            });
+        }
+        let defender_name = pos
+            .piece_on(op.piece)
+            .map(|p| piece_name(p.kind()))
+            .unwrap_or("piece");
+        let duty_text: Vec<String> = op
+            .duties
+            .iter()
+            .map(|&sq| {
+                let dn = pos
+                    .piece_on(sq)
+                    .map(|p| piece_name(p.kind()))
+                    .unwrap_or("piece");
+                format!("{} on {}", dn, sq.to_algebraic())
+            })
+            .collect();
+        detail_lines.push(format!(
+            "Their {} on {} is the only defender of {}. If you force it off one \
+             duty — by capturing it, pinning it, or attacking it strongly enough \
+             that it has to move — the piece it was guarding falls.",
+            defender_name,
+            op.piece.to_algebraic(),
+            join_with_and(&duty_text),
+        ));
+    }
+    let summary = if overloaded.len() == 1 {
+        format!(
+            "{} on {} is doing two jobs",
+            pos.piece_on(overloaded[0].piece)
+                .map(|p| piece_name(p.kind()))
+                .unwrap_or("piece"),
+            overloaded[0].piece.to_algebraic(),
+        )
+    } else {
+        format!("{} pieces are overloaded", overloaded.len())
+    };
+    CoachingItem {
+        category: RetrospectiveCategory::Tactic,
+        heading: "Their piece is overloaded".to_string(),
         summary,
         detail: detail_lines.join("\n"),
         sentiment: Sentiment::Positive,

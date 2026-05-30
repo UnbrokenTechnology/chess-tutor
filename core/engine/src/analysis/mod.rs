@@ -100,8 +100,10 @@
 
 pub mod blocked_center_outcome;
 pub mod castling_outcome;
+pub mod check_followups;
 pub mod initiative_outcome;
 pub mod king_safety_outcome;
+pub mod latent_threats;
 pub mod material_outcome;
 pub mod mobility_outcome;
 pub mod move_analysis;
@@ -145,6 +147,7 @@ fn post_user_move(
 // callers should use `chess_tutor_engine::analysis::Foo` everywhere.
 pub use blocked_center_outcome::{compute_blocked_center_outcome, BlockedCenterOutcome};
 pub use castling_outcome::{compute_castling_outcome, CastlingOutcome};
+pub use check_followups::{find_check_followups, CheckFollowup, ReplyFollowup};
 pub use initiative_outcome::{compute_initiative_outcome, InitiativeOutcome};
 pub use king_safety_outcome::{compute_king_safety_outcome, KingSafetyOutcome, KingSafetySnapshot};
 pub use material_outcome::{compute_material_outcome, CaptureEvent, MaterialOutcome};
@@ -154,6 +157,7 @@ pub use move_assessment::{
     classify_user_move, BlunderInfo, GatingConfig, MoveAssessment, TeachingInfo, TermContribution,
     TermFamily,
 };
+pub use latent_threats::{find_latent_threats, LatentThreat, TriggerShape};
 pub use overlays::{compute_overlays, trapped_cages, OverlayData};
 pub use overloading::{find_overloaded, OverloadedPiece};
 pub use passed_pawns_outcome::{compute_passed_pawns_outcome, PassedPawnsOutcome};
@@ -162,8 +166,8 @@ pub use pieces_positional_outcome::{compute_pieces_positional_outcome, PiecesPos
 pub use space_outcome::{compute_space_outcome, SpaceOutcome};
 pub use surprise::{detect_surprise, SurpriseKind};
 pub use tactic_outcome::{
-    compute_tactic_outcome, Confidence, MatePattern, PriorMove, TacticHit, TacticPattern,
-    TacticsOutcome,
+    compute_tactic_outcome, find_best_tactic_in_position, find_tactic_in_line, Confidence,
+    MatePattern, PriorMove, TacticHit, TacticPattern, TacticsOutcome,
 };
 pub use term_delta::{compute_term_deltas, cumulative_prefix, TermDelta};
 pub use term_id::TermId;

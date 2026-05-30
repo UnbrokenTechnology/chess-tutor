@@ -271,12 +271,14 @@ impl Session {
             return out;
         };
         let pre = self.pre_move_position(entry_idx);
+        let prior_move = self.prior_move_for(entry_idx);
         let vm = crate::retrospective_view::build_retrospective_view(
             &pre,
             &result.analyses,
             result.user_move,
             self.show_all_signals,
             self.learning.reveal_best_moves,
+            prior_move,
         );
         if let Some(ann) = vm.headline.best_move_annotation {
             out.push(ann);
@@ -372,12 +374,14 @@ impl Session {
             match &entry.retrospective {
                 Some(result) => {
                     let pre = self.pre_move_position(entry_index);
+                    let prior_move = self.prior_move_for(entry_index);
                     let view_model = crate::retrospective_view::build_retrospective_view(
                         &pre,
                         &result.analyses,
                         result.user_move,
                         self.show_all_signals,
                         self.learning.reveal_best_moves,
+                        prior_move,
                     );
                     let selected_item = match self.selected_retrospective {
                         Some((h, i)) if h == entry_index => Some(i),
@@ -429,8 +433,12 @@ impl Session {
     }
 
     pub(crate) fn build_coaching_panel_view(&self) -> CoachingPanelView {
-        let view_model =
-            crate::coaching_view::build_coaching_view(&self.position, self.user_color());
+        let tactic_hint = self.coaching_tactic_hint();
+        let view_model = crate::coaching_view::build_coaching_view(
+            &self.position,
+            self.user_color(),
+            tactic_hint.as_ref(),
+        );
         CoachingPanelView { view_model }
     }
 

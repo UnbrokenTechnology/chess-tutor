@@ -9,7 +9,7 @@ fn coaching_view_lists_their_undefended_piece_after_a_blunder() {
         "rnbqk1nr/pppp1ppp/8/4p3/4P1b1/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3",
     )
     .unwrap();
-    let view = build_coaching_view(&pos, Color::White);
+    let view = build_coaching_view(&pos, Color::White, None);
     assert!(
         view.items
             .iter()
@@ -31,7 +31,7 @@ fn coaching_view_suppresses_unreachable_captures_when_in_check() {
         "2k4r/1ppbR1pp/pqp5/8/B5n1/2P3P1/PP2QrKP/RN6 w - - 0 1",
     )
     .unwrap();
-    let view = build_coaching_view(&pos, Color::White);
+    let view = build_coaching_view(&pos, Color::White, None);
     assert!(
         !view.items.iter().any(|it| it.heading == "Look for a capture"),
         "no legal capture reaches an undefended piece while in check, \
@@ -56,7 +56,7 @@ fn coaching_view_check_card_lists_response_counts() {
         "2k4r/1ppbR1pp/pqp5/8/B5n1/2P3P1/PP2QrKP/RN6 w - - 0 1",
     )
     .unwrap();
-    let view = build_coaching_view(&pos, Color::White);
+    let view = build_coaching_view(&pos, Color::White, None);
     let check_card = view
         .items
         .iter()
@@ -90,7 +90,7 @@ fn coaching_view_surfaces_en_passant_opportunity() {
         "rnbqkbnr/pp2pppp/8/2pPp3/8/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 3",
     )
     .unwrap();
-    let view = build_coaching_view(&pos, Color::White);
+    let view = build_coaching_view(&pos, Color::White, None);
     let ep_card = view
         .items
         .iter()
@@ -111,10 +111,115 @@ fn coaching_view_is_empty_on_startpos() {
     // structural weaknesses. The coaching panel should have
     // nothing to say beyond an encouragement to think.
     let pos = Position::startpos();
-    let view = build_coaching_view(&pos, Color::White);
+    let view = build_coaching_view(&pos, Color::White, None);
     assert!(
         view.items.is_empty(),
         "startpos coaching should be empty, got: {:?}",
         view.items.iter().map(|i| &i.heading).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn coaching_tactic_card_names_pattern_without_square_annotations() {
+    use chess_tutor_engine::analysis::Confidence;
+    use chess_tutor_engine::types::Square;
+    // Synthesize a fork hit and feed it into a clean startpos so the
+    // tactic card is the *only* item that fires.
+    let pos = Position::startpos();
+    let hit = TacticHit {
+        pattern: TacticPattern::Fork,
+        pv_ply: 0,
+        primary_piece: Square::F7,
+        targets: vec![Square::E5, Square::D8],
+        material_gain: Some(300),
+        confidence: Confidence::High,
+        sacrifice: false,
+        mate_pattern: None,
+    };
+    let view = build_coaching_view(&pos, Color::White, Some(&hit));
+    let card = view
+        .items
+        .iter()
+        .find(|i| i.heading.starts_with("There's"))
+        .expect("tactic card fires");
+    assert_eq!(card.heading, "There's a fork available");
+    // Pedagogical rule: pre-move coaching never names squares — the
+    // tactic card must produce zero board annotations.
+    assert!(
+        card.annotations.is_empty(),
+        "coaching tactic card must not leak the squares: {:?}",
+        card.annotations
+    );
+}
+
+#[test]
+fn coaching_tactic_card_suppressed_when_medium_confidence() {
+    use chess_tutor_engine::analysis::Confidence;
+    use chess_tutor_engine::types::Square;
+    let pos = Position::startpos();
+    let hit = TacticHit {
+        pattern: TacticPattern::Fork,
+        pv_ply: 0,
+        primary_piece: Square::F7,
+        targets: vec![Square::E5, Square::D8],
+        material_gain: None,
+        confidence: Confidence::Medium,
+        sacrifice: false,
+        mate_pattern: None,
+    };
+    let view = build_coaching_view(&pos, Color::White, Some(&hit));
+    assert!(
+        view.items.iter().all(|i| !i.heading.starts_with("There's")),
+        "Medium-confidence hits stay off the coaching surface (retrospective only)"
+    );
+}
+
+#[test]
+fn coaching_view_surfaces_overloaded_enemy_defender() {
+    // OVERLOAD fixture from overloading_tests.rs: black knight on d8
+    // is the sole defender of both bishops on c6 and e6, each attacked
+    // by a white rook. White (the user) is to move; the coaching panel
+    // should name the overload and highlight all three squares.
+    let pos =
+        Position::from_fen("3n2k1/8/2b1b3/8/8/8/8/2R1R1K1 w - - 0 1").unwrap();
+    let view = build_coaching_view(&pos, Color::White, None);
+    let card = view
+        .items
+        .iter()
+        .find(|i| i.heading == "Their piece is overloaded")
+        .expect("overloaded card fires");
+    assert_eq!(card.sentiment, Sentiment::Positive);
+    // Highlights cover defender + both duties + arrows for each duty.
+    use chess_tutor_engine::types::Square;
+    let highlight_at = |sq, kind| {
+        card.annotations.iter().any(|a| {
+            matches!(a, BoardAnnotation::SquareHighlight { square, kind: k }
+                if *square == sq && *k == kind)
+        })
+    };
+    assert!(highlight_at(Square::D8, AnnotationKind::BadPiece));
+    assert!(highlight_at(Square::C6, AnnotationKind::Threat));
+    assert!(highlight_at(Square::E6, AnnotationKind::Threat));
+}
+
+#[test]
+fn coaching_mate_hint_uses_named_heading_for_back_rank() {
+    use chess_tutor_engine::analysis::{Confidence, MatePattern};
+    use chess_tutor_engine::types::Square;
+    let pos = Position::startpos();
+    let hit = TacticHit {
+        pattern: TacticPattern::Checkmate,
+        pv_ply: 0,
+        primary_piece: Square::H7,
+        targets: vec![Square::G8],
+        material_gain: None,
+        confidence: Confidence::High,
+        sacrifice: false,
+        mate_pattern: Some(MatePattern::BackRank),
+    };
+    let view = build_coaching_view(&pos, Color::White, Some(&hit));
+    assert!(
+        view.items.iter().any(|i| i.heading.contains("back-rank mate")),
+        "Back-rank mate must use its named heading on the coaching surface"
     );
 }

@@ -20,49 +20,46 @@ pub(crate) fn pv_to_san(root: &Position, pv: &[chess_tutor_engine::types::Move])
     out
 }
 
-/// Render a score as pawns (`+0.28`, `-1.05`) or mate notation
-/// (`#5`, `-#3`) from the root side-to-move's point of view. Matches the
-/// convention the REPL uses.
+/// Render a score as conventional pawns (`+0.28`, `-1.05`) or mate
+/// notation (`#5`, `-#3`). Routes through [`crate::units::format_pawns`]
+/// so the scale conversion (engine PAWN_EG = 213 → conventional
+/// pawn = 100) stays consistent across every CLI surface. The caller is
+/// responsible for re-signing to white-POV when that's desired — this
+/// function does not flip the sign.
 pub(crate) fn format_score_pawns(score: chess_tutor_engine::types::Value) -> String {
-    use chess_tutor_engine::types::Value;
-    let abs = score.0.abs();
-    let mate_threshold = Value::MATE.0 - Value::MAX_PLY;
-    if abs >= mate_threshold {
-        // Plies-to-mate = MATE - abs_score. Moves = (plies + 1) / 2.
-        let plies = Value::MATE.0 - abs;
-        let moves = (plies + 1) / 2;
-        if score.0 >= 0 {
-            format!("#{}", moves)
-        } else {
-            format!("-#{}", moves)
-        }
-    } else {
-        format!("{:+.2}", score.0 as f32 / 100.0)
-    }
+    crate::units::format_pawns(score)
 }
 
 /// Render multiple ranked PVs as aligned rows. The first line's delta
-/// column reads `(0 cp)` (since it's the leader); subsequent lines show
-/// delta-from-top. Column widths are chosen so every PV starts in the
-/// same output column.
-pub(crate) fn render_multi_pv(root: &Position, lines: &[chess_tutor_engine::engine::SearchLine]) -> String {
+/// column reads `(0 cp)`; subsequent lines show the delta-from-top in
+/// **engine-cp** so the numbers connect to search-code thresholds
+/// (aspiration widths, blunder bands, futility margins) without a
+/// scale conversion. The headline score column is in pawns
+/// (chess.com-comparable) and pre-oriented per [`Orientation`].
+pub(crate) fn render_multi_pv(
+    root: &Position,
+    lines: &[chess_tutor_engine::engine::SearchLine],
+    orientation: crate::units::Orientation,
+) -> String {
     use std::fmt::Write;
+    let stm = root.side_to_move();
     let top_score = lines[0].score.0;
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
         let pv_san = pv_to_san(root, &line.pv);
-        let delta = line.score.0 - top_score;
-        let delta_str = if delta == 0 {
+        let oriented = orientation.apply(line.score, stm);
+        let delta_engine = line.score.0 - top_score;
+        let delta_str = if delta_engine == 0 {
             "(0 cp)".to_string()
         } else {
-            format!("({:+} cp)", delta)
+            format!("({:+} cp)", delta_engine)
         };
         let settled_str = format_settled_suffix(&line.pv, line.settled_ply);
         writeln!(
             out,
-            "  {:>2}. {:>6}   {:<10}  {:<36}  {}",
+            "  {:>2}. {:>6}   {:<12}  {:<36}  {}",
             i + 1,
-            format_score_pawns(line.score),
+            format_score_pawns(oriented),
             delta_str,
             pv_san.join(" "),
             settled_str,

@@ -2,7 +2,7 @@
 
 Forward-looking UX context. The product surface is teaching feedback, not the engine. See [`HANDOFF.md`](HANDOFF.md) for the index, [`CLAUDE.md`](CLAUDE.md) for the mission and ground rules, and [`HANDOFF-perf.md`](HANDOFF-perf.md) for engine perf state (read only if perf becomes relevant to a UX task).
 
-> ▶️ **This is now the ACTIVE work (unparked 2026-05-27).** The parity → refactor → lichess-tactic-port detour that parked this layer is **complete**: the engine is SF11-faithful, the code is refactored, and the full lichess tactic library is ported and engine-available. The capability to lean on now: `compute_tactic_outcome` produces structured `TacticHit`s (named geometric + mate patterns, plus a sacrifice flag) the coaching/retrospective surfaces can name; there's also `find_overloaded` (pre-move scan) and the trapped-piece overlay engine side. See [`HANDOFF.md`](HANDOFF.md) "Engine-available tactic surface" for the full inventory and the UI-wiring TODOs. Everything described below was merged from `main` so it didn't bit-rot while parked (state as of 2026-05-25) — **re-validate each surface against the current tree as you resume**, since the refactor moved code and the tactic library changed what the surfaces can honestly claim.
+> ▶️ **First UI wiring pass landed 2026-05-27.** Five surfaces from the prior "NEXT" list shipped: trapped-piece overlay, retrospective Tactic + mate cards, coaching tactic hint (PV-reuse, no new search), and overloaded-piece coaching card. See [`HANDOFF.md`](HANDOFF.md) "First UI wiring pass" for the exact landing list. **The teaching UX is now functional end-to-end with the engine surface; this handoff is here for tuning, iteration, and the surfaces not yet wired** (mate-pattern detail beyond default-surfaced, walked-into framing iteration, overloaded retrospective surface if misfire rate stays low in real play).
 
 ## Current state: learning-mode workflows (2026-05-25)
 
@@ -113,101 +113,32 @@ In rough order:
 
 ---
 
-## Tactic library design brief
+## Tactic library — landed 2026-05-27
 
-The next major feature. Surfaces "you missed a fork" / "you walked into a pin" / "there's a tactic in this position" — three surfaces, one library. **Reference is [`reference/lichess-puzzler/tagger/cook.py`](reference/lichess-puzzler/tagger/cook.py)** (AGPL-3.0, never shipped). Read the [CLAUDE.md secondary-reference section](../CLAUDE.md) for licensing posture: hand-transliterate the predicates, mirror lichess's choices for parity, just type the Rust ourselves.
+The full taxonomy (W4-impl waves 1–6, see memory `project_tactic_library_reference`) is engine-available and the UI is wired through. The architecture stabilized at:
 
-### Architectural shape
+- **Engine**: [`compute_tactic_outcome`](../core/engine/src/analysis/tactic_outcome/mod.rs) returns `{ user_played, user_missed, user_walked_into }` from one PV-walk per move. Mate geometry rides alongside on `TacticHit.mate_pattern`; sacrifice classification rides on `TacticHit.sacrifice`. Single-line variant `find_tactic_in_line` powers the coaching surface.
+- **Retrospective**: `RetrospectiveCategory::Tactic` cards in [`tactic.rs`](../core/ui/src/retrospective_view/tactic.rs). Played/missed/walked-into each get a card. Missed-tactic annotations suppressed when `reveal_best_moves` is off — the heading still names the pattern, the squares stay hidden.
+- **Coaching**: `Session::coaching_tactic_hint()` (queries.rs) mines the previous retrospective's `analyses[user_move].pv[2..]` and gates on `history[u+1].mv == pv[1]` (a fresh-PV check that costs nothing). When that hits, [`coaching_view::tactic_card`](../core/ui/src/coaching_view.rs) names the pattern with no spatial annotations — student must locate it themselves.
 
-```
-core/engine/src/analysis/tactic_outcome.rs                                    (NEW)
-  compute_tactic_outcome(best_ma, user_ma, pre_pos, root_stm) → TacticsOutcome
-                                              │
-                                              ▼
-TacticsOutcome {
-    user_played_tactic:    Option<TacticHit>,   // user found one
-    user_missed_tactic:    Option<TacticHit>,   // best line had one user missed
-    user_walked_into:      Option<TacticHit>,   // opponent's reply has one
-}
+### Pedagogical rules in force (codified across both builders)
 
-TacticHit {
-    pattern:        TacticPattern,        // Fork | HangingCapture | RemovingDefender | ...
-    pv_ply:         usize,                // ply in the PV the pattern fires
-    primary_piece:  Square,               // the forking piece, capturing piece, …
-    targets:        Vec<Square>,          // forked targets, removed defender's target, …
-    material_gain:  Option<i32>,          // realized + 1-ply (MaterialOutcome scoping)
-    confidence:     Confidence,           // High | Medium
-}
-```
+1. Pre-move coaching never names squares — `tactic_card` produces zero annotations by design.
+2. Confidence-Medium tactics don't surface in coaching — gated in `build_coaching_view` before card construction.
+3. Card prose uses chess vocabulary where it's precise (*"fork"*, *"pin"*); plain English where the engine's signal doesn't fit (see `pattern_phrase` / `pattern_lesson` in both files).
 
-Mirrors the existing `*_outcome.rs` modules (one file per outcome, no `tactic/*.rs` subdir until > 600 LOC). Computed during the existing retrospective worker job — no new search, just PV-walk + cheap predicates over data we already have.
+### Tuning followups (real-play feedback expected)
 
-### Three surfaces
+- **Walked-into framing**: currently "If they reply, they get a fork" — may need iteration once real games surface where the framing reads as nagging vs. instructive.
+- **Mate-pattern detail**: only BackRank and Smothered have detail prose. Other surfaced mates ride as heading suffix only. Expand when a named-mates teaching pass lands.
+- **Confidence::Medium retrospective rollout**: today Medium hits still appear in retrospective (only coaching filters High-only). If misfire feedback comes in, tighten retrospective to High too.
+- **PV-freshness gate cost**: today the coaching tactic hint silently disappears when the bot deviates from PV[1] (any cause). If real play shows this firing too often (bots picking different tie-broken moves at the same eval), relax to "noise_pick.is_none() or bot move within X cp of PV[1]".
 
-1. **Retrospective "you missed / you played a tactic"** card. New `RetrospectiveCategory::Tactic` in [`core/ui/src/retrospective_view.rs`](core/ui/src/retrospective_view.rs), gated on `MoveVerdict ∈ {Inaccuracy, Mistake, Blunder}` for missed tactics; `MoveVerdict::Best` + `material_gain > 0` for played-tactic positive feedback.
-2. **Retrospective "you walked into a tactic"** — extends [`build_forced_consequences_items`](core/ui/src/retrospective_view.rs). Today that builder only surfaces pawn-structure concessions; adding `TacticsOutcome.user_walked_into` is the natural extension. No new card category.
-3. **Coaching panel pre-move** ("Cβ" — surface the *pattern name*, not the location: *"There's a fork available."* / *"One of your pieces is pinned."*). Requires an analytical search on the user's turn (~100–300 ms). Worker round-trip; coaching panel shows "checking..." until it arrives. Analytical engine only — must never read the opponent profile (same invariant as retrospective).
+### What stayed deferred
 
-### Taxonomy: 8 patterns now, 30 long-term
-
-Lichess's full taxonomy (30 tags in [`reference/lichess-puzzler/tagger/cook.py`](reference/lichess-puzzler/tagger/cook.py): fork, pin, skewer, hangingPiece, discoveredAttack, doubleCheck, trappedPiece, attraction, deflection, quietMove, intermezzo, clearance, interference, xRayAttack, discoveredCheck, capturingDefender, plus mate patterns and metadata themes) is the **long-term goal** — committing to this is committing to parity with the strongest open-source benchmark. We ship them in waves.
-
-Minimal pedagogically-meaningful set for a 1200-ELO student is 8: **Hanging piece, Fork, Pin, Skewer, Discovered attack, Removing the defender, Back-rank mate / mating net, Trapped piece.** Chess.com's user-facing taxonomy is roughly this; lichess's 30 over-fits to puzzle composers.
-
-### PV-walk vs. pattern-recognition: what each costs
-
-Of the 30 lichess tags, ~25 fall out of walking the PV plus our existing `Position` primitives (`blockers_for_king`, `slider_blockers`, `attackers_to`, `between_bb`). The ones that need extra work:
-
-- **Overloading** — needs a fresh pre-move scan ("which of our pieces defend ≥ 2 enemy targets"). Not derivable from PV.
-- **Sacrifice classification** — pattern is "we lose material at ply 0 but win it back / mate by ply 4." Needs a `Sacrifice` flag on `TacticHit`. Also the fix for the existing one-ply-guarantee misfire ([memory project_threat_signal_revisit.md](../.claude/projects/C--Users-steve-Repos-work-chess-tutor-2/memory/project_threat_signal_revisit.md)).
-- **Zugzwang** — only detectable by "every legal opponent reply worsens their position by ≥ X cp." Full MultiPV on the post-move position. Search-expensive; defer indefinitely.
-
-### Ship 1 — Fork + Hanging-piece capture + Removing-the-defender
-
-Three patterns, all direct ports of lichess `cook.py` predicates. ~600 LOC including tests + view-builder + per-pattern copy.
-
-**Per-pattern invariants** (operate on post-move position with the user/best PV move applied):
-
-- **Fork**: count enemy pieces ∈ `attackers_to(target, occ) & our_color` from the moved piece's `to_square`, keeping enemy pieces where `enemy_piece_value > moved_piece_value` OR (enemy is hanging AND not back-defended by the square we attacked from). ≥ 2 surviving targets ⇒ Fork. Lichess `cook.py:fork`.
-- **Hanging-piece capture**: PV ply 0 is a capture; pre-move position had `target ∈ theirs_hanging` (from existing `ThreatsOutcome`); not a forced recapture of equal value. Lichess `cook.py:hanging`.
-- **Removing the defender**: PV ply 0 captures piece X; pre-move, X was the only attacker of `our_color` on enemy piece Y; post-move, Y appears in `theirs_hanging`. Lichess `cook.py:capturing_defender`.
-
-**Confidence levels**: `High` when invariant fires AND `MaterialOutcome.realized_net_mg_cp > 0` in the PV's first 4 plies. `Medium` when the invariant fires but material is delayed beyond 4 plies (positional fork producing piece-square dominance, etc.). Coaching surface filters to `High` only — Medium tactics in coaching are too misfire-prone.
-
-**View-builder**: new `RetrospectiveCategory::Tactic` card. Heading from `TacticPattern.heading()` (per-pattern static table — "Fork", "Free piece", "Removing the defender"). Detail from `TacticPattern.detail()`. Annotations: `Arrow { Attacker }` from `primary_piece`, `SquareHighlight { Threat }` on each `target`. Reuses existing palette in [`desktop/src/draw/board.rs`](desktop/src/draw/board.rs).
-
-**Pedagogical rules** to lock in (codified per [memory feedback_teaching_terminology.md](../.claude/projects/C--Users-steve-Repos-work-chess-tutor-2/memory/feedback_teaching_terminology.md)):
-1. Pre-move coaching prompts **never name squares** ("there's a fork available", not "look for a fork on the e-file").
-2. Confidence-Medium tactics **don't surface in coaching**.
-3. Card prose uses chess vocabulary where precise (*"fork"*, *"pin"*); plain English where the engine's signal doesn't fit the technical meaning exactly.
-
-### Ship 2 — Pin, Skewer, Discovered attack, Back-rank mate, Trapped piece
-
-Same module, more detector functions. Each is a small port from `cook.py` (pin via `blockers_for_king` delta, skewer via ray-piece + `between` checks, etc.). Add ~400 LOC. Validate against a small fixture of known tactical positions before each lands.
-
-### Ship 3 — Coaching panel (Cβ)
-
-The latency-sensitive one. Coached mode currently runs zero engine work; this adds an analytical search per user turn. Worker round-trip, panel shows "checking..." while pending. The engine search **must** be the analytical (no-noise) engine — reading the opponent profile would mean the coach's advice depends on opponent strength, which is wrong (see [`core/engine/src/opponent.rs`](core/engine/src/opponent.rs) `//!` for the invariant).
-
-Surface as a new `CoachingItem::TacticAvailable { pattern: TacticPattern }` — pattern named, location not. Toggle behind a setting (per user's note: intermediate players want a way to hide hints).
-
-### Ship 4 — second wave + remainder
-
-Overloading (new pre-move scan), deflection, in-between move, decoy, interference, quiet-move tag, discoveredCheck, doubleCheck, xRayAttack, attraction, clearance. Plus mate patterns (Anastasia's, smothered, etc.) if real play surfaces demand. The full 30-tag parity goal lands across Ships 1–4 plus this remainder; sacrifice classification gets pulled forward whenever a misfire from the existing one-ply-guarantee filter motivates it.
-
-### What's deferred indefinitely
-
-- **Zugzwang**: too search-expensive for live use.
-- **Named mate patterns** (Anastasia's, Opera, Boden's, etc.): 1200 student doesn't need them.
-- **Complex sacrificial combinations beyond depth 6**: false-positive risk dominates pedagogical value at this depth.
-
-### Gating against chess.com's failure modes
-
-Three explicit anti-patterns to write into `compute_tactic_outcome`:
-
-1. **Don't demand deep calculation from a low-rated student.** If the tactic requires a 7+ ply line to actually win material, label it `Medium` confidence and only surface in retrospective, never coaching.
-2. **Don't ignore user sacrifices.** If the user's move loses material at ply 0 but the resulting position is winning at depth ≥ 4, treat it as a played tactic (`Sacrifice` flag), not a missed one. This is the fix for the existing one-ply-guarantee filter.
-3. **Don't generic-"miss".** Every fired card must name the pattern. If we can't classify it, we don't surface it — silence is safer than the chess.com "Ø you missed something" experience.
+- **Zugzwang**: too search-expensive for live use. Memory `project_zugzwang_dropped` (it's a position state, not an exploitable tactic).
+- **Named-mate teaching library**: 1200 student doesn't need Anastasia / Boden / etc. by name yet. Engine-available; UI exposure is later.
+- **Overloaded retrospective surface**: shipped as coaching-only per the conservative-rollout note in memory `project_overloaded_detector`. Promote to retrospective if real play shows the predicate doesn't misfire.
 
 ---
 
@@ -281,9 +212,9 @@ Engine cost: one full `Evaluator` priming per frame (initialize × 2 + pieces::e
 
 What an overlay needs to add later (per signal): a bitboard on `OverlayData`, a new `OverlayKind` variant + label/description, a `match` arm in `overlays_view::push_overlay_annotations`, and (if a new colour is needed) an `AnnotationKind` variant + entry in `desktop/src/draw/board.rs::annotation_square_colors`.
 
-#### Trapped-piece overlay — flagship, engine side DONE, UI TODO
+#### Trapped-piece overlay (landed 2026-05-27)
 
-The standout teaching overlay (memory `project_trapped_piece_visual_goal`): a 1200 can't *see* when a piece — especially a deep enemy queen — has run out of safe squares. **Engine side landed (W4-impl wave 1):** `OverlayData.{white,black}_trapped` (bitboards of trapped pieces) and `analysis::trapped_cages(pos, colour) -> Vec<(Square, Bitboard)>` (per trapped piece, the "cage" = its legal destinations, *all* of which are unsafe — that's the definition). `compute_overlays` already null-move-flips the turn (user-approved) so a trapped *enemy* piece shows on *your* move (skipped when the side to move is in check). **UI TODO** (the flagship deliverable): `OverlayKind::TrappedPieces` + an `AnnotationKind` for the cage (reuse `BadPiece` tint for the piece, a new muted-red for the dead escape squares), a `match` arm in `push_overlay_annotations`, and optionally an `Arrow { Attacker }` from the covering attacker(s). The student watches the box close around the queen. The per-escape-square bad/safe classification *is* the surfaceable intermediate data — that was the design question, and the answer is yes.
+The flagship: a 1200 can't *see* when a piece — especially a deep enemy queen — has run out of safe squares. **Shipped end-to-end** as `OverlayKind::TrappedPieces`: `BadPiece` tint on each doomed piece + muted-red `TrappedEscape` tint on the cage of dead escape squares closing in. Both sides painted under one toggle (mirrors `KingRings` / `Pins`). Engine helper `trapped_cages(pos, colour)` is still around for any future arrow-from-attacker surface; the bitboard pair on `OverlayData` is the cheap rendering path.
 
 ### Data flow at a glance
 

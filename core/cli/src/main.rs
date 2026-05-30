@@ -8,16 +8,26 @@
 //!     chess-tutor play    [flags] — interactive game (human vs engine by default)
 //!     chess-tutor bench   [args]  — multi-position perf benchmark (SF11-compatible args)
 
+mod alignments_view;
 mod analysis_report;
+mod attacks_view;
 mod bench;
 mod bench_fens;
 mod board;
-mod eval_report;
-mod noise_bench;
-mod play;
-mod uci;
 mod cli_args;
+mod eval_report;
+mod forcing_view;
+mod glossary;
+mod noise_bench;
+mod piece_fmt;
+mod play;
 mod search_report;
+mod square_view;
+mod summary;
+mod tactics_view;
+mod threats_view;
+mod uci;
+mod units;
 
 use std::time::Duration;
 
@@ -35,9 +45,7 @@ use chess_tutor_engine::types::Move;
 
 use crate::board::{render as render_board, RenderOptions};
 use crate::cli_args::{Cli, Command, EngineColor};
-use crate::search_report::{
-    format_score_pawns, pv_to_san, render_debug_trajectory, render_multi_pv,
-};
+use crate::search_report::{pv_to_san, render_debug_trajectory, render_multi_pv};
 
 /// Resolve a user-supplied move string to a `Move` legal in `pos`.
 /// Accepts SAN (`Nf3`, `Rxe6+`) or UCI (`g1f3`); tries SAN first.
@@ -69,7 +77,16 @@ fn main() -> Result<()> {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
 
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let json_mode = cli.json;
+    // `--stm` flips score-orientation away from the white-POV default.
+    // Currently honoured by `search` (single + multi-PV) so the agent
+    // can ask for engine-internal side-to-move output when comparing
+    // against another tool. The eval table's mg/eg columns are
+    // inherently per-colour and don't need flipping.
+    let stm_mode = cli.stm;
+
+    match cli.command {
         Command::Board {
             fen,
             ascii,
@@ -77,39 +94,508 @@ fn main() -> Result<()> {
             light_mode,
         } => {
             let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
-            let view = chess_tutor_ui::view::BoardView::compose(
-                &pos,
-                flip,
-                None,
-                None,
-                &[],
-                None,
-                Vec::new(),
-            );
-            print!("{}", render_board(&view, &RenderOptions { ascii, light_mode }));
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    board_fen: &'a str,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    board_fen: &summary_data.fen,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                let view = chess_tutor_ui::view::BoardView::compose(
+                    &pos,
+                    flip,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    Vec::new(),
+                );
+                print!(
+                    "{}",
+                    render_board(&view, &RenderOptions { ascii, light_mode })
+                );
+            }
         }
         Command::Moves { fen } => {
+            // Annotated legal-move list. Each row carries the SAN, the
+            // UCI, and a short tag string covering: is this a check?
+            // a capture (with the captured piece's classical-points
+            // value)? a promotion? an en-passant? The agent reading
+            // this never has to scan the list for `+` / `x` / `=`
+            // by eye.
+            use chess_tutor_engine::types::MoveKind;
             let mut pos =
                 Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
             let legal = legal_moves_vec(&mut pos);
-            if legal.is_empty() {
-                println!("(no legal moves)");
+
+            let annotate = |mv: chess_tutor_engine::types::Move| -> Vec<String> {
+                let mut tags = Vec::new();
+                if pos.gives_check(mv) {
+                    tags.push("check".to_string());
+                }
+                if pos.is_capture(mv) {
+                    let target_sq = if mv.kind() == MoveKind::EnPassant {
+                        use chess_tutor_engine::types::Square;
+                        Square::new(mv.to().file(), mv.from().rank())
+                    } else {
+                        mv.to()
+                    };
+                    if let Some(captured) = pos.piece_on(target_sq) {
+                        tags.push(format!(
+                            "captures {} ({} pts)",
+                            piece_fmt::piece_label(captured, target_sq),
+                            captured.kind().classical_points(),
+                        ));
+                    } else {
+                        tags.push("capture".to_string());
+                    }
+                }
+                if mv.kind() == MoveKind::Promotion {
+                    tags.push(format!("promotion={:?}", mv.promoted_to()).to_lowercase());
+                }
+                if mv.kind() == MoveKind::EnPassant {
+                    tags.push("en passant".to_string());
+                }
+                tags
+            };
+
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Move {
+                    san: String,
+                    uci: String,
+                    tags: Vec<String>,
+                }
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    moves: Vec<Move>,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    moves: legal
+                        .iter()
+                        .map(|mv| Move {
+                            san: san::format(&pos, *mv),
+                            uci: uci::format(*mv),
+                            tags: annotate(*mv),
+                        })
+                        .collect(),
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
-                for mv in &legal {
-                    println!("{:<8}  {}", san::format(&pos, *mv), uci::format(*mv));
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                if legal.is_empty() {
+                    println!("(no legal moves)");
+                } else {
+                    for mv in &legal {
+                        let tags = annotate(*mv);
+                        let tag_str = if tags.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  ({})", tags.join(", "))
+                        };
+                        println!(
+                            "{:<8}  {}{}",
+                            san::format(&pos, *mv),
+                            uci::format(*mv),
+                            tag_str,
+                        );
+                    }
                 }
             }
         }
-        Command::Eval { fen } => {
+        Command::Eval { fen, glossary } => {
+            // `--glossary` is a standalone dump: skip the FEN entirely.
+            if glossary {
+                if json_mode {
+                    #[derive(serde::Serialize)]
+                    struct GlossRow {
+                        id: String,
+                        label: String,
+                        pretty: String,
+                        description: String,
+                    }
+                    let rows: Vec<GlossRow> = chess_tutor_engine::analysis::TermId::ALL
+                        .iter()
+                        .map(|&id| GlossRow {
+                            id: format!("{:?}", id),
+                            label: id.label().to_string(),
+                            pretty: id.pretty_label().to_string(),
+                            description: crate::glossary::description(id).to_string(),
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else {
+                    print!("{}", crate::glossary::render_glossary_table());
+                }
+                return Ok(());
+            }
+
             let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
             let (_v, trace) = evaluate_with_trace(&pos);
-            print!("{}", eval_report::render(&trace));
+            if json_mode {
+                // Mirror the text output's information content as a
+                // JSON-friendly shape. The full EvalTrace is engine-
+                // internal; we surface the headline values + per-term
+                // table as a portable schema.
+                // Per-term `(mg, eg)` net values, in engine-internal
+                // Score units. These are pre-taper components of the
+                // classical eval; rendering them at any other scale
+                // would distort the per-piece-square-table weights.
+                #[derive(serde::Serialize)]
+                struct TermRow {
+                    id: String,
+                    label: String,
+                    description: String,
+                    net_mg_engine: i32,
+                    net_eg_engine: i32,
+                }
+                let term_rows: Vec<TermRow> = chess_tutor_engine::analysis::TermId::ALL
+                    .iter()
+                    .map(|&id| {
+                        let net = id.net_score(&trace);
+                        TermRow {
+                            id: format!("{:?}", id),
+                            label: id.label().to_string(),
+                            description: crate::glossary::description(id).to_string(),
+                            net_mg_engine: net.mg().0,
+                            net_eg_engine: net.eg().0,
+                        }
+                    })
+                    .collect();
+                // Every cp value below this point in the eval JSON
+                // payload is in engine-internal scale (PawnEG=213), not
+                // conventional cp. The field names make that explicit.
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    phase: u32,
+                    scale_factor: u32,
+                    tempo_engine_cp: i32,
+                    final_value_engine_cp_stm: i32,
+                    terms: Vec<TermRow>,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    phase: trace.phase as u32,
+                    scale_factor: trace.scale_factor as u32,
+                    tempo_engine_cp: trace.tempo.0,
+                    final_value_engine_cp_stm: trace.final_value.0,
+                    terms: term_rows,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                print!("{}", eval_report::render(&trace));
+            }
         }
         Command::Opening { fen } => {
             let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
-            match openings::identify(&pos) {
-                Some(op) => println!("{}  {}", op.eco, op.name),
-                None => println!("(no opening matched)"),
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    opening: Option<&'a summary::OpeningBlock>,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    opening: summary_data.opening.as_ref(),
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                match openings::identify(&pos) {
+                    Some(op) => println!("{}  {}", op.eco, op.name),
+                    None => println!("(no opening matched)"),
+                }
+            }
+        }
+        Command::Square { square, fen } => {
+            use chess_tutor_engine::types::Square;
+            let pos = Position::from_fen(&fen)
+                .with_context(|| format!("parsing FEN {:?}", fen))?;
+            let sq = Square::from_algebraic(&square)
+                .with_context(|| format!("parsing square {:?} (expected e.g. 'e5')", square))?;
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
+            let view = square_view::build(&pos, sq);
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    square: &'a square_view::SquareView,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    square: &view,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                print!("{}", square_view::render_text(&view));
+            }
+        }
+        Command::Threats { fen } => {
+            let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
+            let view = threats_view::build(&pos);
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    threats: &'a threats_view::ThreatsView,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    threats: &view,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                print!("{}", threats_view::render_text(&view));
+            }
+        }
+        Command::Forcing { fen } => {
+            let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
+            let view = forcing_view::build(&pos);
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    forcing: &'a forcing_view::ForcingView,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    forcing: &view,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                print!("{}", forcing_view::render_text(&view));
+            }
+        }
+        Command::Attacks { fen } => {
+            let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
+            let view = attacks_view::build(&pos);
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    attacks: &'a attacks_view::AttacksView,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    attacks: &view,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                print!("{}", attacks_view::render_text(&view));
+            }
+        }
+        Command::Alignments { fen, all } => {
+            let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
+            let view = alignments_view::build(&pos, all);
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    alignments: &'a alignments_view::AlignmentsView,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    alignments: &view,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                print!("{}", alignments_view::render_text(&view));
+            }
+        }
+        Command::Explain { fen, depth } => {
+            // Aggregator: assembles one block from the same view
+            // builders the dedicated subcommands use. Each section
+            // is delimited by a header line so an agent (or human)
+            // can grep for the cell they care about. Search is the
+            // last block — it dominates wall time and is the
+            // headline number the position summary at the top
+            // references.
+            let mut pos = Position::from_fen(&fen)
+                .with_context(|| format!("parsing FEN {:?}", fen))?;
+            // Run a depth-N search first so the summary header can
+            // carry the search score rather than a static eval.
+            let mut engine = Engine::default();
+            let search_params = SearchParams {
+                max_depth: depth,
+                max_nodes: None,
+                max_time: None,
+                multi_pv: 1,
+                game_history: Vec::new(),
+                force_include: Vec::new(),
+                verbose_progress: false,
+                threads: 1,
+                eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
+            };
+            let lines = engine.search(&mut pos, search_params);
+            let (score_source, headline_score) = if lines.is_empty() {
+                (summary::ScoreSource::Static, None)
+            } else {
+                (
+                    summary::ScoreSource::Search { depth: lines[0].depth },
+                    Some(lines[0].score),
+                )
+            };
+            let summary_data = summary::build(&pos, score_source, headline_score);
+            let threats_data = threats_view::build(&pos);
+            let tactics_data =
+                tactics_view::build(&pos, None, /*latent*/ true, /*check_followups*/ true);
+
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct SearchLineJson {
+                    pv_san: Vec<String>,
+                    pv_uci: Vec<String>,
+                    engine_cp_stm: i32,
+                    depth: u32,
+                }
+                let lines_json: Vec<SearchLineJson> = lines
+                    .iter()
+                    .map(|l| SearchLineJson {
+                        pv_san: pv_to_san(&pos, &l.pv),
+                        pv_uci: l.pv.iter().map(|m| uci::format(*m)).collect(),
+                        engine_cp_stm: l.score.0,
+                        depth: l.depth,
+                    })
+                    .collect();
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    threats: &'a threats_view::ThreatsView,
+                    tactics: &'a tactics_view::TacticsView,
+                    search: Vec<SearchLineJson>,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    threats: &threats_data,
+                    tactics: &tactics_data,
+                    search: lines_json,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+
+            // Text output: section per data block. Position summary
+            // first (already labelled with search depth + score),
+            // then each named section.
+            print!("{}", summary::render_text(&summary_data));
+            println!();
+            println!("== threats ==");
+            print!("{}", threats_view::render_text(&threats_data));
+            println!();
+            println!("== tactics ==");
+            print!("{}", tactics_view::render_text(&tactics_data));
+            if !lines.is_empty() {
+                println!();
+                println!("== search (depth {}) ==", lines[0].depth);
+                let orientation = crate::units::Orientation::from_stm_flag(stm_mode);
+                let stm = pos.side_to_move();
+                let oriented = orientation.apply(lines[0].score, stm);
+                println!(
+                    "score:    {} pawns {} (engine-cp: {} stm)",
+                    crate::units::format_pawns(oriented),
+                    orientation.label(),
+                    crate::units::format_engine_cp(lines[0].score),
+                );
+                let pv_san = pv_to_san(&pos, &lines[0].pv);
+                println!("pv:       {}", pv_san.join(" "));
+            }
+        }
+        Command::Tactics { fen, prior_move, latent, check_followups } => {
+            use chess_tutor_engine::analysis::PriorMove;
+            use chess_tutor_engine::types::{Move, PieceType, Square};
+            let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            // `--prior-move` is the OPPONENT's last move — the move that
+            // produced this FEN. We can't validate it against any legal
+            // move list (its source square is empty in the current FEN
+            // and the pre-move position isn't known), so we synthesise a
+            // [`Move`] from the raw squares + optional promotion piece.
+            // The recapture guard inside the detector chain only reads
+            // `prior.mv.to()` and `prior.captured`, so the synthesised
+            // move's [`MoveKind`] doesn't matter. `captured = None`
+            // makes the guard lenient (extra HangingCapture false
+            // positives possible when the prior move WAS a capture);
+            // precise reconstruction would need a `--prior-fen` flag,
+            // deferred per PLAN-cli.md §"Open design questions".
+            let prior = match prior_move.as_deref() {
+                None => None,
+                Some(uci_str) => {
+                    let s = uci_str.trim().to_ascii_lowercase();
+                    if !(s.len() == 4 || s.len() == 5) {
+                        anyhow::bail!(
+                            "--prior-move must be UCI (4 or 5 chars, e.g. `g7g6` / `e7e8q`), got {:?}",
+                            uci_str,
+                        );
+                    }
+                    let from = Square::from_algebraic(&s[0..2])
+                        .ok_or_else(|| anyhow::anyhow!("--prior-move: bad from-square in {:?}", uci_str))?;
+                    let to = Square::from_algebraic(&s[2..4])
+                        .ok_or_else(|| anyhow::anyhow!("--prior-move: bad to-square in {:?}", uci_str))?;
+                    let mv = if s.len() == 5 {
+                        let promo = match s.as_bytes()[4] as char {
+                            'q' => PieceType::Queen,
+                            'r' => PieceType::Rook,
+                            'b' => PieceType::Bishop,
+                            'n' => PieceType::Knight,
+                            other => anyhow::bail!(
+                                "--prior-move: bad promotion piece {other:?} in {uci_str:?}",
+                            ),
+                        };
+                        Move::promotion(from, to, promo)
+                    } else {
+                        Move::normal(from, to)
+                    };
+                    Some(PriorMove { mv, captured: None })
+                }
+            };
+            let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
+            let view = tactics_view::build(&pos, prior, latent, check_followups);
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    tactics: &'a tactics_view::TacticsView,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    tactics: &view,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{}", summary::render_text(&summary_data));
+                println!();
+                print!("{}", tactics_view::render_text(&view));
             }
         }
         Command::Search {
@@ -124,6 +610,7 @@ fn main() -> Result<()> {
             threads,
             force_include,
             verbose_progress,
+            annotate,
         } => {
             let mut pos =
                 Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
@@ -151,21 +638,32 @@ fn main() -> Result<()> {
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
             };
 
+            let orientation = crate::units::Orientation::from_stm_flag(stm_mode);
+
             if analyze {
                 // Teaching-analysis path: same search under the hood,
                 // but the output surfaces per-move term deltas rather
-                // than the leaf trace.
+                // than the leaf trace. JSON mode falls through to the
+                // text-only behaviour today (PLAN-cli.md: `--analyze`
+                // JSON shape is a follow-up; the per-term-delta
+                // breakdown deserves its own schema).
                 let analyses = analyze_position(&mut engine, &mut pos, params);
                 if analyses.is_empty() {
                     println!("(no legal moves — terminal position)");
                     return Ok(());
                 }
+                let summary_data = summary::build(
+                    &pos,
+                    summary::ScoreSource::Search {
+                        depth: analyses[0].depth,
+                    },
+                    Some(analyses[0].score),
+                );
+                print!("{}", summary::render_text(&summary_data));
+                println!();
                 println!("depth: {}", analyses[0].depth);
                 print!("{}", analysis_report::render(&pos, &analyses, top_percent));
                 if debug {
-                    // Rebuild a Vec<SearchLine>-shaped view for the
-                    // debug trajectory renderer. Cheap: we clone the
-                    // fields it needs.
                     let lines: Vec<chess_tutor_engine::engine::SearchLine> = analyses
                         .iter()
                         .map(|a| chess_tutor_engine::engine::SearchLine {
@@ -184,14 +682,114 @@ fn main() -> Result<()> {
 
             let lines = engine.search(&mut pos, params);
             if lines.is_empty() {
-                println!("(no legal moves — terminal position)");
+                if json_mode {
+                    let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
+                    #[derive(serde::Serialize)]
+                    struct Out<'a> {
+                        summary: &'a summary::PositionSummary,
+                        terminal: &'static str,
+                    }
+                    let payload = Out {
+                        summary: &summary_data,
+                        terminal: "no legal moves",
+                    };
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!("(no legal moves — terminal position)");
+                }
                 return Ok(());
             }
 
+            let summary_data = summary::build(
+                &pos,
+                summary::ScoreSource::Search {
+                    depth: lines[0].depth,
+                },
+                Some(lines[0].score),
+            );
+
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct JsonLine {
+                    rank: usize,
+                    /// White-POV (or stm-POV with `--stm`) pawns.
+                    pawns: String,
+                    /// Same number as [`Self::pawns`] in conv-cp
+                    /// (pawn = 100 cp; chess.com / UCI scale).
+                    conv_cp: String,
+                    /// Engine-internal cp (PawnEG = 213) for the same
+                    /// line, side-to-move-signed. Useful for comparing
+                    /// against `chess_tutor_engine::search` thresholds.
+                    engine_cp_stm: i32,
+                    /// Delta from the top line in *engine-cp*. Connects
+                    /// directly to search-code aspiration / futility
+                    /// margins; conv-cp delta is `engine_cp / 2.13`.
+                    delta_engine_cp_from_top: i32,
+                    pv_san: Vec<String>,
+                    pv_uci: Vec<String>,
+                    settled_ply: Option<usize>,
+                }
+                let stm = pos.side_to_move();
+                let top = lines[0].score.0;
+                let json_lines: Vec<JsonLine> = lines
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        let oriented = orientation.apply(line.score, stm);
+                        let pv_san = pv_to_san(&pos, &line.pv);
+                        let delta_engine = line.score.0 - top;
+                        JsonLine {
+                            rank: i + 1,
+                            pawns: crate::units::format_pawns(oriented),
+                            conv_cp: crate::units::format_conventional_cp(oriented),
+                            engine_cp_stm: line.score.0,
+                            delta_engine_cp_from_top: delta_engine,
+                            pv_san,
+                            pv_uci: line.pv.iter().map(|m| uci::format(*m)).collect(),
+                            settled_ply: line.settled_ply,
+                        }
+                    })
+                    .collect();
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    depth: u32,
+                    orientation: &'static str,
+                    nodes: u64,
+                    elapsed_ms: u128,
+                    nps_mn: f64,
+                    lines: Vec<JsonLine>,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    depth: lines[0].depth,
+                    orientation: orientation.label(),
+                    nodes: engine.last_nodes(),
+                    elapsed_ms: engine.last_elapsed().as_millis(),
+                    nps_mn: engine.last_nps() / 1.0e6,
+                    lines: json_lines,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+
+            // Text output.
+            print!("{}", summary::render_text(&summary_data));
+            println!();
+            let stm = pos.side_to_move();
+
             if lines.len() == 1 {
                 let line = &lines[0];
+                let oriented = orientation.apply(line.score, stm);
                 println!("depth:    {}", line.depth);
-                println!("score:    {}", format_score_pawns(line.score));
+                // Pawns is the chess.com-comparable headline; engine-cp
+                // is the source-code-comparable number. Both labelled.
+                println!(
+                    "score:    {} pawns {} (engine-cp: {} stm)",
+                    crate::units::format_pawns(oriented),
+                    orientation.label(),
+                    crate::units::format_engine_cp(line.score),
+                );
                 let pv_san = pv_to_san(&pos, &line.pv);
                 println!("pv:       {}", pv_san.join(" "));
                 if let Some(settled) = line.settled_ply {
@@ -208,7 +806,6 @@ fn main() -> Result<()> {
                     engine.last_elapsed().as_millis(),
                     engine.last_nps() / 1.0e6,
                 );
-                // TEMPORARY: pawn-cache hit rate for perf investigation.
                 let (hits, misses) = engine.pawn_cache_stats();
                 let total = hits + misses;
                 if total > 0 {
@@ -221,19 +818,59 @@ fn main() -> Result<()> {
                     );
                 }
                 println!();
-                // The leaf trace is the last entry in ply_traces; that's
-                // what the existing renderer expects.
                 if let Some(leaf) = line.ply_traces.last() {
                     print!("{}", eval_report::render(leaf));
                 }
             } else {
-                println!("depth: {}", lines[0].depth);
-                print!("{}", render_multi_pv(&pos, &lines));
+                println!(
+                    "depth: {}  (scores: pawns {}; deltas: engine-cp)",
+                    lines[0].depth,
+                    orientation.label(),
+                );
+                print!("{}", render_multi_pv(&pos, &lines, orientation));
             }
 
             if debug {
                 println!();
                 print!("{}", render_debug_trajectory(&pos, &lines));
+            }
+
+            // `--annotate`: run the tactic detector on the top PV's
+            // line and surface a one-line `(pattern via Move; gain
+            // +N pts)` summary. No `prior_move`, so the recapture
+            // guard may produce false positives in rare positions
+            // (PLAN-cli.md §"Open design questions" notes this).
+            if annotate && !lines[0].pv.is_empty() {
+                use chess_tutor_engine::analysis::find_tactic_in_line;
+                let mover = pos.side_to_move();
+                if let Some(hit) =
+                    find_tactic_in_line(&pos, &lines[0].pv, mover, None)
+                {
+                    let pv_san = pv_to_san(&pos, &lines[0].pv);
+                    let move_name = pv_san.first().map(|s| s.as_str()).unwrap_or("?");
+                    let mate_suffix = match hit.mate_pattern {
+                        Some(mp) => format!(" + {:?}", mp),
+                        None => String::new(),
+                    };
+                    let sac = if hit.sacrifice { " (sac)" } else { "" };
+                    println!();
+                    let gain = match hit.material_gain {
+                        Some(g) => format!("+{} pts", g),
+                        None => "n/a".to_string(),
+                    };
+                    println!(
+                        "tactic:   {:?} via {}{}{}  (gain {}, conf: {:?})",
+                        hit.pattern,
+                        move_name,
+                        mate_suffix,
+                        sac,
+                        gain,
+                        hit.confidence,
+                    );
+                } else {
+                    println!();
+                    println!("tactic:   (no pattern detected in top PV)");
+                }
             }
         }
         Command::Bench {

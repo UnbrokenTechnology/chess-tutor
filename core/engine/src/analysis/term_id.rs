@@ -268,8 +268,10 @@ impl TermId {
 
     /// Extract this term's net [`Score`] (white − black, or the
     /// already-net value for the three single-valued terms) from an
-    /// [`EvalTrace`].
-    pub(super) fn net_score(self, t: &EvalTrace) -> Score {
+    /// [`EvalTrace`]. Public so CLI / UI consumers (e.g. the JSON eval
+    /// output) can read individual term scores without round-tripping
+    /// through [`super::compute_term_deltas`].
+    pub fn net_score(self, t: &EvalTrace) -> Score {
         match self {
             TermId::MaterialPieceValue => t.material.piece_value,
             TermId::MaterialPsqPositional => t.material.psq_positional,

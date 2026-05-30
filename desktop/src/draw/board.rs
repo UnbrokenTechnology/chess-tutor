@@ -236,6 +236,13 @@ fn annotation_square_colors(
             Some(egui::Color32::from_rgba_unmultiplied(0xe0, 0x60, 0xc0, 0x55)),
             Some(egui::Color32::from_rgb(0xb0, 0x30, 0x90)),
         ),
+        AnnotationKind::TrappedEscape => (
+            // Muted red: the "cage" closing in on the trapped piece.
+            // Lower alpha than BadPiece so the piece itself (rendered
+            // under BadPiece's stronger tint) stays the focal point.
+            Some(egui::Color32::from_rgba_unmultiplied(0xc0, 0x30, 0x30, 0x45)),
+            None,
+        ),
         AnnotationKind::HeatOurs1 => (
             Some(egui::Color32::from_rgba_unmultiplied(0x40, 0xc0, 0x60, 0x30)),
             None,
@@ -293,6 +300,9 @@ fn arrow_color(kind: AnnotationKind) -> egui::Color32 {
             egui::Color32::from_rgba_unmultiplied(0x60, 0x60, 0x60, 0xd0)
         }
         AnnotationKind::Pin => egui::Color32::from_rgba_unmultiplied(0xb0, 0x30, 0x90, 0xd0),
+        AnnotationKind::TrappedEscape => {
+            egui::Color32::from_rgba_unmultiplied(0xc0, 0x30, 0x30, 0xd0)
+        }
         AnnotationKind::HeatOurs1 => {
             egui::Color32::from_rgba_unmultiplied(0x20, 0x90, 0x40, 0xd0)
         }

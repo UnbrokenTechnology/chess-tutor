@@ -227,6 +227,10 @@ pub(super) fn category_glyph(category: RetrospectiveCategory) -> &'static str {
         RetrospectiveCategory::BlockedCenter => "▦",
         RetrospectiveCategory::Castling => "🏰",
         RetrospectiveCategory::Space => "◫",
+        // Star for a named tactic (fork / pin / mate / …); distinct
+        // from Threats' crossed-swords glyph so the two cards read as
+        // different concepts in a glance.
+        RetrospectiveCategory::Tactic => "★",
         RetrospectiveCategory::Secondary => "…",
     }
 }
