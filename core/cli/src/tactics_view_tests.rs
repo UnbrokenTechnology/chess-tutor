@@ -79,6 +79,57 @@ fn render_text_includes_pattern_and_targets() {
     assert!(text.contains("Nf5"), "{text}");
 }
 
+/// When the side-to-move's best tactic carries an escape, the heading
+/// must be tagged and a `NOTE:` line must spell out the practical
+/// conclusion. The discovered-attack case study FEN is the regression
+/// target: White's `Re1` "pins" `be5` to `qe6`, but the opponent breaks
+/// it with the forcing `…Bxh2+` (which is itself a discovered attack on
+/// the rook). A reader skimming for `gain:` must not miss that this
+/// "tactic" is not winnable.
+#[test]
+fn escapable_tactic_is_tagged_and_noted() {
+    let pos =
+        Position::from_fen("1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1").unwrap();
+    let view = build(&pos, None, false, false);
+    let hit = view
+        .white
+        .best_tactic
+        .as_ref()
+        .expect("white has a (escapable) tactic");
+    assert!(
+        hit.escape.is_some(),
+        "this FEN's best tactic must carry an escape; got {hit:#?}",
+    );
+    let text = render_text(&view);
+    assert!(
+        text.contains("[has escape — likely not winnable]"),
+        "heading must be tagged when an escape exists; got:\n{text}",
+    );
+    assert!(
+        text.contains("NOTE:       an escape exists"),
+        "a NOTE line must restate the conclusion; got:\n{text}",
+    );
+}
+
+/// The escape tag / NOTE must only appear when there is an escape — a
+/// clean tactic with no out should render neither.
+#[test]
+fn clean_tactic_has_no_escape_tag_or_note() {
+    let pos =
+        Position::from_fen("r1b1kb1r/1p3ppp/p2pqn2/4pNB1/4P3/2N5/PPP2PPP/R2QK2R w KQkq - 1 9")
+            .unwrap();
+    let view = build(&pos, None, false, false);
+    let text = render_text(&view);
+    assert!(
+        !text.contains("[has escape"),
+        "clean tactic must not be tagged; got:\n{text}",
+    );
+    assert!(
+        !text.contains("NOTE:       an escape exists"),
+        "clean tactic must not carry the escape NOTE; got:\n{text}",
+    );
+}
+
 #[test]
 fn json_serialises_round_trip() {
     // Smoke-check that the public Serialize impl produces JSON that
@@ -296,4 +347,55 @@ fn overloaded_section_surfaces_when_a_sole_defender_holds_two_duties() {
     let view = build(&pos, None, false, false);
     assert!(view.white.overloaded.is_empty());
     assert!(view.black.overloaded.is_empty());
+}
+
+// ---- defusal block (search-backed) ----------------------------------
+
+/// The discovered-attack-after-Qxe6 case study, rendered through the CLI
+/// defusal view. Guards the rendering + the holder/non-holder split that
+/// `teaching-positions/discovered-attack-after-qxe6.md` is the spec for.
+#[test]
+fn case_study_defusal_block_lists_queen_holders_and_caution() {
+    use chess_tutor_engine::analysis::{find_latent_threats, find_threat_defusals};
+    use chess_tutor_engine::engine::Engine;
+
+    let fen = "1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1";
+    let mut pos = Position::from_fen(fen).expect("valid fen");
+    let threats = find_latent_threats(&pos, pos.side_to_move());
+    assert!(!threats.is_empty(), "case study must have a standing threat");
+
+    let mut engine = Engine::default();
+    // Depth 10 clears the queen-dropping-decoy horizon artifact while
+    // staying fast (see analysis::defusals tests).
+    let report = find_threat_defusals(&mut engine, &mut pos, &threats, 10);
+    let view = super::build_defusals_view(&pos, &report, 10);
+
+    // Every holder is a queen move (the only way to both escape the c4
+    // attack and answer the e1 discovered attack); Qxe6 must be one.
+    assert!(!view.holders.is_empty(), "expected holding defusals");
+    assert!(
+        view.holders.iter().all(|h| h.san.starts_with('Q')),
+        "all holders should be queen moves, got {:?}",
+        view.holders.iter().map(|h| &h.san).collect::<Vec<_>>(),
+    );
+    assert!(
+        view.holders.iter().any(|h| h.san.starts_with("Qxe6")),
+        "Qxe6 (capture-the-discoverer) must be a holder",
+    );
+    // The capture-the-discoverer gloss must reach the rendered text.
+    let text = render_text(&view_with_defusals(view.clone()));
+    assert!(text.contains("defusing the danger"));
+    assert!(text.contains("DEFUSE and HOLD"));
+    assert!(text.contains("captures the discoverer"));
+    assert!(text.contains("best move overall:"));
+}
+
+/// Wrap a bare [`DefusalsView`] into a minimal [`TacticsView`] so we can
+/// exercise the real `render_text` path (which only renders defusals as
+/// part of the whole tactics view).
+fn view_with_defusals(d: super::DefusalsView) -> super::TacticsView {
+    let pos = Position::startpos();
+    let mut v = build(&pos, None, false, false);
+    v.defusals = Some(d);
+    v
 }

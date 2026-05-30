@@ -497,6 +497,38 @@ fn no_pin_when_the_piece_is_not_pinned() {
     assert!(hit.is_none_or(|h| h.pattern != TacticPattern::Pin));
 }
 
+// ---- detect_relative_pin --------------------------------------------
+
+#[test]
+fn knight_pinned_to_queen_and_attacked_by_pawn_is_a_relative_pin() {
+    // White Re1 X-rays through Black's Ne5 (front) to Qe7 (rear, more
+    // valuable, NOT the king — king is parked on a8). d2-d4 attacks the
+    // knight with a cheaper pawn: the knight can't stay (pawn takes it)
+    // and can't flee (that drops the queen). A relative pin worth the
+    // knight.
+    let pre = pos("k7/4q3/8/4n3/8/8/3P4/4R1K1 w - - 0 1");
+    let d4 = Move::normal(Square::D2, Square::D4);
+    let hit = detect_line_tactic(&pre, &[d4], Color::White, 0, None).expect("relative pin");
+    assert_eq!(hit.pattern, TacticPattern::RelativePin);
+    assert_eq!(hit.primary_piece, Square::D4);
+    // front (pinned knight) then rear (queen behind).
+    assert_eq!(hit.targets, vec![Square::E5, Square::E7]);
+    // Gain is the pinned piece we win (a knight), so a positive,
+    // High-confidence hit even though d4 itself captures nothing.
+    assert_eq!(hit.confidence, Confidence::High);
+}
+
+#[test]
+fn no_relative_pin_when_rear_is_not_more_valuable() {
+    // Same geometry but the rear piece is a pawn — moving the knight
+    // costs nothing it can't afford, so there's no material-winning
+    // relative pin (and a king-rear would be the absolute Pin instead).
+    let pre = pos("k7/4p3/8/4n3/8/8/3P4/4R1K1 w - - 0 1");
+    let d4 = Move::normal(Square::D2, Square::D4);
+    let hit = detect_line_tactic(&pre, &[d4], Color::White, 0, None);
+    assert!(hit.is_none_or(|h| h.pattern != TacticPattern::RelativePin));
+}
+
 // ---- sacrifice classification (cook.py:sacrifice) -------------------
 
 // White queen on b1 takes the b7 pawn; the black rook on a7 recaptures,

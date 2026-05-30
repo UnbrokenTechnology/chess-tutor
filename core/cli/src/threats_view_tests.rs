@@ -64,6 +64,21 @@ fn case_study_e5_bishop_appears_as_pinned_for_black() {
     assert_eq!(be5.kind, "relative");
     assert_eq!(be5.pinner, "Re1");
     assert_eq!(be5.pinned_to, "qe6");
+    // The crux: this relative pin is NOMINAL — the bishop breaks it with
+    // the checking escape …Bxh2+, so the pin doesn't actually hold and the
+    // discovered attack on Re1 is live.
+    assert_eq!(
+        be5.escape_san.as_deref(),
+        Some("Bxh2+"),
+        "the e5 pin should be flagged escapable via the checking move"
+    );
+}
+
+#[test]
+fn absolute_pin_has_no_escape_annotation() {
+    let pos = Position::from_fen("4rk2/8/8/8/8/8/4N3/4K3 w - - 0 1").unwrap();
+    let view = build(&pos);
+    assert_eq!(view.white.pinned[0].escape_san, None, "{view:#?}");
 }
 
 #[test]

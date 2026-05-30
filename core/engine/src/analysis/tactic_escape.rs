@@ -76,6 +76,14 @@ fn analysable(p: TacticPattern) -> bool {
         TacticPattern::Fork
             | TacticPattern::RemovingDefender
             | TacticPattern::Pin
+            // RelativePin carries `targets = [front, rear]`. The shared
+            // "is some target still winnable?" survival test then does the
+            // right thing for free: a *quiet* front-piece move opens the
+            // slider's line to the rear (rear becomes winnable → survives,
+            // not an escape), while a *forcing* front move (a check) pulls
+            // the owner off both targets → escape. That's the whole point
+            // of separating relative from absolute pins.
+            | TacticPattern::RelativePin
             | TacticPattern::Skewer
             | TacticPattern::DiscoveredAttack
     )

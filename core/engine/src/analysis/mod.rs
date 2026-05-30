@@ -101,6 +101,7 @@
 pub mod blocked_center_outcome;
 pub mod castling_outcome;
 pub mod check_followups;
+pub mod defusals;
 pub mod initiative_outcome;
 pub mod king_safety_outcome;
 pub mod latent_threats;
@@ -149,6 +150,9 @@ fn post_user_move(
 pub use blocked_center_outcome::{compute_blocked_center_outcome, BlockedCenterOutcome};
 pub use castling_outcome::{compute_castling_outcome, CastlingOutcome};
 pub use check_followups::{find_check_followups, CheckFollowup, ReplyFollowup};
+pub use defusals::{
+    find_threat_defusals, DefusalMechanism, DefusalReport, DefusedThreat, ThreatDefusal,
+};
 pub use initiative_outcome::{compute_initiative_outcome, InitiativeOutcome};
 pub use king_safety_outcome::{compute_king_safety_outcome, KingSafetyOutcome, KingSafetySnapshot};
 pub use material_outcome::{compute_material_outcome, CaptureEvent, MaterialOutcome};
@@ -158,7 +162,10 @@ pub use move_assessment::{
     classify_user_move, BlunderInfo, GatingConfig, MoveAssessment, TeachingInfo, TermContribution,
     TermFamily,
 };
-pub use latent_threats::{find_latent_threats, LatentThreat, TriggerShape};
+pub use latent_threats::{
+    describe_discovery_firing, find_latent_threats, pin_forcing_escape, DiscoveryFiring,
+    LatentThreat, TriggerShape,
+};
 pub use overlays::{compute_overlays, trapped_cages, OverlayData};
 pub use overloading::{find_overloaded, OverloadedPiece};
 pub use passed_pawns_outcome::{compute_passed_pawns_outcome, PassedPawnsOutcome};

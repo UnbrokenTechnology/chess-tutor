@@ -19,11 +19,12 @@
 //! human would.
 
 use chess_tutor_engine::analysis::{
-    find_overloaded, list_hanging, list_see_losing, trapped_cages, HangingPiece, OverloadedPiece,
-    PieceLocation,
+    find_overloaded, list_hanging, list_see_losing, pin_forcing_escape, trapped_cages,
+    HangingPiece, OverloadedPiece, PieceLocation,
 };
 use chess_tutor_engine::position::Position;
-use chess_tutor_engine::types::{Color, PieceType};
+use chess_tutor_engine::san;
+use chess_tutor_engine::types::{Color, Move, PieceType};
 use serde::Serialize;
 
 use crate::piece_fmt::{color_name, piece_label, piece_type_name};
@@ -62,6 +63,12 @@ pub struct PinnedView {
     pub kind: String,              // "absolute" / "relative"
     pub pinner: String,            // "re8"
     pub pinned_to: String,         // "Ke1" / "Qd1"
+    /// SAN of a forcing (checking) move that breaks the pin, when one
+    /// exists (`"Bxh2+"`). A relative pin with an escape is *nominal* —
+    /// it doesn't actually restrain the piece, because the check must be
+    /// answered before the pinning side could punish the departure. `None`
+    /// for absolute pins and relative pins with no checking escape.
+    pub escape_san: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,6 +208,11 @@ fn collect_pinned(pos: &Position, side: Color) -> Vec<PinnedView> {
                     kind: "absolute".to_string(),
                     pinner: piece_label(pinner_piece, cand),
                     pinned_to: piece_label(king_piece, king_sq),
+                    // Absolute pins almost never have a forcing escape (the
+                    // piece can't leave the ray), but the engine call is
+                    // the honest check — let it decide.
+                    escape_san: pin_forcing_escape(pos, blocker_sq, cand, king_sq, side)
+                        .map(|mv| mover_move_san(pos, mv, side)),
                 });
                 break;
             }
@@ -239,6 +251,8 @@ fn collect_pinned(pos: &Position, side: Color) -> Vec<PinnedView> {
                         kind: "relative".to_string(),
                         pinner: piece_label(pinner_piece, cand),
                         pinned_to: piece_label(queen_piece, queen_sq),
+                        escape_san: pin_forcing_escape(pos, blocker_sq, cand, queen_sq, side)
+                            .map(|mv| mover_move_san(pos, mv, side)),
                     });
                     break;
                 }
@@ -247,6 +261,19 @@ fn collect_pinned(pos: &Position, side: Color) -> Vec<PinnedView> {
     }
 
     out
+}
+
+/// SAN for `mv` played by `mover`, null-pivoting when it isn't already
+/// `mover`'s turn (the pinned piece whose escape we name may belong to
+/// either side).
+fn mover_move_san(pos: &Position, mv: Move, mover: Color) -> String {
+    let mut scratch = pos.clone();
+    let saved = (scratch.side_to_move() != mover).then(|| scratch.do_null_move());
+    let s = san::format(&scratch, mv);
+    if let Some(st) = saved {
+        scratch.undo_null_move(st);
+    }
+    s
 }
 
 fn label_for_location(pos: &Position, loc: &PieceLocation) -> String {
@@ -307,12 +334,25 @@ fn render_side(out: &mut String, side: &SideThreats) {
     if !side.pinned.is_empty() {
         writeln!(out, "  pinned ({}):", side.pinned.len()).unwrap();
         for p in &side.pinned {
-            writeln!(
-                out,
-                "    {} — {} pin by {} (pinned to {})",
-                p.piece, p.kind, p.pinner, p.pinned_to,
-            )
-            .unwrap();
+            match &p.escape_san {
+                // A pin the piece can break with a check is NOMINAL — it
+                // reads as a restraint but doesn't actually hold. Say so
+                // loudly, because the bare "pinned" label is a false-safety
+                // signal: the discovered attack / departure it appears to
+                // prevent is in fact live.
+                Some(esc) => writeln!(
+                    out,
+                    "    {} — NOMINAL {} pin by {} (to {}), but ESCAPABLE via {} (a check): the pin does NOT restrain it",
+                    p.piece, p.kind, p.pinner, p.pinned_to, esc,
+                )
+                .unwrap(),
+                None => writeln!(
+                    out,
+                    "    {} — {} pin by {} (pinned to {})",
+                    p.piece, p.kind, p.pinner, p.pinned_to,
+                )
+                .unwrap(),
+            }
         }
     }
     if !side.overloaded.is_empty() {

@@ -112,22 +112,47 @@ pub fn find_best_tactic_in_position(
     // caller's position is untouched.
     let mut scratch = pos.clone();
     let legal = legal_moves_vec(&mut scratch);
-    let mut best: Option<TacticHit> = None;
+    // We track each candidate alongside whether the opponent has a clean
+    // forcing escape from it. A tactic the opponent can refute (e.g. a pin
+    // whose pinned piece has a forcing check out, or a sac whose captured
+    // piece is simply recaptured) must never outrank a tactic with no such
+    // out — otherwise a refuted "win" like Rxe5 gets crowned "best tactic."
+    // See [`super::tactic_escape::find_tactic_escape`].
+    let mut best: Option<(TacticHit, bool)> = None;
     for m in legal {
         let line = [m];
         if let Some(hit) = detect_line_tactic(pos, &line, mover, 0, prior_move) {
             if hit.confidence != Confidence::High {
                 continue;
             }
+            let has_escape = find_tactic_escape(pos, &hit, mover).is_some();
             best = match best {
-                None => Some(hit),
-                Some(prev) => {
-                    Some(if hit_outranks(&hit, &prev) { hit } else { prev })
-                }
+                None => Some((hit, has_escape)),
+                Some(prev) => Some(if hit_outranks_escape_aware((&hit, has_escape), (&prev.0, prev.1)) {
+                    (hit, has_escape)
+                } else {
+                    prev
+                }),
             };
         }
     }
-    best
+    best.map(|(hit, _)| hit)
+}
+
+/// Escape-aware ranking for `find_best_tactic_in_position`: a tactic with
+/// no forcing escape always beats one that has one; among tactics of equal
+/// escape status, [`hit_outranks`] decides. This is what keeps a refuted
+/// sacrifice from being surfaced as the side's "best tactic" while a clean
+/// alternative exists, and — when *every* candidate is refuted — lets the
+/// more instructive pattern (via [`hit_outranks`]) lead.
+fn hit_outranks_escape_aware(a: (&TacticHit, bool), b: (&TacticHit, bool)) -> bool {
+    let (a_hit, a_escape) = a;
+    let (b_hit, b_escape) = b;
+    if a_escape != b_escape {
+        // `false` (no escape) is better, so `a` outranks when it has none.
+        return !a_escape;
+    }
+    hit_outranks(a_hit, b_hit)
 }
 
 /// `a` outranks `b` for pre-move coaching surfacing.
@@ -176,19 +201,23 @@ fn pattern_rank(p: TacticPattern) -> u8 {
         TacticPattern::DiscoveredCheck => 6,
         TacticPattern::Skewer => 7,
         TacticPattern::DiscoveredAttack => 8,
-        TacticPattern::Pin => 9,
-        TacticPattern::Intermezzo => 10,
-        TacticPattern::Deflection => 11,
-        TacticPattern::Attraction => 12,
-        TacticPattern::Interference => 13,
-        TacticPattern::Clearance => 14,
-        TacticPattern::XRay => 15,
-        TacticPattern::AttackingF2F7 => 16,
-        TacticPattern::UnderPromotion => 17,
+        // RelativePin ahead of the absolute Pin: it's the subtler lesson a
+        // 1200 misses (the pinned piece *can* move, it just shouldn't), so
+        // when two refuted tactics tie on gain we surface the relative pin.
+        TacticPattern::RelativePin => 9,
+        TacticPattern::Pin => 10,
+        TacticPattern::Intermezzo => 11,
+        TacticPattern::Deflection => 12,
+        TacticPattern::Attraction => 13,
+        TacticPattern::Interference => 14,
+        TacticPattern::Clearance => 15,
+        TacticPattern::XRay => 16,
+        TacticPattern::AttackingF2F7 => 17,
+        TacticPattern::UnderPromotion => 18,
         // Sacrifice is only synthesized standalone in
         // `compute_tactic_outcome`; ranking it last is academic but
         // documented for completeness.
-        TacticPattern::Sacrifice => 18,
+        TacticPattern::Sacrifice => 19,
     }
 }
 
@@ -214,10 +243,24 @@ pub enum TacticPattern {
     /// the mover is poised to win it. Port of `cook.py:trapped_piece` /
     /// `util.is_trapped`, adapted to our single-move framing.
     TrappedPiece,
-    /// An enemy piece pinned against its king, which the move exploits —
+    /// An enemy piece pinned against its **king**, which the move exploits —
     /// either the pin stops the piece defending/attacking, or it can't
-    /// flee an attack. Port of `cook.py:pin_prevents_{attack,escape}`.
+    /// flee an attack. The *absolute* pin: the pinned piece literally
+    /// cannot move (doing so is illegal). Port of
+    /// `cook.py:pin_prevents_{attack,escape}`.
     Pin,
+    /// An enemy piece pinned against a more valuable (non-king) piece
+    /// behind it — the *relative* pin. Unlike [`Self::Pin`], the pinned
+    /// piece *may* legally move; it simply loses the more valuable piece
+    /// behind it if it does. That makes the pin **economic, not
+    /// absolute**: the opponent will break it whenever the payoff
+    /// outweighs the rear piece (a forcing check, a winning capture, a
+    /// mate threat — the "willing to give up the queen for mate" case).
+    /// So this pattern carries the rear piece in its `targets` and is the
+    /// one whose escape detection must check the front piece's *forcing*
+    /// resources. Kept separate from [`Self::Pin`] precisely because the
+    /// two have different binding strength.
+    RelativePin,
     /// A ray piece attacks two enemy pieces in a line; the more valuable
     /// front one must move, exposing the one behind. Port of
     /// `cook.py:skewer`.
@@ -290,6 +333,7 @@ impl TacticPattern {
             TacticPattern::RemovingDefender => "Removing the defender",
             TacticPattern::TrappedPiece => "Trapped piece",
             TacticPattern::Pin => "Pin",
+            TacticPattern::RelativePin => "Relative pin",
             TacticPattern::Skewer => "Skewer",
             TacticPattern::DiscoveredAttack => "Discovered attack",
             TacticPattern::DiscoveredCheck => "Discovered check",

@@ -29,16 +29,17 @@
 
 use chess_tutor_engine::analysis::{
     find_best_tactic_in_position, find_check_followups, find_latent_threats, find_overloaded,
-    find_tactic_escape, CheckFollowup, Confidence, EscapeKind, LatentThreat, MatePattern,
-    OverloadedPiece, PriorMove, ReplyFollowup, TacticEscape, TacticHit, TacticPattern,
-    TriggerShape,
+    find_tactic_escape, CheckFollowup, Confidence, DefusalMechanism, DefusalReport, EscapeKind,
+    LatentThreat, MatePattern, OverloadedPiece, PriorMove, ReplyFollowup, TacticEscape, TacticHit,
+    TacticPattern, ThreatDefusal, TriggerShape,
 };
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
-use chess_tutor_engine::types::Color;
+use chess_tutor_engine::types::{Color, Square};
 use serde::Serialize;
 
 use crate::piece_fmt::{color_name, piece_label};
+use crate::units::{format_engine_cp, format_pawns, to_white_pov};
 
 /// Full tactics report, one [`SideTactics`] per colour, ready for text
 /// or JSON rendering. The optional blocks ([`Self::latent`],
@@ -55,6 +56,56 @@ pub struct TacticsView {
     /// the two-step forcing-line scan per mover side ("after my
     /// check, what tactic do I have").
     pub check_followups: Option<CheckFollowupsView>,
+    /// Search-backed enumeration of the moves that defuse the
+    /// side-to-move's standing threats. `None` unless the caller asked
+    /// for it (explain / `tactics --latent`) *and* there is a standing
+    /// threat to defuse. This is the load-bearing "you must address the
+    /// danger — here's how" surface; see [`DefusalsView`].
+    pub defusals: Option<DefusalsView>,
+}
+
+/// Search-backed list of the moves that neutralise the side-to-move's
+/// standing (latent) threats, split into those that hold the advantage
+/// and those that address a threat but concede material elsewhere. See
+/// [`chess_tutor_engine::analysis::find_threat_defusals`].
+#[derive(Debug, Clone, Serialize)]
+pub struct DefusalsView {
+    /// Search depth the scores were produced at.
+    pub depth: u32,
+    /// Number of standing threats against the side to move.
+    pub threat_count: usize,
+    /// The engine's best move overall, in SAN — the "what you should
+    /// actually play" headline.
+    pub best_san: Option<String>,
+    /// Best line's score, white-POV pawns (chess.com-comparable).
+    pub best_pawns_white_pov: Option<String>,
+    /// The single idea the holding moves share — the standing threat they
+    /// all neutralise, by whatever mechanism. Stated as the headline so the
+    /// agent's takeaway is "address this line", not "memorise this move
+    /// list". `None` when the holders don't converge on one threat.
+    pub common_thread: Option<String>,
+    /// Moves that defuse a threat AND keep the side to move on the
+    /// winning side of the line. Sorted best-first.
+    pub holders: Vec<DefusalMoveView>,
+    /// Moves that geometrically address a threat but drop the eval
+    /// elsewhere (e.g. relocating the target while a different piece
+    /// hangs). The cautionary list — "don't be fooled, these don't
+    /// hold." Sorted best-first.
+    pub non_holders: Vec<DefusalMoveView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DefusalMoveView {
+    pub san: String,
+    pub uci: String,
+    /// Resulting score, white-POV pawns.
+    pub pawns_white_pov: String,
+    /// Same score, raw engine-cp, side-to-move-signed (matches the
+    /// summary header's `engine-cp: … stm`).
+    pub engine_cp_stm: String,
+    /// One phrase per threat this move neutralises, e.g.
+    /// `"DiscoveredAttack on Re1 (captures the discoverer)"`.
+    pub addresses: Vec<String>,
 }
 
 /// Per-mover-side block of multi-step forcing-line tactics.
@@ -196,6 +247,12 @@ pub struct TacticHitView {
 /// [`chess_tutor_engine::analysis::find_tactic_escape`]).
 #[derive(Debug, Clone, Serialize)]
 pub struct EscapeView {
+    /// The tactic's key move in SAN (`Rxe5`) — the move the refutation
+    /// replies to. Without it, a refutation like `Qxe5` reads as
+    /// nonsense (the front piece is still on e5 in the *pre-move*
+    /// position); naming the key move makes clear it's a reply to the
+    /// post-key-move board. `None` only if the hit carries no key move.
+    pub key_move_san: Option<String>,
     /// The refuting reply in SAN (`Qxe5`).
     pub refutation_san: String,
     pub refutation_uci: String,
@@ -248,6 +305,124 @@ pub fn build(
         black: build_side(pos, Color::Black, stm == Color::Black, stm_in_check, prior_move),
         latent,
         check_followups,
+        // Defusals need a search (an `Engine`), which `build` doesn't
+        // own; the caller computes the report and attaches it via
+        // [`build_defusals_view`]. Default to absent.
+        defusals: None,
+    }
+}
+
+/// Build the [`DefusalsView`] from a [`DefusalReport`] (produced by
+/// [`chess_tutor_engine::analysis::find_threat_defusals`]). Pure —
+/// takes the already-searched report and resolves moves to SAN +
+/// white-POV scores against `pos`. `depth` is recorded for the header.
+///
+/// Scores in the report are side-to-move POV; we render white-POV pawns
+/// (chess.com-comparable) so the numbers line up with the `danger:`
+/// header's eval and the "winning → losing" framing.
+pub fn build_defusals_view(pos: &Position, report: &DefusalReport, depth: u32) -> DefusalsView {
+    let stm = pos.side_to_move();
+    let threat_count = find_latent_threats(pos, stm).len();
+
+    let best_san = report.best_move.map(|m| san::format(pos, m));
+    let best_pawns_white_pov = report
+        .best_move
+        .map(|_| format_pawns(to_white_pov(report.best_score, stm)));
+
+    let mut holders = Vec::new();
+    let mut non_holders = Vec::new();
+    for d in &report.defusals {
+        let view = build_defusal_move_view(pos, d);
+        if d.holds {
+            holders.push(view);
+        } else {
+            non_holders.push(view);
+        }
+    }
+
+    let common_thread = common_thread(pos, &report.defusals);
+
+    DefusalsView {
+        depth,
+        threat_count,
+        best_san,
+        best_pawns_white_pov,
+        common_thread,
+        holders,
+        non_holders,
+    }
+}
+
+/// The standing threat the *holding* moves converge on. When most/all
+/// holders neutralise the same `(pattern, target)`, that's the one idea
+/// worth stating up front: address this line, by whatever mechanism. We
+/// tally over holders only — a move that "addresses" a threat but loses
+/// elsewhere isn't evidence of the real common thread. `None` when there
+/// are no holders or they don't share a dominant threat.
+fn common_thread(pos: &Position, defusals: &[ThreatDefusal]) -> Option<String> {
+    let mut counts: Vec<(TacticPattern, Square, usize)> = Vec::new();
+    for d in defusals.iter().filter(|d| d.holds) {
+        for dt in &d.defuses {
+            match counts
+                .iter_mut()
+                .find(|(p, s, _)| *p == dt.pattern && *s == dt.target)
+            {
+                Some(entry) => entry.2 += 1,
+                None => counts.push((dt.pattern, dt.target, 1)),
+            }
+        }
+    }
+    let (pattern, target, _) = counts.into_iter().max_by_key(|(_, _, c)| *c)?;
+    let tlabel = pos
+        .piece_on(target)
+        .map(|p| piece_label(p, target))
+        .unwrap_or_else(|| target.to_algebraic());
+    Some(format!(
+        "common thread — every move that holds neutralises the {} on {}, by one of three \
+         mechanisms: remove the attacker, block its line, or defend {}. A move that leaves \
+         that line open (however active it looks) hands the eval over.",
+        pattern_name(pattern),
+        tlabel,
+        tlabel,
+    ))
+}
+
+fn build_defusal_move_view(pos: &Position, d: &ThreatDefusal) -> DefusalMoveView {
+    let stm = pos.side_to_move();
+    let addresses = d
+        .defuses
+        .iter()
+        .map(|dt| {
+            let target = pos
+                .piece_on(dt.target)
+                .map(|p| piece_label(p, dt.target))
+                .unwrap_or_else(|| dt.target.to_algebraic());
+            format!(
+                "{} on {} ({})",
+                pattern_name(dt.pattern),
+                target,
+                mechanism_phrase(dt.mechanism),
+            )
+        })
+        .collect();
+    DefusalMoveView {
+        san: san::format(pos, d.mv),
+        uci: crate::uci::format(d.mv),
+        pawns_white_pov: format_pawns(to_white_pov(d.score, stm)),
+        engine_cp_stm: format_engine_cp(d.score),
+        addresses,
+    }
+}
+
+/// Plain-English phrase for a [`DefusalMechanism`], for the `addresses`
+/// gloss on each defusing move.
+fn mechanism_phrase(m: DefusalMechanism) -> &'static str {
+    match m {
+        DefusalMechanism::CaptureDiscoverer => "captures the discoverer",
+        DefusalMechanism::CaptureVehicle => "captures the blocker",
+        DefusalMechanism::Block => "blocks the firing line",
+        DefusalMechanism::RelocateTarget => "moves the threatened piece to safety",
+        DefusalMechanism::OverDefend => "defends the threatened piece",
     }
 }
 
@@ -491,6 +666,9 @@ fn escape_kind_str(k: EscapeKind) -> &'static str {
 /// refutation needs the position *after* the tactic's key move, which is
 /// where the opponent replies from.
 fn build_escape_view(pos: &Position, hit: &TacticHit, esc: &TacticEscape) -> EscapeView {
+    // The key move's SAN must be formatted against the *pre-move*
+    // position; the refutation's against the position after it.
+    let key_move_san = hit.key_move.map(|km| san::format(pos, km));
     let mut post = pos.clone();
     if let Some(km) = hit.key_move {
         post.do_move(km);
@@ -500,6 +678,7 @@ fn build_escape_view(pos: &Position, hit: &TacticHit, esc: &TacticEscape) -> Esc
         .map(|p| piece_label(p, esc.expected_target))
         .unwrap_or_else(|| esc.expected_target.to_algebraic());
     EscapeView {
+        key_move_san,
         refutation_san: san::format(&post, esc.refutation),
         refutation_uci: crate::uci::format(esc.refutation),
         kind: escape_kind_str(esc.kind).to_string(),
@@ -534,6 +713,7 @@ fn pattern_name(p: TacticPattern) -> &'static str {
         TacticPattern::RemovingDefender => "RemovingDefender",
         TacticPattern::TrappedPiece => "TrappedPiece",
         TacticPattern::Pin => "Pin",
+        TacticPattern::RelativePin => "RelativePin",
         TacticPattern::Skewer => "Skewer",
         TacticPattern::DiscoveredAttack => "DiscoveredAttack",
         TacticPattern::DiscoveredCheck => "DiscoveredCheck",
@@ -584,10 +764,97 @@ pub fn render_text(view: &TacticsView) -> String {
     if let Some(latent) = &view.latent {
         render_latent(&mut out, latent);
     }
+    if let Some(defusals) = &view.defusals {
+        render_defusals(&mut out, defusals);
+    }
     if let Some(cf) = &view.check_followups {
         render_check_followups(&mut out, cf);
     }
     out
+}
+
+/// Render the search-backed defusal block. Sits right after the standing
+/// (latent) threats so the agent reads "here's the loaded threat" then
+/// immediately "here are the only moves that answer it." The framing is
+/// deliberately imperative: a standing threat is not optional homework.
+fn render_defusals(out: &mut String, d: &DefusalsView) {
+    use std::fmt::Write;
+    writeln!(
+        out,
+        "defusing the danger (search-backed, depth {}):",
+        d.depth
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  you face {} standing threat(s) against the side to move. You MUST play a move",
+        d.threat_count,
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  that neutralises the threat AND holds the eval — anything else hands it over.",
+    )
+    .unwrap();
+
+    // Lead with the synthesis: the single line every holding move addresses.
+    // This is what turns the move list from a leaderboard into a lesson.
+    if let Some(thread) = &d.common_thread {
+        writeln!(out, "  {thread}").unwrap();
+    }
+
+    if d.holders.is_empty() {
+        writeln!(
+            out,
+            "  !! NO move both defuses a threat and holds — the position is already lost or",
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "     the threat cannot be parried without concession. See the cautionary list below.",
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "  moves that DEFUSE and HOLD (play one of these):").unwrap();
+        for m in &d.holders {
+            render_defusal_move(out, m);
+        }
+    }
+
+    if !d.non_holders.is_empty() {
+        writeln!(
+            out,
+            "  moves that address a threat but LOSE elsewhere (do NOT be fooled — these don't hold):",
+        )
+        .unwrap();
+        // Cap the cautionary list: the top few losers make the point;
+        // a wall of −20-pawn rook shuffles is noise.
+        const MAX_NON_HOLDERS: usize = 4;
+        for m in d.non_holders.iter().take(MAX_NON_HOLDERS) {
+            render_defusal_move(out, m);
+        }
+        let hidden = d.non_holders.len().saturating_sub(MAX_NON_HOLDERS);
+        if hidden > 0 {
+            writeln!(out, "    … and {hidden} more non-holding move(s)").unwrap();
+        }
+    }
+
+    if let (Some(best), Some(pawns)) = (&d.best_san, &d.best_pawns_white_pov) {
+        writeln!(out, "  best move overall: {best}  ({pawns} pawns white-POV)").unwrap();
+    }
+}
+
+fn render_defusal_move(out: &mut String, m: &DefusalMoveView) {
+    use std::fmt::Write;
+    writeln!(
+        out,
+        "    {:<7} {:>7} pawns (wp)  [engine-cp {} stm]  — {}",
+        m.san,
+        m.pawns_white_pov,
+        m.engine_cp_stm,
+        m.addresses.join("; "),
+    )
+    .unwrap();
 }
 
 fn render_check_followups(out: &mut String, cf: &CheckFollowupsView) {
@@ -706,7 +973,23 @@ fn render_hit(out: &mut String, hit: &TacticHitView) {
         Some(mp) => format!(" + {mp} mate"),
         None => String::new(),
     };
-    writeln!(out, "  best tactic: {}{}{}", hit.pattern, mate_suffix, sac).unwrap();
+    // An escape means the opponent has a forcing reply that prevents the
+    // tactic's expected capture. The pattern is still real (it's on the
+    // board), but it's unlikely to be winnable — flag that at the heading
+    // so a reader skimming for `gain:` / `confidence:` can't miss it. The
+    // `NOTE:` line at the bottom restates the practical conclusion next to
+    // the `escape:` detail that justifies it.
+    let escape_tag = if hit.escape.is_some() {
+        " [has escape — likely not winnable]"
+    } else {
+        ""
+    };
+    writeln!(
+        out,
+        "  best tactic: {}{}{}{}",
+        hit.pattern, mate_suffix, sac, escape_tag
+    )
+    .unwrap();
     // Just the destination square — see the field doc on
     // [`TacticHitView::primary_square`] for why we don't try to label
     // the moving piece.
@@ -724,10 +1007,19 @@ fn render_hit(out: &mut String, hit: &TacticHitView) {
     writeln!(out, "    gain:       {gain}").unwrap();
     writeln!(out, "    confidence: {}", hit.confidence).unwrap();
     if let Some(esc) = &hit.escape {
+        let after = match &esc.key_move_san {
+            Some(km) => format!("after {km}, "),
+            None => String::new(),
+        };
         writeln!(
             out,
-            "    escape:     opponent breaks it with {} ({}) — expected to win {}",
-            esc.refutation_san, esc.kind, esc.expected_target,
+            "    escape:     {}opponent breaks it with {} ({}) — expected to win {}",
+            after, esc.refutation_san, esc.kind, esc.expected_target,
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    NOTE:       an escape exists — you likely cannot take advantage of this tactic",
         )
         .unwrap();
     }

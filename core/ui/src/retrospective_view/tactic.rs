@@ -212,6 +212,7 @@ fn pattern_phrase(pattern: TacticPattern) -> &'static str {
         TacticPattern::RemovingDefender => "removing the defender",
         TacticPattern::TrappedPiece => "a trapped piece",
         TacticPattern::Pin => "a pin",
+        TacticPattern::RelativePin => "a relative pin",
         TacticPattern::Skewer => "a skewer",
         TacticPattern::DiscoveredAttack => "a discovered attack",
         TacticPattern::DiscoveredCheck => "a discovered check",
@@ -394,10 +395,18 @@ fn pattern_lesson(pattern: TacticPattern) -> &'static str {
              needed to seal off escape squares."
         }
         TacticPattern::Pin => {
-            "A pinned piece can't move without exposing a more valuable \
-             piece (or its king) behind it. Pin a defender and the piece \
-             it defends becomes free; pin an attacker and its threat \
+            "An absolute pin: the pinned piece can't move at all, because \
+             its own king sits directly behind it. Pin a defender and the \
+             piece it defends becomes free; pin an attacker and its threat \
              goes away."
+        }
+        TacticPattern::RelativePin => {
+            "A relative pin: a more valuable piece (not the king) sits \
+             behind the pinned one, so moving it loses material. Unlike an \
+             absolute pin it's only *usually* binding — the opponent will \
+             break it with a forcing move (a check or a winning capture) \
+             when that's worth more than the piece behind. Always check \
+             for that forcing escape before you count on the pin."
         }
         TacticPattern::Skewer => {
             "A piece attacks two enemy pieces in a line — the more \

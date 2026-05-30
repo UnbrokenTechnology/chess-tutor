@@ -231,11 +231,17 @@ pub enum Command {
         /// don't need bit-identical results.
         #[arg(long, default_value_t = 1)]
         threads: usize,
-        /// Force a move into the MultiPV result. Mirrors the
-        /// retrospective's `force_include` so you can reproduce its
-        /// pathological positions one-shot. Accepts SAN (`Nf3`,
-        /// `Qxe6+`) or UCI (`g1f3`). Repeat the flag to force in
-        /// multiple moves.
+        /// Force a move into the MultiPV result so it's scored alongside
+        /// the engine's best line. This is THE way to diagnose "why was
+        /// the move I played bad?": run `search` on the position BEFORE
+        /// your move with `--force-include <your move>`, and the output
+        /// shows the eval swing vs. the best line plus an "ALLOWED, NOT
+        /// MISSED" banner when the move flipped a winning/equal position
+        /// to losing. (Searching the position AFTER the move can't do
+        /// this — it only shows the result is bad, not that your move
+        /// caused it.) Also mirrors the retrospective's `force_include`
+        /// for reproducing its pathological positions. Accepts SAN
+        /// (`Nf3`, `Qxe6+`) or UCI (`g1f3`). Repeat to force multiple.
         #[arg(long = "force-include", value_name = "MOVE")]
         force_include: Vec<String>,
         /// Emit per-depth aspiration / fail-high / fail-low events to

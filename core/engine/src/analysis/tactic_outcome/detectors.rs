@@ -18,11 +18,12 @@ use crate::analysis::tactic_util::{
     attacked_opponent_squares, attacks_from_square, is_hanging, is_in_bad_spot, is_trapped,
     king_value,
 };
-use crate::attacks::{attacks_bb, between_bb, line_bb};
+use crate::attacks::{aligned, attacks_bb, between_bb, line_bb};
 use crate::bitboard::square_bb;
+use crate::magics::{bishop_attacks, rook_attacks};
 use crate::movegen::legal_moves_vec;
 use crate::position::Position;
-use crate::types::{Color, Move, MoveKind, PieceType, Square};
+use crate::types::{Color, Move, MoveKind, PieceType, Square, Value};
 
 #[cfg(test)]
 #[path = "detectors_tests.rs"]
@@ -82,6 +83,7 @@ pub(crate) fn detect_line_tactic(
         .or_else(|| detect_skewer(&post, key_move, mover, base_ply, material_gain))
         .or_else(|| detect_discovered_attack(&post, key_move, mover, base_ply, material_gain))
         .or_else(|| detect_pin(&post, key_move, mover, base_ply, material_gain))
+        .or_else(|| detect_relative_pin(&post, key_move, mover, base_ply))
         // Wave-4 multi-ply patterns, in the agreed priority order. These fire
         // only when no single-move pattern above claims the line — the
         // immediate pattern is always the primary lesson.
@@ -632,6 +634,125 @@ fn pin_hit(
         targets: vec![pinned_sq],
         material_gain,
         confidence: confidence_for(material_gain),
+        sacrifice: false,
+        mate_pattern: None,
+        key_move: None,
+    }
+}
+
+/// Relative pin — an enemy piece `V` pinned by one of the mover's sliders
+/// to a more valuable, **non-king** enemy piece `T` directly behind it.
+///
+/// Fundamentally different from [`detect_pin`] (the absolute, pinned-to-
+/// king pin): the relatively-pinned piece *can* legally move — it just
+/// loses `T` if it does. So the pin is **economic, not absolute**, and the
+/// opponent breaks it whenever a forcing resource (a check, a winning
+/// capture, a mate threat) outweighs `T`.
+///
+/// We report the material-winning *prevents-escape* form: `V` is also
+/// attacked by one of the mover's pieces cheaper than `V`, so `V` can
+/// neither stay (it's captured) nor flee (that drops `T`). The hit's
+/// `targets` are `[V, T]` — front then rear — which is exactly what
+/// [`crate::analysis::tactic_escape`] needs to distinguish a *quiet*
+/// pin-breaking move (still drops `T`, so not an escape) from a *forcing*
+/// one (the real escape, e.g. `…Bxh2+` turning the pinned bishop's
+/// departure into a discovered attack).
+///
+/// Geometry uses the classical x-ray trick (compute the slider's reach,
+/// then recompute with the front piece removed; the newly-reached occupied
+/// squares lie on the ray behind it), mirroring
+/// [`crate::analysis::latent_threats`].
+fn detect_relative_pin(
+    post: &Position,
+    key_move: Move,
+    mover: Color,
+    base_ply: usize,
+) -> Option<TacticHit> {
+    let enemy = !mover;
+    let occ = post.occupied();
+    let ours = post.pieces_by_color(mover);
+    let enemy_bb = post.pieces_by_color(enemy);
+
+    let bishops_queens = (post.pieces(PieceType::Bishop) | post.pieces(PieceType::Queen)) & ours;
+    let rooks_queens = (post.pieces(PieceType::Rook) | post.pieces(PieceType::Queen)) & ours;
+
+    let scan = |slider_sq: Square, orthogonal: bool| -> Option<TacticHit> {
+        let slider_reach = |o| {
+            if orthogonal {
+                rook_attacks(slider_sq, o)
+            } else {
+                bishop_attacks(slider_sq, o)
+            }
+        };
+        let primary = slider_reach(occ);
+        // `primary & occ` stops at the first blocker on each ray; keeping the
+        // enemy-occupied ones gives the pin's front-piece candidates.
+        for v_sq in primary & occ & enemy_bb {
+            let xray = slider_reach(occ ^ square_bb(v_sq));
+            for t_sq in (xray & !primary) & occ & enemy_bb {
+                if !aligned(slider_sq, v_sq, t_sq) {
+                    continue;
+                }
+                let (Some(v), Some(t)) = (post.piece_on(v_sq), post.piece_on(t_sq)) else {
+                    continue;
+                };
+                // Rear must be more valuable and not the king — a king rear
+                // is the absolute pin, already claimed by `detect_pin`.
+                if t.kind() == PieceType::King {
+                    continue;
+                }
+                let v_value = king_value(v.kind());
+                if king_value(t.kind()) <= v_value {
+                    continue;
+                }
+                // prevents-escape: V attacked by one of our pieces cheaper
+                // than V, so we win it outright — it can't flee the pin.
+                let attacked_by_cheaper = (post.attackers_to(v_sq, occ) & ours)
+                    .into_iter()
+                    .any(|a| {
+                        post.piece_on(a)
+                            .is_some_and(|p| king_value(p.kind()) < v_value)
+                    });
+                if attacked_by_cheaper {
+                    return Some(relative_pin_hit(key_move, v_sq, t_sq, base_ply, v.kind()));
+                }
+            }
+        }
+        None
+    };
+
+    for slider_sq in bishops_queens {
+        if let Some(hit) = scan(slider_sq, false) {
+            return Some(hit);
+        }
+    }
+    for slider_sq in rooks_queens {
+        if let Some(hit) = scan(slider_sq, true) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn relative_pin_hit(
+    key_move: Move,
+    front_sq: Square,
+    rear_sq: Square,
+    base_ply: usize,
+    front_kind: PieceType,
+) -> TacticHit {
+    // Gain = engine-cp value of the pinned (front) piece we win: the
+    // opponent keeps the cheaper front piece and lets it fall rather than
+    // move it and drop the more valuable rear. Engine-cp (not lichess
+    // points) so it ranks against `detect_pin` in `find_best_tactic`.
+    let gain = Value::mg_of_piece(front_kind).0;
+    TacticHit {
+        pattern: TacticPattern::RelativePin,
+        pv_ply: base_ply,
+        primary_piece: key_move.to(),
+        targets: vec![front_sq, rear_sq],
+        material_gain: Some(gain),
+        confidence: confidence_for(Some(gain)),
         sacrifice: false,
         mate_pattern: None,
         key_move: None,

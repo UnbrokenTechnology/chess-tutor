@@ -15,12 +15,15 @@
 //! tag becomes `[search d=N]` so the agent doesn't confuse a deep
 //! search figure with a one-ply static one.
 
-use chess_tutor_engine::analysis::{find_latent_threats, LatentThreat, TriggerShape};
+use chess_tutor_engine::analysis::{
+    describe_discovery_firing, find_latent_threats, LatentThreat, TacticPattern, TriggerShape,
+};
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::openings;
 use chess_tutor_engine::position::Position;
-use chess_tutor_engine::types::{Color, PieceType, Value};
+use chess_tutor_engine::san;
+use chess_tutor_engine::types::{Color, Move, PieceType, Value};
 use serde::Serialize;
 
 use crate::piece_fmt::piece_label;
@@ -77,6 +80,21 @@ pub struct DangerLine {
     pub min_gain: i32,
     /// Plain-English description of the opponent move that fires it.
     pub trigger: String,
+    /// For a discovered attack: the concrete forcing opponent move that
+    /// springs it (`"Bxh2+"`), in SAN. `None` for other patterns or when
+    /// no firing move was resolved.
+    pub firing_san: Option<String>,
+    /// The firing move is a check — the property that lets it beat a
+    /// counter-pin on the discovering vehicle.
+    pub firing_is_check: bool,
+    /// `true` when the discovering vehicle is *also* counter-pinned by one
+    /// of your own pieces (so a naive reader would think the threat is
+    /// neutralised) **but** the firing move is a check that overrides the
+    /// pin. This is the load-bearing "your pin does NOT hold this" signal.
+    pub pin_does_not_hold: bool,
+    /// The discovering vehicle's label (`"be5"`) — the piece your
+    /// counter-pin nominally restrains. `None` for non-slider patterns.
+    pub vehicle: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -217,11 +235,11 @@ fn build_danger_line(pos: &Position, t: &LatentThreat) -> DangerLine {
     let trigger = match t.trigger_shape {
         TriggerShape::VehicleMoves => format!(
             "any move by {} unmasks the attack",
-            vehicle.unwrap_or_else(|| "the blocking piece".to_string()),
+            vehicle.clone().unwrap_or_else(|| "the blocking piece".to_string()),
         ),
         TriggerShape::VehicleConstrained => format!(
             "{} can't move without exposing it",
-            vehicle.unwrap_or_else(|| "the blocking piece".to_string()),
+            vehicle.clone().unwrap_or_else(|| "the blocking piece".to_string()),
         ),
         TriggerShape::DefenderRemoved { defender } => {
             let d = pos
@@ -231,12 +249,46 @@ fn build_danger_line(pos: &Position, t: &LatentThreat) -> DangerLine {
             format!("capturing the defender {d} leaves it unguarded")
         }
     };
+
+    // For a discovered attack, resolve the concrete forcing move that
+    // springs it and whether a counter-pin on the vehicle would *look*
+    // like it neutralises the threat (it doesn't, when the firing move is
+    // a check). This is the synthesis the bare geometry can't convey.
+    let (firing_san, firing_is_check, pin_does_not_hold) =
+        if t.pattern == TacticPattern::DiscoveredAttack {
+            match describe_discovery_firing(pos, pos.side_to_move(), t) {
+                Some(f) => (
+                    Some(opponent_move_san(pos, f.firing_move)),
+                    f.gives_check,
+                    f.vehicle_counter_pinned && f.gives_check,
+                ),
+                None => (None, false, false),
+            }
+        } else {
+            (None, false, false)
+        };
+
     DangerLine {
         pattern: format!("{:?}", t.pattern),
         target,
         min_gain: t.min_gain,
         trigger,
+        firing_san,
+        firing_is_check,
+        pin_does_not_hold,
+        vehicle,
     }
+}
+
+/// SAN for an opponent move (the side *not* to move). The danger block's
+/// firing moves belong to the opponent, so we null-pivot to their turn to
+/// format it legally.
+fn opponent_move_san(pos: &Position, mv: Move) -> String {
+    let mut scratch = pos.clone();
+    let saved = scratch.do_null_move();
+    let s = san::format(&scratch, mv);
+    scratch.undo_null_move(saved);
+    s
 }
 
 /// Multi-line text rendering of the summary. Stable line shape so the
@@ -296,12 +348,35 @@ pub fn render_text(summary: &PositionSummary) -> String {
         )
         .unwrap();
         for d in &summary.danger {
-            writeln!(
-                out,
-                "            - opponent's {} on your {} (~{} pts) — fires when {}",
-                d.pattern, d.target, d.min_gain, d.trigger,
-            )
-            .unwrap();
+            match &d.firing_san {
+                // Discovered attack with a resolved forcing move: name the
+                // concrete spring and (when it's a check that beats a
+                // counter-pin) spell out why the geometry that looks
+                // neutralised isn't.
+                Some(san) => {
+                    let check_note = if d.firing_is_check { " (a check)" } else { "" };
+                    writeln!(
+                        out,
+                        "            - opponent's {} on your {} (~{} pts) — fires via {}{}",
+                        d.pattern, d.target, d.min_gain, san, check_note,
+                    )
+                    .unwrap();
+                    if d.pin_does_not_hold {
+                        let veh = d.vehicle.as_deref().unwrap_or("the discovering piece");
+                        writeln!(
+                            out,
+                            "              NOTE your pin on {veh} does NOT stop this: a check must be answered first, so you never get the tempo to punish the move — the pin is illusory here",
+                        )
+                        .unwrap();
+                    }
+                }
+                None => writeln!(
+                    out,
+                    "            - opponent's {} on your {} (~{} pts) — fires when {}",
+                    d.pattern, d.target, d.min_gain, d.trigger,
+                )
+                .unwrap(),
+            }
         }
         writeln!(
             out,

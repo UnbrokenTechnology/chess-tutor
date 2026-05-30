@@ -41,6 +41,60 @@ fn case_study_qxe6_finds_standing_discovered_attack() {
 }
 
 #[test]
+fn case_study_qxe6_discovery_fires_via_forcing_check_despite_counter_pin() {
+    // Same FEN. The discovered attack on Re1 is genuinely live because
+    // the vehicle (Be5) has a *forcing* move — `…Bxh2+` (e5→h2) — that
+    // springs it. The bishop is nominally counter-pinned by that same Re1
+    // to the queen on e6, but a check overrides the pin: White must answer
+    // it before it could ever play Rxe6. This is the synthesis the danger
+    // block needs.
+    let pos =
+        Position::from_fen("1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1").unwrap();
+    let threats = find_latent_threats(&pos, Color::White);
+    let da = threats
+        .iter()
+        .find(|t| t.pattern == TacticPattern::DiscoveredAttack && t.target == Square::E1)
+        .expect("discovered attack on Re1");
+
+    let firing = describe_discovery_firing(&pos, Color::White, da)
+        .expect("the discovery should have a concrete firing move");
+    assert_eq!(firing.firing_move.from(), Square::E5, "vehicle is the e5 bishop");
+    assert_eq!(firing.firing_move.to(), Square::H2, "Bxh2+ is the forcing spring");
+    assert!(firing.gives_check, "Bxh2+ is a check");
+    assert!(firing.is_capture, "Bxh2+ grabs the h2 pawn");
+    assert!(
+        firing.vehicle_counter_pinned,
+        "Re1 counter-pins the bishop to the queen — that's why the check matters"
+    );
+}
+
+#[test]
+fn case_study_qxe6_pin_on_bishop_is_escapable_via_check() {
+    // The counterpart, read from Black's side: `find_latent_threats(.., Black)`
+    // reports Re1's relative pin of Be5 against qe6. That pin does NOT
+    // restrain the bishop, because `…Bxh2+` is a checking escape that
+    // exposes the queen anyway. pin_forcing_escape names that move.
+    let pos =
+        Position::from_fen("1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1").unwrap();
+    let escape = pin_forcing_escape(&pos, Square::E5, Square::E1, Square::E6, Color::Black)
+        .expect("the relatively-pinned bishop has a checking escape");
+    assert_eq!(escape.from(), Square::E5);
+    assert_eq!(escape.to(), Square::H2);
+}
+
+#[test]
+fn absolute_pin_has_no_forcing_escape() {
+    // A knight pinned to its own king on the same file cannot leave the
+    // ray at all, so there is no escape — the pin genuinely holds.
+    // White Re1 pins Black Ne7 to Ke8; Black knight to (hypothetically) move.
+    let pos = Position::from_fen("4k3/4n3/8/8/8/8/8/4R1K1 b - - 0 1").unwrap();
+    assert!(
+        pin_forcing_escape(&pos, Square::E7, Square::E1, Square::E8, Color::Black).is_none(),
+        "an absolutely-pinned knight has no legal escape, forcing or otherwise"
+    );
+}
+
+#[test]
 fn case_study_desperado_finds_standing_removing_defender() {
     // Missed-desperado-after-qe6 FEN. White to move. Standing
     // threat against White: Black's Nf6 attacks Pe4, which is the
@@ -80,6 +134,30 @@ fn absolute_pin_lights_as_latent_pin_against_blocker_side() {
     assert_eq!(hit.trigger_shape, TriggerShape::VehicleConstrained);
     // King target → gain saturates at the king sentinel.
     assert!(hit.min_gain >= 9);
+}
+
+#[test]
+fn non_king_rear_lights_as_relative_pin() {
+    // White rook e1 pins Black knight e7 (front) to the Black queen on
+    // e8 (rear) — king parked on a8, so this is a *relative* pin, not the
+    // absolute one. The knight may legally move; it just drops the queen.
+    let pos = Position::from_fen("k3q3/4n3/8/8/8/8/8/4R2K b - - 0 1").unwrap();
+    let threats = find_latent_threats(&pos, Color::Black);
+    // It must be classified RelativePin, never the absolute Pin.
+    assert!(
+        classify(&threats, TacticPattern::Pin).is_empty(),
+        "a non-king rear must not be the absolute Pin; got {threats:#?}"
+    );
+    let pins = classify(&threats, TacticPattern::RelativePin);
+    let hit = pins
+        .iter()
+        .find(|t| {
+            t.discoverer == Square::E1 && t.vehicle == Some(Square::E7) && t.target == Square::E8
+        })
+        .unwrap_or_else(|| panic!("expected Re1 + Ne7 → Qe8 relative pin; got {threats:#?}"));
+    assert_eq!(hit.trigger_shape, TriggerShape::VehicleConstrained);
+    // gain proxy = queen - knight = 6 (≥ the minor-piece bar).
+    assert_eq!(hit.min_gain, 6);
 }
 
 #[test]

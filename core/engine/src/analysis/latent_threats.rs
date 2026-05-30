@@ -14,10 +14,12 @@
 //!   Any move by the vehicle discovers the slider's attack on our
 //!   piece. Example: `Qe6 / Be5 / Re1` on the discovered-attack
 //!   case-study FEN — Bxh2+ fires it.
-//! - **Pin** — enemy slider's ray passes through one of our pieces
-//!   (the "vehicle") to a more valuable piece of ours. Our blocker
-//!   cannot move without exposing the rear. King-target is always a
-//!   pin (the absolute pin).
+//! - **Pin** / **RelativePin** — enemy slider's ray passes through one
+//!   of our pieces (the "vehicle") to a more valuable piece of ours.
+//!   Our blocker cannot move without exposing the rear. A **king** rear
+//!   is the absolute pin (`Pin`) — the vehicle literally may not move;
+//!   any other rear is the relative pin (`RelativePin`) — the vehicle
+//!   *may* move, it just concedes the rear if it does.
 //! - **Skewer** — same ray shape, with our more-valuable piece in
 //!   front and our cheaper piece behind. Slider's attack on the front
 //!   forces it to move, then the rear falls.
@@ -64,8 +66,9 @@ use crate::analysis::tactic_outcome::{Confidence, TacticPattern};
 use crate::attacks::aligned;
 use crate::bitboard::{square_bb, Bitboard};
 use crate::magics::{bishop_attacks, rook_attacks};
+use crate::movegen::legal_moves_vec;
 use crate::position::Position;
-use crate::types::{Color, Piece, PieceType, Square};
+use crate::types::{Color, Move, Piece, PieceType, Square};
 
 #[cfg(test)]
 #[path = "latent_threats_tests.rs"]
@@ -83,8 +86,8 @@ pub enum TriggerShape {
     /// The threat is the structural constraint itself —
     /// [`LatentThreat::vehicle`] (our piece) must stay (Pin) or must
     /// flee the slider's attack (Skewer); either way the rear piece is
-    /// exposed. Used by [`TacticPattern::Pin`] and
-    /// [`TacticPattern::Skewer`].
+    /// exposed. Used by [`TacticPattern::Pin`],
+    /// [`TacticPattern::RelativePin`] and [`TacticPattern::Skewer`].
     VehicleConstrained,
     /// The threat fires when our [`Self::DefenderRemoved::defender`]
     /// is captured by [`LatentThreat::discoverer`] (the enemy attacker
@@ -147,7 +150,8 @@ fn pattern_key(p: TacticPattern) -> u8 {
         TacticPattern::DiscoveredAttack => 0,
         TacticPattern::RemovingDefender => 1,
         TacticPattern::Pin => 2,
-        TacticPattern::Skewer => 3,
+        TacticPattern::RelativePin => 3,
+        TacticPattern::Skewer => 4,
         _ => 99,
     }
 }
@@ -325,14 +329,16 @@ fn classify_slider_triple(
             // defensively; covered by movegen invariants in practice.
             return;
         } else if target_value > vehicle_value {
-            // Rear is more valuable than front → vehicle is pinned;
-            // gain proxy = difference (rough "stake if vehicle moves").
-            // Intentionally not the SEE-ish slider-captures-target
-            // calc: Pin's threat is structural (vehicle can't move),
-            // not "slider will swing in" — over-tightening hides real
-            // pins where the slider would itself be lost on the
-            // capture.
-            (TacticPattern::Pin, target_value - vehicle_value)
+            // Rear is more valuable than front → vehicle is pinned to a
+            // non-king piece: a *relative* pin. Unlike the absolute
+            // (king-rear) case above, the vehicle may legally move; it
+            // just concedes the rear. gain proxy = difference (rough
+            // "stake if vehicle moves"). Intentionally not the SEE-ish
+            // slider-captures-target calc: the pin's threat is structural
+            // (vehicle shouldn't move), not "slider will swing in" —
+            // over-tightening hides real pins where the slider would
+            // itself be lost on the capture.
+            (TacticPattern::RelativePin, target_value - vehicle_value)
         } else if vehicle_value > target_value {
             // Skewer — slider's attack forces vehicle to move,
             // exposing the rear. Slider then captures rear, so the
@@ -478,6 +484,184 @@ fn find_latent_remove_defender(
                 trigger_shape: TriggerShape::DefenderRemoved { defender: y_sq },
             });
         }
+    }
+}
+
+// ------------------------------------------------------------------------
+// Forcing-move synthesis — does the geometric restraint actually hold?
+// ------------------------------------------------------------------------
+//
+// The slider scans above report *geometry*: "this bishop is the vehicle of
+// a discovered attack" / "this bishop is pinned." Read in isolation those
+// two facts look contradictory — a pinned piece reads as "can't move," yet
+// the discovered attack fires when it *does* move. The reconciliation is a
+// single question these helpers answer: **does the vehicle have a forcing
+// move (a check) that defeats the pin?** If it does, the pin never gets to
+// bite (the forcing move must be answered before the pinning side could
+// punish the vehicle's departure), so the discovered attack is genuinely
+// live. This is the load-bearing insight on the
+// `discovered-attack-after-qxe6` case study: `…Bxh2+` springs the
+// discovery on `Re1` *because* it is a check, even though the bishop is
+// nominally pinned to the queen by that same rook.
+
+/// How a discovered-attack standing threat actually fires, beyond the bare
+/// "the vehicle moves" geometry. Produced by [`describe_discovery_firing`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveryFiring {
+    /// The opponent move that springs the discovery, chosen
+    /// most-forcing-first (check+capture, then check, then capture, then
+    /// any quiet vehicle move that vacates the ray).
+    pub firing_move: Move,
+    /// The firing move gives check — the property that lets it beat a
+    /// counter-pin on the vehicle.
+    pub gives_check: bool,
+    /// The firing move is also a capture (e.g. `…Bxh2+` grabs a pawn on
+    /// the way).
+    pub is_capture: bool,
+    /// The vehicle is counter-pinned by one of the *defender's* sliders
+    /// (a quiet vehicle move would lose the rear piece). When this is
+    /// `true` **and** [`Self::gives_check`] is `true`, the forcing nature
+    /// of the firing move is what overrides the counter-pin — the
+    /// teaching point the danger block must spell out.
+    pub vehicle_counter_pinned: bool,
+}
+
+/// For a [`TacticPattern::DiscoveredAttack`] standing `threat` against
+/// `defender_color`, work out the concrete opponent move that fires it and
+/// whether the defender's counter-pin on the vehicle (if any) actually
+/// restrains it. Returns `None` for non-discovered-attack patterns, when
+/// the defender is in check (the standing-threat framing doesn't apply),
+/// or when no vehicle move actually springs the discovery.
+///
+/// Pure with respect to `pos` (works on clones). The opponent is given the
+/// move via a null pivot when it isn't already their turn — the same
+/// "free tempo" model the `tactics` opponent scan uses.
+pub fn describe_discovery_firing(
+    pos: &Position,
+    defender_color: Color,
+    threat: &LatentThreat,
+) -> Option<DiscoveryFiring> {
+    if threat.pattern != TacticPattern::DiscoveredAttack || pos.in_check() {
+        return None;
+    }
+    let vehicle = threat.vehicle?;
+    let discoverer = threat.discoverer;
+    let target = threat.target;
+
+    let mut scratch = pos.clone();
+    let saved = (scratch.side_to_move() == defender_color).then(|| scratch.do_null_move());
+
+    // Most-forcing vehicle move that actually fires the discovery (after
+    // it, the discoverer attacks the target square).
+    let mut best: Option<(u8, Move, bool, bool)> = None;
+    for mv in legal_moves_vec(&mut scratch) {
+        if mv.from() != vehicle {
+            continue;
+        }
+        let gives_check = scratch.gives_check(mv);
+        let is_capture = scratch.is_capture(mv);
+        let mut after = scratch.clone();
+        after.do_move(mv);
+        let fires = after
+            .attackers_to(target, after.occupied())
+            .contains(discoverer);
+        if !fires {
+            continue;
+        }
+        let rank = forcing_rank(gives_check, is_capture);
+        if best.is_none_or(|(r, ..)| rank < r) {
+            best = Some((rank, mv, gives_check, is_capture));
+        }
+    }
+    if let Some(s) = saved {
+        scratch.undo_null_move(s);
+    }
+    let (_, firing_move, gives_check, is_capture) = best?;
+
+    // Counter-pin: does one of the defender's own sliders pin/skewer the
+    // vehicle to a rear piece? If so, a *quiet* vehicle move would concede
+    // the rear — which is exactly why the forcing (checking) firing move
+    // matters. Reuse the same scan, pointed the other way.
+    let vehicle_counter_pinned = find_latent_threats(pos, !defender_color).iter().any(|t| {
+        matches!(
+            t.pattern,
+            TacticPattern::Pin | TacticPattern::RelativePin | TacticPattern::Skewer
+        ) && t.vehicle == Some(vehicle)
+    });
+
+    Some(DiscoveryFiring {
+        firing_move,
+        gives_check,
+        is_capture,
+        vehicle_counter_pinned,
+    })
+}
+
+/// The most forcing legal move by the (relatively) pinned piece on
+/// `pinned_sq` that **breaks the pin** — a checking relocation after which
+/// the pinner (on `pinner_sq`) attacks the rear (`rear_sq`), i.e. the pin's
+/// restraint is exposed as illusory. Returns `None` when the piece has no
+/// such move: the normal case for an absolute (king-rear) pin, where the
+/// piece legally cannot leave the ray and the pin genuinely holds.
+///
+/// "Forcing" is deliberately narrow — only a check defeats the pin, because
+/// only a check denies the pinning side the free tempo it needs to capture
+/// the rear. Captures are preferred over quiet checks for the tiebreak so
+/// the named move is the one a player would actually reach for.
+///
+/// `owner` is the pinned piece's colour; the position is null-pivoted when
+/// it isn't already `owner`'s turn. Returns `None` if the defender is in
+/// check (the pivot would be unsound).
+pub fn pin_forcing_escape(
+    pos: &Position,
+    pinned_sq: Square,
+    pinner_sq: Square,
+    rear_sq: Square,
+    owner: Color,
+) -> Option<Move> {
+    if pos.in_check() {
+        return None;
+    }
+    let mut scratch = pos.clone();
+    let saved = (scratch.side_to_move() != owner).then(|| scratch.do_null_move());
+
+    let mut best: Option<(u8, Move)> = None;
+    for mv in legal_moves_vec(&mut scratch) {
+        if mv.from() != pinned_sq || !scratch.gives_check(mv) {
+            continue;
+        }
+        let is_capture = scratch.is_capture(mv);
+        let mut after = scratch.clone();
+        after.do_move(mv);
+        // The escape only breaks the pin if it exposes the rear — i.e. the
+        // pinner now bears on the rear square. A checking move that stays
+        // on the pin ray leaves the rear shielded and doesn't count.
+        if !after
+            .attackers_to(rear_sq, after.occupied())
+            .contains(pinner_sq)
+        {
+            continue;
+        }
+        let rank = if is_capture { 0 } else { 1 };
+        if best.is_none_or(|(r, _)| rank < r) {
+            best = Some((rank, mv));
+        }
+    }
+    if let Some(s) = saved {
+        scratch.undo_null_move(s);
+    }
+    best.map(|(_, mv)| mv)
+}
+
+/// Rank a forcing move for "which would the opponent actually play": a
+/// checking capture first, then a check, then a quiet capture, then a
+/// quiet move. Lower is more forcing.
+fn forcing_rank(gives_check: bool, is_capture: bool) -> u8 {
+    match (gives_check, is_capture) {
+        (true, true) => 0,
+        (true, false) => 1,
+        (false, true) => 2,
+        (false, false) => 3,
     }
 }
 

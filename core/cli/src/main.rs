@@ -34,7 +34,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use chess_tutor_engine::analysis::analyze_position;
+use chess_tutor_engine::analysis::{analyze_position, find_latent_threats, find_threat_defusals};
 use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
@@ -46,6 +46,12 @@ use chess_tutor_engine::types::Move;
 use crate::board::{render as render_board, RenderOptions};
 use crate::cli_args::{Cli, Command, EngineColor};
 use crate::search_report::{pv_to_san, render_debug_trajectory, render_multi_pv};
+
+/// Search depth for the `tactics --latent` defusal block. Matches the
+/// `explain` default so the two surfaces agree on defusal scores. Deep
+/// enough to clear the horizon mis-scores that make a queen-dropping
+/// decoy look like it holds (see `analysis::defusals`).
+const TACTICS_DEFUSAL_DEPTH: u32 = 12;
 
 /// Resolve a user-supplied move string to a `Move` legal in `pos`.
 /// Accepts SAN (`Nf3`, `Rxe6+`) or UCI (`g1f3`); tries SAN first.
@@ -59,6 +65,108 @@ fn parse_user_move(pos: &mut Position, input: &str) -> Result<Move> {
             )),
         },
     }
+}
+
+/// Did a forced move give away the advantage, from the mover's own POV?
+/// Both scores are side-to-move (mover) POV in raw engine-cp.
+///
+/// Two conditions, both required:
+/// - **the move conceded more than a pawn** (`best − forced > 1.0`), and
+/// - **it no longer leaves the mover clearly winning** (`forced < +1.0`).
+///
+/// This is deliberately broader than "crossed into a negative eval." It
+/// catches two failure modes the cross-zero rule misses:
+/// - *gave up a win without crossing zero* — `+2.0 → +0.2` (1.8-pawn
+///   swing; you let the opponent neutralise a winning position), and
+/// - *gave away the game from a neutral start* — `+0.2 → −3.0` (3.2-pawn
+///   swing; the cross-zero rule wouldn't fire because you didn't start
+///   ahead).
+///
+/// The `forced < +1.0` floor is what keeps "still clearly winning" slips
+/// quiet: `+5.0 → +3.0` concedes two pawns but you're still up three, so
+/// it is not the "you handed it over" lesson this banner is for.
+fn gave_away_advantage(
+    best: chess_tutor_engine::types::Value,
+    forced: chess_tutor_engine::types::Value,
+) -> bool {
+    // PawnEG is exactly 1.0 conventional pawn on the engine's scale.
+    let one_pawn = chess_tutor_engine::types::Value::PAWN_EG.0;
+    let conceded = best.0 - forced.0;
+    conceded > one_pawn && forced.0 < one_pawn
+}
+
+/// Print the "ALLOWED, not missed" reframe banner for a forced move that
+/// [`gave_away_advantage`]. The whole point: when an agent reproduces a
+/// move that conceded the advantage, the default instinct is "what better
+/// move did I miss?" — but a large swing in the opponent's favour means
+/// the move *let the opponent do something*, usually a standing threat or
+/// counter that went unaccounted for. Reframe the question and point at
+/// the defusal surfaces.
+fn print_allowed_banner(
+    pos: &Position,
+    forced: Move,
+    forced_pv: &[Move],
+    best_score: chess_tutor_engine::types::Value,
+    forced_score: chess_tutor_engine::types::Value,
+    stm: chess_tutor_engine::types::Color,
+) {
+    use chess_tutor_engine::types::{Color, Value};
+    let san = san::format(pos, forced);
+    let best_p = crate::units::format_pawns(best_score);
+    let forced_p = crate::units::format_pawns(forced_score);
+    // Swing magnitude, mover-POV, as a positive pawn count.
+    let swing = crate::units::engine_cp_to_pawns(Value(best_score.0 - forced_score.0));
+    let bar = "!! ──────────────────────────────────────────────────────────────";
+    println!("{bar}");
+    println!(
+        "!! ALLOWED, NOT MISSED — {san}: eval {best_p} → {forced_p} (your POV), a {swing:.1}-pawn"
+    );
+    println!("!! swing in the opponent's favour.");
+    // Only show the white-POV cross-reference when the mover is Black —
+    // for White it's identical to the your-POV line above and just adds
+    // noise.
+    if stm == Color::Black {
+        let best_wp = crate::units::format_pawns(crate::units::to_white_pov(best_score, stm));
+        let forced_wp =
+            crate::units::format_pawns(crate::units::to_white_pov(forced_score, stm));
+        println!("!! (white-POV / eval-bar: {best_wp} → {forced_wp}.)");
+    }
+    println!("!! This is not \"you missed a stronger move\" — your move ALLOWED the");
+    println!("!! opponent a strong reply (a standing threat or counter you didn't address).");
+    println!("!!   wrong question:  \"what better move did I have?\"");
+    println!("!!   right question:  \"what did I let my opponent do?\"");
+    // Show the concrete answer to that question: the opponent's punishing
+    // continuation, straight from the forced move's own search PV. The
+    // swing number alone says "you erred"; this line says "here is exactly
+    // how it turns out", which is what stops the reader inventing a
+    // different cause. `forced_pv[0]` is the forced move itself; the tail
+    // is the refutation.
+    let pv_san = pv_to_san(pos, forced_pv);
+    if pv_san.len() > 1 {
+        println!("!! how it turns out — {}", pv_san.join(" "));
+        println!("!! (that line is what the search expects after {san}; read past your move to");
+        println!("!!  see the reply that does the damage.)");
+    }
+    println!("!! Re-read the `danger:` block above; run `chess-tutor explain` or");
+    println!("!! `chess-tutor tactics --latent` for the moves that hold the advantage.");
+    println!("{bar}");
+    println!();
+}
+
+/// One-line nudge printed at the top of `search` when no move was forced
+/// in. The most common way an agent mis-diagnoses "why was my move bad?"
+/// is to search the position *after* the move — which only shows that the
+/// result is bad, never that the move *caused* it, and gives no swing vs.
+/// the best alternative (so you don't even learn how bad it was). The fix
+/// is `--force-include <move>` on the position *before* the move: it scores
+/// the move against the best line and fires the [`print_allowed_banner`]
+/// reframe on a winning→losing swing.
+fn print_force_include_hint() {
+    println!("hint:     judging a move you already played? run this on the position BEFORE");
+    println!("          it with `--force-include <your move>` — you'll get its eval swing");
+    println!("          vs. the best line and a flag if it gave away the advantage.");
+    println!("          (Searching the position AFTER the move shows only that the result");
+    println!("          is bad, not why your move was — and gives no swing to compare.)");
 }
 
 // Heap profiler. When the `dhat-heap` feature is enabled, every
@@ -469,8 +577,19 @@ fn main() -> Result<()> {
             };
             let summary_data = summary::build(&pos, score_source, headline_score);
             let threats_data = threats_view::build(&pos);
-            let tactics_data =
+            let mut tactics_data =
                 tactics_view::build(&pos, None, /*latent*/ true, /*check_followups*/ true);
+            // Search-backed defusal enumeration: when the side to move
+            // faces a standing threat, list the moves that actually
+            // neutralise it without conceding the eval. Reuses the
+            // already-constructed analytical engine; the same depth as
+            // the headline search keeps the scores consistent.
+            let stm_threats = find_latent_threats(&pos, pos.side_to_move());
+            if !stm_threats.is_empty() {
+                let report = find_threat_defusals(&mut engine, &mut pos, &stm_threats, depth);
+                tactics_data.defusals =
+                    Some(tactics_view::build_defusals_view(&pos, &report, depth));
+            }
 
             if json_mode {
                 #[derive(serde::Serialize)]
@@ -535,7 +654,7 @@ fn main() -> Result<()> {
         Command::Tactics { fen, prior_move, latent, check_followups } => {
             use chess_tutor_engine::analysis::PriorMove;
             use chess_tutor_engine::types::{Move, PieceType, Square};
-            let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let mut pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
             // `--prior-move` is the OPPONENT's last move — the move that
             // produced this FEN. We can't validate it against any legal
             // move list (its source square is empty in the current FEN
@@ -580,7 +699,26 @@ fn main() -> Result<()> {
                 }
             };
             let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
-            let view = tactics_view::build(&pos, prior, latent, check_followups);
+            let mut view = tactics_view::build(&pos, prior, latent, check_followups);
+            // `--latent` opts into the search-backed defusal block: when
+            // the side to move faces a standing threat, enumerate the
+            // moves that neutralise it AND hold the eval. This is the one
+            // place `tactics` runs a search (it's otherwise static), so
+            // it's gated on `latent` + an actual threat being present.
+            if latent {
+                let stm_threats = find_latent_threats(&pos, pos.side_to_move());
+                if !stm_threats.is_empty() {
+                    let mut engine = Engine::default();
+                    let report = find_threat_defusals(
+                        &mut engine,
+                        &mut pos,
+                        &stm_threats,
+                        TACTICS_DEFUSAL_DEPTH,
+                    );
+                    view.defusals =
+                        Some(tactics_view::build_defusals_view(&pos, &report, TACTICS_DEFUSAL_DEPTH));
+                }
+            }
             if json_mode {
                 #[derive(serde::Serialize)]
                 struct Out<'a> {
@@ -631,7 +769,7 @@ fn main() -> Result<()> {
                 max_time: time_ms.map(Duration::from_millis),
                 multi_pv: multi_pv.max(1),
                 game_history: Vec::new(),
-                force_include: force_include_moves,
+                force_include: force_include_moves.clone(),
                 verbose_progress,
                 threads: threads.max(1),
                 // One-shot CLI search/analyze — analytical, no bot mask.
@@ -661,6 +799,10 @@ fn main() -> Result<()> {
                 );
                 print!("{}", summary::render_text(&summary_data));
                 println!();
+                if force_include_moves.is_empty() {
+                    print_force_include_hint();
+                    println!();
+                }
                 println!("depth: {}", analyses[0].depth);
                 print!("{}", analysis_report::render(&pos, &analyses, top_percent));
                 if debug {
@@ -776,7 +918,28 @@ fn main() -> Result<()> {
             // Text output.
             print!("{}", summary::render_text(&summary_data));
             println!();
+            if force_include_moves.is_empty() {
+                print_force_include_hint();
+                println!();
+            }
             let stm = pos.side_to_move();
+
+            // "You ALLOWED, not missed" hard flag. Fires only when the
+            // caller forced a move into the search (reproducing a move
+            // they played) and that move flips the position from
+            // winning/equal to losing. `lines` is sorted best-first, so
+            // `lines[0]` is the best available; each forced move's own
+            // line carries its resulting score.
+            if !force_include_moves.is_empty() && !lines.is_empty() {
+                let best_score = lines[0].score;
+                for &fm in &force_include_moves {
+                    if let Some(fl) = lines.iter().find(|l| l.pv.first() == Some(&fm)) {
+                        if gave_away_advantage(best_score, fl.score) {
+                            print_allowed_banner(&pos, fm, &fl.pv, best_score, fl.score, stm);
+                        }
+                    }
+                }
+            }
 
             if lines.len() == 1 {
                 let line = &lines[0];
@@ -1018,4 +1181,56 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gave_away_advantage;
+    use chess_tutor_engine::types::Value;
+
+    // 1.0 pawn = PawnEG = 213 engine-cp on our scale. The test values
+    // below are written as `pawns × 213` for readability.
+    const P: i32 = 213;
+
+    #[test]
+    fn fires_winning_to_losing_swing() {
+        // The case-study swing: +2.0 → -1.3. Conceded 3.3 pawns, ends
+        // losing — clearly an "allowed" case.
+        assert!(gave_away_advantage(Value(2 * P), Value(-13 * P / 10)));
+    }
+
+    #[test]
+    fn fires_when_a_won_position_is_given_up_without_crossing_zero() {
+        // +2.0 → +0.2: conceded 1.8 pawns, no longer winning. The
+        // cross-zero rule would miss this; the swing rule must catch it.
+        assert!(gave_away_advantage(Value(2 * P), Value(P / 5)));
+    }
+
+    #[test]
+    fn fires_when_a_neutral_position_is_thrown_away() {
+        // +0.2 → -3.0: conceded 3.2 pawns from a roughly equal start.
+        // The cross-zero rule would miss this (didn't start ahead).
+        assert!(gave_away_advantage(Value(P / 5), Value(-3 * P)));
+    }
+
+    #[test]
+    fn silent_when_still_clearly_winning() {
+        // +5.0 → +3.0: conceded two pawns but still up three. Suboptimal,
+        // not "handed it over" — the +1.0 floor keeps this quiet.
+        assert!(!gave_away_advantage(Value(5 * P), Value(3 * P)));
+    }
+
+    #[test]
+    fn silent_on_a_small_slip() {
+        // +2.0 → +1.5: only half a pawn conceded — under the 1.0-pawn
+        // swing threshold, so no banner.
+        assert!(!gave_away_advantage(Value(2 * P), Value(15 * P / 10)));
+    }
+
+    #[test]
+    fn silent_inside_the_equality_dead_zone() {
+        // +0.28 → -0.28: a 0.56-pawn wobble around equality — below the
+        // 1.0-pawn swing threshold.
+        assert!(!gave_away_advantage(Value(60), Value(-60)));
+    }
 }
