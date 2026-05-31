@@ -116,7 +116,7 @@ The pattern hierarchy that's emerging:
 | [`discovered-attack-after-qxe6`](discovered-attack-after-qxe6.md) | yes (e-file queen/bishop/rook alignment is statically detectable) | DiscoveredAttack (latent) | Surface as latent opponent threat with named pattern |
 | **silent-sequencing-after-qc8** (this file) | **no — depth-6 verdict is "fine"** | **none — no detector fires** | **Suppress blunder framing; explain only the visible static effects** |
 
-The first two are the positions the teaching layer should *aspire* to handle (and the latent-threat detector planned in [`PLAN.md`](../PLAN.md) is the architectural piece that closes that gap). This third one is the case where the teaching layer's *humility* matters more than its capability: it's where the layer should choose not to overclaim.
+The first two are the positions the teaching layer should *aspire* to handle (and the latent-threat detector in `analysis/latent_threats.rs`, now landed, is the architectural piece that closes that gap). This third one is the case where the teaching layer's *humility* matters more than its capability: it's where the layer should choose not to overclaim.
 
 ## Regression target
 

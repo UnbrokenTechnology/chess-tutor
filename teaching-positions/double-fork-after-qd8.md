@@ -128,16 +128,16 @@ This is the operational form of the discipline. It is **one ply deeper than what
 | Case | Mechanism depth | Detectable pattern? | Teaching action |
 |---|---|---|---|
 | [`missed-desperado-after-qe6`](missed-desperado-after-qe6.md) | shallow | RemovingDefender + Desperado | Surface as named tactic |
-| [`discovered-attack-after-qxe6`](discovered-attack-after-qxe6.md) | shallow (latent) | DiscoveredAttack | Surface as latent threat (needs scanner from `PLAN.md`) |
+| [`discovered-attack-after-qxe6`](discovered-attack-after-qxe6.md) | shallow (latent) | DiscoveredAttack | Surface as latent threat (`analysis/latent_threats.rs`, landed) |
 | [`silent-sequencing-after-qc8`](silent-sequencing-after-qc8.md) | deep (≥ 8 ply) | none — no pattern | Suppress blunder framing entirely |
 | [`mating-net-after-ng5`](mating-net-after-ng5.md) | deep (king hunt, ≥ 7 ply) | structural cluster, no named pattern | Open question; soft warning at best |
 | **`double-fork-after-qd8`** (this file) | **shallow forcing line (2 ply past check)** | **Fork — but only after a one-ply check simulation** | **Extend latent-threat scanner to "run detectors after each enemy check"** |
 
 The new case fits cleanly between the "shallow tactic, just surface it" cases and the "too deep, stay humble" cases. The mechanism is multi-step but each step is short enough that **a one-ply extension of the existing latent-threat scanner catches it**.
 
-## Implementation implications (modest extension to `PLAN.md`'s item 2)
+## Implementation implications (the check-followup extension — landed)
 
-The latent-threat scanner sketched in [`PLAN.md`](../PLAN.md) currently looks at static alignments — "enemy slider lined up with our king, with one of their pieces blocking." For this position, the relevant scanner extension is:
+The latent-threat scanner (`analysis/latent_threats.rs`) looks at static alignments — "enemy slider lined up with our king, with one of their pieces blocking." This position needed the *check-followup* extension (now `analysis/check_followups.rs`, surfaced via `tactics --check-followups`):
 
 ```
 latent_check_followup(pos, mover):
