@@ -216,6 +216,10 @@ See the top-level instructions. This applies especially during the engine port: 
 
 See commercialization. If the user ever asks to create a GitHub remote, confirm public vs. private before running the command, and default to private.
 
+### Work directly on main
+
+This is a private, single-developer repo — **commit straight to `main`, no feature branches.** Don't branch for a change and merge it back; just commit on `main`. (Overrides the default "branch first when on the default branch" harness behavior.)
+
 ## Environment notes
 
 - Windows 11, bash shell available (git-bash). Use Unix syntax — `/dev/null`, forward slashes, etc. — not PowerShell.
