@@ -79,15 +79,15 @@ fn render_text_includes_pattern_and_targets() {
     assert!(text.contains("Nf5"), "{text}");
 }
 
-/// When the side-to-move's best tactic carries an escape, the heading
-/// must be tagged and a `NOTE:` line must spell out the practical
-/// conclusion. The discovered-attack case study FEN is the regression
-/// target: White's `Re1` "pins" `be5` to `qe6`, but the opponent breaks
-/// it with the forcing `…Bxh2+` (which is itself a discovered attack on
-/// the rook). A reader skimming for `gain:` must not miss that this
-/// "tactic" is not winnable.
+/// When the side-to-move's best "tactic" carries an escape, it must NOT
+/// be presented as the side's tactic at all — the heading must read as a
+/// refutation, not a weapon, and the refuting move must be named. The
+/// discovered-attack case study FEN is the regression target: White's
+/// `Re1` "pins" `be5` to `qe6`, but the opponent breaks it with the
+/// forcing `…Bxh2+` (which is itself a discovered attack on the rook). A
+/// reader must not be anchored into thinking "I have a pin, I'm winning."
 #[test]
-fn escapable_tactic_is_tagged_and_noted() {
+fn escapable_tactic_is_framed_as_refuted_not_a_weapon() {
     let pos =
         Position::from_fen("1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1").unwrap();
     let view = build(&pos, None, false, false);
@@ -102,31 +102,47 @@ fn escapable_tactic_is_tagged_and_noted() {
     );
     let text = render_text(&view);
     assert!(
-        text.contains("[has escape — likely not winnable]"),
-        "heading must be tagged when an escape exists; got:\n{text}",
+        text.contains("best tactic: NONE that win"),
+        "heading must NOT present a refuted pattern as a tactic; got:\n{text}",
     );
     assert!(
-        text.contains("NOTE:       an escape exists"),
-        "a NOTE line must restate the conclusion; got:\n{text}",
+        text.contains("REFUTED"),
+        "the refuted pattern must be flagged REFUTED; got:\n{text}",
+    );
+    assert!(
+        text.contains("refuted by:") && text.contains("Bxh2+"),
+        "the refuting move must be named; got:\n{text}",
+    );
+    assert!(
+        text.contains("do not rely on it"),
+        "must tell the reader not to rely on the pattern; got:\n{text}",
+    );
+    // The old backwards phrasing ("expected to win be5", reading as if the
+    // opponent wins be5) must be gone.
+    assert!(
+        !text.contains("expected to win"),
+        "the backwards 'expected to win' phrasing must be gone; got:\n{text}",
     );
 }
 
-/// The escape tag / NOTE must only appear when there is an escape — a
-/// clean tactic with no out should render neither.
+/// The refuted framing must only appear when there is an escape — a
+/// clean, winnable tactic renders the normal `best tactic` block with
+/// `gain:` / `confidence:` and never the "NONE that win" / "REFUTED"
+/// language.
 #[test]
-fn clean_tactic_has_no_escape_tag_or_note() {
+fn clean_tactic_is_not_framed_as_refuted() {
     let pos =
         Position::from_fen("r1b1kb1r/1p3ppp/p2pqn2/4pNB1/4P3/2N5/PPP2PPP/R2QK2R w KQkq - 1 9")
             .unwrap();
     let view = build(&pos, None, false, false);
     let text = render_text(&view);
     assert!(
-        !text.contains("[has escape"),
-        "clean tactic must not be tagged; got:\n{text}",
+        !text.contains("NONE that win") && !text.contains("REFUTED"),
+        "clean tactic must not be framed as refuted; got:\n{text}",
     );
     assert!(
-        !text.contains("NOTE:       an escape exists"),
-        "clean tactic must not carry the escape NOTE; got:\n{text}",
+        !text.contains("refuted by:"),
+        "clean tactic must not carry a refutation line; got:\n{text}",
     );
 }
 

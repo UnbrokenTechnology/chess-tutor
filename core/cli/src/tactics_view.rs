@@ -654,11 +654,14 @@ fn build_tactic_hit_view(pos: &Position, hit: &TacticHit) -> TacticHitView {
 /// Map an [`EscapeKind`] to a plain-English phrase for the report.
 fn escape_kind_str(k: EscapeKind) -> &'static str {
     match k {
-        EscapeKind::ForcingCheck => "forcing check",
-        EscapeKind::Zwischenzug => "in-between capture",
-        EscapeKind::DefendsBothTargets => "defends both targets",
-        EscapeKind::AdequateRetreat => "the piece escapes to safety",
-        EscapeKind::CounterAttack => "counter-attack",
+        // Self-contained phrases: each names the mechanism *and* why it
+        // denies the capture, so the refutation line reads as a complete
+        // sentence without the reader having to infer the tempo argument.
+        EscapeKind::ForcingCheck => "a check — you must answer it first, so you never get the tempo to capture",
+        EscapeKind::Zwischenzug => "an in-between capture that breaks the tactic before you can capture",
+        EscapeKind::DefendsBothTargets => "one move that defends both targets at once",
+        EscapeKind::AdequateRetreat => "the target simply steps to safety",
+        EscapeKind::CounterAttack => "a counter-threat you must deal with first",
     }
 }
 
@@ -973,32 +976,53 @@ fn render_hit(out: &mut String, hit: &TacticHitView) {
         Some(mp) => format!(" + {mp} mate"),
         None => String::new(),
     };
-    // An escape means the opponent has a forcing reply that prevents the
-    // tactic's expected capture. The pattern is still real (it's on the
-    // board), but it's unlikely to be winnable — flag that at the heading
-    // so a reader skimming for `gain:` / `confidence:` can't miss it. The
-    // `NOTE:` line at the bottom restates the practical conclusion next to
-    // the `escape:` detail that justifies it.
-    let escape_tag = if hit.escape.is_some() {
-        " [has escape — likely not winnable]"
-    } else {
-        ""
-    };
-    writeln!(
-        out,
-        "  best tactic: {}{}{}{}",
-        hit.pattern, mate_suffix, sac, escape_tag
-    )
-    .unwrap();
-    // Just the destination square — see the field doc on
-    // [`TacticHitView::primary_square`] for why we don't try to label
-    // the moving piece.
-    writeln!(out, "    key sq:     {}", hit.primary_square).unwrap();
     let targets = if hit.targets.is_empty() {
         "(none)".to_string()
     } else {
         hit.targets.join(", ")
     };
+
+    // An escape means the opponent has a forcing reply that prevents the
+    // tactic's expected capture. The pattern is real (it's on the board),
+    // but it does NOT win — so we must not present it as the side's "best
+    // tactic." Calling a refuted pattern a tactic is the exact thing that
+    // anchors a reader into trusting a move that loses (the "I have a pin,
+    // so I'm winning" trap). Reframe it as the danger it actually is, and
+    // drop `gain:` / `confidence:` — those describe the payoff IF it
+    // worked, which it doesn't.
+    if let Some(esc) = &hit.escape {
+        writeln!(
+            out,
+            "  best tactic: NONE that win — the apparent {}{}{} is REFUTED:",
+            hit.pattern, mate_suffix, sac,
+        )
+        .unwrap();
+        writeln!(out, "    pattern:    {} on {}", hit.pattern, targets).unwrap();
+        let after = match &esc.key_move_san {
+            Some(km) => format!("after {km}, "),
+            None => String::new(),
+        };
+        writeln!(
+            out,
+            "    refuted by: {}opponent replies {} ({} {})",
+            after, esc.refutation_san, esc.kind, esc.expected_target,
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    so:         the {} does not win — do not rely on it.",
+            hit.pattern,
+        )
+        .unwrap();
+        return;
+    }
+
+    // A genuine, winnable tactic for this side.
+    writeln!(out, "  best tactic: {}{}{}", hit.pattern, mate_suffix, sac).unwrap();
+    // Just the destination square — see the field doc on
+    // [`TacticHitView::primary_square`] for why we don't try to label
+    // the moving piece.
+    writeln!(out, "    key sq:     {}", hit.primary_square).unwrap();
     writeln!(out, "    targets:    {targets}").unwrap();
     let gain = match hit.material_gain {
         Some(g) => format!("{g} engine-cp"),
@@ -1006,23 +1030,6 @@ fn render_hit(out: &mut String, hit: &TacticHitView) {
     };
     writeln!(out, "    gain:       {gain}").unwrap();
     writeln!(out, "    confidence: {}", hit.confidence).unwrap();
-    if let Some(esc) = &hit.escape {
-        let after = match &esc.key_move_san {
-            Some(km) => format!("after {km}, "),
-            None => String::new(),
-        };
-        writeln!(
-            out,
-            "    escape:     {}opponent breaks it with {} ({}) — expected to win {}",
-            after, esc.refutation_san, esc.kind, esc.expected_target,
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    NOTE:       an escape exists — you likely cannot take advantage of this tactic",
-        )
-        .unwrap();
-    }
 }
 
 #[cfg(test)]

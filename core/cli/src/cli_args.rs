@@ -185,6 +185,26 @@ pub enum Command {
         #[arg(long = "check-followups")]
         check_followups: bool,
     },
+    /// Critique a move you actually played. Give the position BEFORE the
+    /// move and the move itself; this scores it against the engine's best
+    /// line and explains the swing. THE first-class "I played X, why was
+    /// it bad?" entry point — it runs the `search --force-include`
+    /// workflow for you and fires the "ALLOWED, NOT MISSED" reframe when
+    /// the move flipped a winning/equal position to losing (a swing you
+    /// caused by letting the opponent do something, not by missing a
+    /// prettier move). For a move that was fine, it says so. Move accepts
+    /// SAN (`Qc5+`, `Nf3`) or UCI (`c4c5`).
+    Critique {
+        /// The position BEFORE the move was played (FEN).
+        fen: String,
+        /// The move to critique — SAN (`Qc5+`) or UCI (`c4c5`).
+        #[arg(value_name = "MOVE")]
+        mv: String,
+        /// Iterative-deepening depth for the analysis. Matches the
+        /// retrospective / `explain` default.
+        #[arg(long, default_value_t = DEFAULT_RETROSPECTIVE_DEPTH)]
+        depth: u32,
+    },
     /// Run an engine search; print the principal variation and the leaf
     /// [`EvalTrace`]. With `--multi-pv N > 1`, prints N ranked lines
     /// each with its score and the score delta from the top line.

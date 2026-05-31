@@ -542,6 +542,146 @@ fn main() -> Result<()> {
                 print!("{}", alignments_view::render_text(&view));
             }
         }
+        Command::Critique { fen, mv, depth } => {
+            // The "I played X, why was it bad?" command. Internally this is
+            // `search --force-include <mv>` on the BEFORE position — the
+            // workflow the search `hint:` block points at — but packaged so
+            // the move is a positional arg and the output is JUST the
+            // critique (no PV-table noise, no eval dump). The load-bearing
+            // output is the summary `danger:` block (what the opponent had
+            // loaded) plus the swing reframe.
+            let mut pos =
+                Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let played_move = parse_user_move(&mut pos, &mv)
+                .with_context(|| format!("parsing move {:?}", mv))?;
+            let stm = pos.side_to_move();
+            let orientation = crate::units::Orientation::from_stm_flag(stm_mode);
+
+            let mut engine = Engine::default();
+            let params = SearchParams {
+                max_depth: depth,
+                max_nodes: None,
+                max_time: None,
+                multi_pv: 1,
+                game_history: Vec::new(),
+                force_include: vec![played_move],
+                verbose_progress: false,
+                threads: 1,
+                eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
+            };
+            let lines = engine.search(&mut pos, params);
+            if lines.is_empty() {
+                println!("(no legal moves — terminal position; nothing to critique)");
+                return Ok(());
+            }
+            let best = &lines[0];
+            // `force_include` guarantees the played move is scored as its
+            // own line; fall back to the best line if (unexpectedly) absent.
+            let played = lines
+                .iter()
+                .find(|l| l.pv.first() == Some(&played_move))
+                .unwrap_or(best);
+            let is_best = best.pv.first() == Some(&played_move);
+            let gave_away = gave_away_advantage(best.score, played.score);
+            // Both scores are stm-POV and `stm` is the player who made the
+            // move, so `best - played` is the pawns the player gave up.
+            let given_up_pawns = crate::units::engine_cp_to_pawns(
+                chess_tutor_engine::types::Value(best.score.0 - played.score.0),
+            );
+
+            let san = san::format(&pos, played_move);
+            let best_san = pv_to_san(&pos, &best.pv);
+            let played_san = pv_to_san(&pos, &played.pv);
+            let summary_data = summary::build(
+                &pos,
+                summary::ScoreSource::Search { depth: best.depth },
+                Some(best.score),
+            );
+
+            if json_mode {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    summary: &'a summary::PositionSummary,
+                    depth: u32,
+                    played_move_san: String,
+                    played_move_uci: String,
+                    played_pawns: String,
+                    best_move_san: Option<String>,
+                    best_pawns: String,
+                    is_best: bool,
+                    gave_away_advantage: bool,
+                    pawns_given_up: f64,
+                    best_line_san: Vec<String>,
+                    played_line_san: Vec<String>,
+                }
+                let payload = Out {
+                    summary: &summary_data,
+                    depth: best.depth,
+                    played_move_san: san.clone(),
+                    played_move_uci: uci::format(played_move),
+                    played_pawns: crate::units::format_pawns(orientation.apply(played.score, stm)),
+                    best_move_san: best_san.first().cloned(),
+                    best_pawns: crate::units::format_pawns(orientation.apply(best.score, stm)),
+                    is_best,
+                    gave_away_advantage: gave_away,
+                    pawns_given_up: given_up_pawns,
+                    best_line_san: best_san.clone(),
+                    played_line_san: played_san.clone(),
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+
+            print!("{}", summary::render_text(&summary_data));
+            println!();
+
+            // Verdict — three cases.
+            if is_best {
+                println!(
+                    "verdict:  {san} is the engine's #1 move at depth {} — well played.",
+                    best.depth,
+                );
+            } else if gave_away {
+                // Strongest teaching frame: the swing is something you
+                // ALLOWED (the opponent had a reply loaded), not a prettier
+                // move you missed. The banner names the punishing line and
+                // points at the defusal surfaces.
+                print_allowed_banner(&pos, played_move, &played.pv, best.score, played.score, stm);
+            } else {
+                println!(
+                    "verdict:  {san} is not the best move — it gives up {given_up_pawns:.1} pawn(s) vs. the top line, but it does not hand over a winning position.",
+                );
+            }
+
+            // Show both lines so the reader can compare their move against
+            // the engine's choice directly.
+            println!();
+            println!(
+                "best move: {} ({} pawns {})",
+                best_san.first().map(|s| s.as_str()).unwrap_or("?"),
+                crate::units::format_pawns(orientation.apply(best.score, stm)),
+                orientation.label(),
+            );
+            println!("  line:    {}", best_san.join(" "));
+            if !is_best {
+                println!(
+                    "your move: {} ({} pawns {})",
+                    san,
+                    crate::units::format_pawns(orientation.apply(played.score, stm)),
+                    orientation.label(),
+                );
+                println!("  line:    {}", played_san.join(" "));
+            }
+
+            // The ALLOWED banner already points at `explain` / `tactics`;
+            // only add the pointer when it didn't fire.
+            if !gave_away {
+                println!();
+                println!(
+                    "next:     run `chess-tutor explain {fen:?}` for the full threat picture and the moves that hold the advantage.",
+                );
+            }
+        }
         Command::Explain { fen, depth } => {
             // Aggregator: assembles one block from the same view
             // builders the dedicated subcommands use. Each section
@@ -969,20 +1109,29 @@ fn main() -> Result<()> {
                     engine.last_elapsed().as_millis(),
                     engine.last_nps() / 1.0e6,
                 );
-                let (hits, misses) = engine.pawn_cache_stats();
-                let total = hits + misses;
-                if total > 0 {
-                    println!(
-                        "pawn$:    {} probes, {} hits, {} misses ({:.2}% hit rate)",
-                        total,
-                        hits,
-                        misses,
-                        100.0 * hits as f64 / total as f64,
-                    );
-                }
-                println!();
-                if let Some(leaf) = line.ply_traces.last() {
-                    print!("{}", eval_report::render(leaf));
+                // `search` answers "what's the best move here?" — the
+                // per-term eval table and pawn-cache stats are search
+                // *diagnostics*, not part of that answer, and a wall of
+                // them is what tempts a reader to pipe through `tail` and
+                // lose the `danger:` header up top. They live behind
+                // `--debug` now; reach for `eval` / `explain` when you
+                // actually want the term breakdown.
+                if debug {
+                    let (hits, misses) = engine.pawn_cache_stats();
+                    let total = hits + misses;
+                    if total > 0 {
+                        println!(
+                            "pawn$:    {} probes, {} hits, {} misses ({:.2}% hit rate)",
+                            total,
+                            hits,
+                            misses,
+                            100.0 * hits as f64 / total as f64,
+                        );
+                    }
+                    println!();
+                    if let Some(leaf) = line.ply_traces.last() {
+                        print!("{}", eval_report::render(leaf));
+                    }
                 }
             } else {
                 println!(
@@ -996,6 +1145,20 @@ fn main() -> Result<()> {
             if debug {
                 println!();
                 print!("{}", render_debug_trajectory(&pos, &lines));
+            }
+
+            // Truncation guard: the load-bearing `danger:` block is at the
+            // TOP, so a reader who pipes this through `tail` loses it and
+            // trusts a "best move" without seeing the standing threat it
+            // must answer. Echo a one-line reminder at the BOTTOM so a
+            // bottom-read still lands on it. (See the agent failure mode in
+            // CLAUDE.md §"Eval swing".)
+            if !summary_data.danger.is_empty() {
+                println!();
+                println!(
+                    "note:     {} standing threat(s) against the side to move — re-read the `danger:` block at the TOP before trusting the move above; run `chess-tutor critique <FEN> <your-move>` to score a move you actually played.",
+                    summary_data.danger.len(),
+                );
             }
 
             // `--annotate`: run the tactic detector on the top PV's
