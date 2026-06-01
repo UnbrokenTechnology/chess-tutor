@@ -265,7 +265,7 @@ pub enum Sentiment {
 /// from one [`RetrospectiveItem`], and clicking a card surfaces its
 /// `annotations` on the board.
 ///
-/// The narration crate's [`chess_tutor_narration::format_retrospective`]
+/// The teaching crate's [`chess_tutor_teaching::format_retrospective`]
 /// is still the canonical *text* renderer; this view model is the
 /// canonical *structured* surface for visual renderers. They share
 /// the underlying engine outcome computations (see
@@ -291,8 +291,11 @@ pub struct RetrospectiveHeadline {
     /// Annotation suffix: "!!", "!", "?!", "?", "??" — empty when no
     /// SAN annotation applies (`Best` without the sharp flag, `Good`).
     pub san_annotation: &'static str,
-    /// Human-readable verdict label ("Best", "Inaccuracy", etc.).
-    pub verdict_label: &'static str,
+    /// Human-readable verdict label. The engine-truth ladder
+    /// ("Best", "Inaccuracy", …) remapped to chess.com's presentation
+    /// tiers by the teaching translator — "Great" / "Brilliant" for an
+    /// only-good-move (sacrifice). Owned because the tier is dynamic.
+    pub verdict_label: String,
     pub verdict_sentiment: Sentiment,
     /// Formatted post-move score from root STM's POV, e.g. "+0.30" or
     /// "M5".

@@ -37,6 +37,8 @@ use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::types::Color;
 
+use chess_tutor_teaching::phrasing::Perspective;
+
 use crate::view::{RetrospectiveCategory, RetrospectiveItem, Sentiment};
 
 /// Build the loss-of-initiative note, or `None` when the move isn't a
@@ -50,6 +52,7 @@ pub(super) fn build_initiative_item(
     user: &MoveAnalysis,
     root_stm: Color,
     prior_move: Option<PriorMove>,
+    perspective: Perspective,
 ) -> Option<RetrospectiveItem> {
     // Gate 1: a real mistake-ish verdict. (Best/Good/BestAvailable never
     // warrant a "you gave up the initiative" lecture.)
@@ -79,7 +82,7 @@ pub(super) fn build_initiative_item(
     let loss = detect_initiative_loss(pre_move_pos, &user.pv, root_stm)?;
 
     let chain = forcing_chain_san(pre_move_pos, user, &loss);
-    Some(make_item(&loss, &chain))
+    Some(make_item(&loss, &chain, perspective))
 }
 
 /// Render the opponent's forcing moves (the threats) as SAN, in order, by
@@ -99,39 +102,66 @@ fn forcing_chain_san(pre_move_pos: &Position, user: &MoveAnalysis, loss: &Initia
         .collect()
 }
 
-fn make_item(_loss: &InitiativeLoss, chain: &[String]) -> RetrospectiveItem {
+fn make_item(_loss: &InitiativeLoss, chain: &[String], perspective: Perspective) -> RetrospectiveItem {
     let chain_str = join_with_then(chain);
+    // "you / they" (the mover) and "the opponent / you" (the replier who
+    // gets the initiative) flip with perspective. This is a special card
+    // that isn't a `Claim`, so the reframe is applied inline here rather
+    // than in the translator — but it follows the same "mover vs replier"
+    // shape (a `Claim` never says "you"; this one is the exception we keep
+    // local until it gets a proper `Claim` of its own).
+    let (mover_subj, mover_poss, replier_subj, replier_poss) = match perspective {
+        Perspective::Player => ("you", "your", "the opponent", "their"),
+        Perspective::Opponent => ("they", "their", "you", "your"),
+    };
+    let mover_subj_cap = capitalize_first(mover_subj);
     // One immediate reply vs. a sustained run — phrase honestly for each.
     let how = if chain.len() <= 1 {
         format!(
-            "its best reply, {chain_str}, immediately attacks one of your pieces, so you're \
-             reacting from the very first move"
+            "its best reply, {chain_str}, immediately attacks one of {mover_poss} pieces, so \
+             {mover_subj} are reacting from the very first move"
         )
     } else {
         format!(
-            "the opponent gets a run of forcing moves you must answer one after another — \
-             {chain_str} — so you spend move after move reacting (retreating, defending)"
+            "{replier_subj} get a run of forcing moves {mover_subj} must answer one after another \
+             — {chain_str} — so {mover_subj} spend move after move reacting (retreating, defending)"
         )
     };
     let detail = format!(
-        "The term breakdown likes this move (more space, your pieces aimed at the enemy king), \
-         which is why it looks natural — but that's the static picture. The search rates it worse \
-         because the move isn't really positional here, it's tactical: {how}, and your space / \
-         attacking chances don't count for much while you're the one reacting. When a move's \
-         static eval and its search score disagree this much, the position is being decided by \
-         these forcing replies, not by the static features. The fix isn't a single tactic to spot \
-         — it's to deny the opponent that initiative (often by keeping the tension and developing) \
-         rather than committing to a move that invites it."
+        "The term breakdown likes this move (more space, {mover_poss} pieces aimed at the enemy \
+         king), which is why it looks natural — but that's the static picture. The search rates \
+         it worse because the move isn't really positional here, it's tactical: {how}, and \
+         {mover_poss} space / attacking chances don't count for much while {mover_subj} are the \
+         one reacting. When a move's static eval and its search score disagree this much, the \
+         position is being decided by these forcing replies, not by the static features. The fix \
+         isn't a single tactic to spot — it's to deny {replier_poss} initiative (often by keeping \
+         the tension and developing) rather than committing to a move that invites it."
     );
     RetrospectiveItem {
         category: RetrospectiveCategory::Initiative,
-        heading: "You gave up the initiative".to_string(),
-        summary: "looks good statically, but the opponent's reply puts you on the defensive"
-            .to_string(),
+        heading: format!("{mover_subj_cap} gave up the initiative"),
+        summary: format!(
+            "looks good statically, but {replier_poss} reply puts {mover_subj} on the defensive"
+        ),
         detail,
         score_delta_pawns: None,
-        sentiment: Sentiment::Negative,
+        // The mover conceding the initiative is bad for the mover. From the
+        // student's side: Player → the student conceded (Negative); Opponent
+        // → the opponent conceded, the student's chance (Positive).
+        sentiment: match perspective {
+            Perspective::Player => Sentiment::Negative,
+            Perspective::Opponent => Sentiment::Positive,
+        },
         annotations: Vec::new(),
+    }
+}
+
+/// Capitalize the first character of a word ("you" → "You").
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -162,12 +192,12 @@ mod tests {
         let mut pos = Position::from_fen(fen).unwrap();
         let mut engine = Engine::new(16);
         // Match the production retrospective config (RETROSPECTIVE_MULTI_PV
-        // = 3, depth 12, single thread) so the test exercises the exact PV
+        // = 2, depth 12, single thread) so the test exercises the exact PV
         // the GUI would see — the user's move is force-included into the
         // ranked lines.
         let params = SearchParams {
             max_depth: 12,
-            multi_pv: 3,
+            multi_pv: 2,
             force_include: vec![user_mv],
             threads: 1,
             ..SearchParams::default()
@@ -181,7 +211,7 @@ mod tests {
         let best = &analyses[0];
         let user = analyses.iter().find(|a| a.mv == user_mv).unwrap();
         let pre = Position::from_fen(E5_FEN).unwrap();
-        let item = build_initiative_item(&pre, best, user, Color::White, None)
+        let item = build_initiative_item(&pre, best, user, Color::White, None, Perspective::Player)
             .expect("e5 is a surprise-mistake whose opponent reply chases a piece");
         let blob = format!("{} {} {}", item.heading, item.summary, item.detail).to_lowercase();
         // It must blame the initiative, not invent a material loss (e5 holds
@@ -230,7 +260,8 @@ mod tests {
         let best = &analyses[0];
         let pre = Position::from_fen(E5_FEN).unwrap();
         assert!(
-            build_initiative_item(&pre, best, best, Color::White, None).is_none(),
+            build_initiative_item(&pre, best, best, Color::White, None, Perspective::Player)
+                .is_none(),
             "the best move is neither a mistake nor a surprise — no card"
         );
     }
@@ -249,7 +280,8 @@ mod tests {
         let user = analyses.iter().find(|a| a.mv == user_mv).unwrap();
         let pre = Position::from_fen(QC8_FEN).unwrap();
         assert!(
-            build_initiative_item(&pre, best, user, Color::Black, None).is_none(),
+            build_initiative_item(&pre, best, user, Color::Black, None, Perspective::Player)
+                .is_none(),
             "…Qc8 is silent-sequencing — must route to depth-honesty, not an initiative card"
         );
     }

@@ -862,7 +862,7 @@ fn material_diff_points(pos: &Position, color: Color) -> i32 {
 /// sacrifice is *sound*. The caller gates soundness with
 /// [`super::win_chances`] on the line's eval before surfacing it as a
 /// played tactic.
-pub(super) fn is_sacrifice(pre: &Position, pv: &[Move], mover: Color) -> bool {
+pub fn is_sacrifice(pre: &Position, pv: &[Move], mover: Color) -> bool {
     use crate::types::MoveKind;
     let initial = material_diff_points(pre, mover);
     let mut scratch = pre.clone();

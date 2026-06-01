@@ -8,6 +8,9 @@ use chess_tutor_engine::analysis::{
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, PieceType, Value};
 
+use chess_tutor_teaching::claim::surprise_claim;
+use chess_tutor_teaching::phrasing::{phrase, Locale, Perspective, PhrasingContext, Verbosity};
+
 use crate::view::Sentiment;
 
 // ---------------------------------------------------------------------
@@ -20,26 +23,6 @@ pub(super) fn post_user_move_position(pre: &Position, user: &MoveAnalysis) -> Po
         p.do_move(mv);
     }
     p
-}
-
-/// Classical point-value net across realized captures from
-/// `root_stm`'s POV. Positive = our side captured more by points
-/// (P:1, N:3, B:3, R:5, Q:9); negative = opponent did; zero = even
-/// (the B↔N case the cp-based net would call "lost material").
-pub(super) fn realized_point_net(
-    events: &[&chess_tutor_engine::analysis::CaptureEvent],
-    root_stm: Color,
-) -> i32 {
-    let mut net = 0i32;
-    for ev in events {
-        let pts = ev.captured_piece.classical_points() as i32;
-        if ev.captor == root_stm {
-            net += pts;
-        } else {
-            net -= pts;
-        }
-    }
-    net
 }
 
 /// Build a teaching note for a point-even trade whose engine cp net
@@ -135,38 +118,6 @@ pub(super) fn article(name: &str) -> String {
     }
 }
 
-pub(super) fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
-}
-
-pub(super) fn join_with_and(parts: &[String]) -> String {
-    match parts.len() {
-        0 => String::new(),
-        1 => parts[0].clone(),
-        2 => format!("{} and {}", parts[0], parts[1]),
-        _ => {
-            let (last, lead) = parts.split_last().unwrap();
-            format!("{}, and {}", lead.join(", "), last)
-        }
-    }
-}
-
-pub(super) fn verdict_label(v: MoveVerdict) -> &'static str {
-    match v {
-        MoveVerdict::Best => "Best",
-        MoveVerdict::Good => "Good",
-        MoveVerdict::Inaccuracy => "Inaccuracy",
-        MoveVerdict::Mistake => "Mistake",
-        MoveVerdict::Blunder => "Blunder",
-        MoveVerdict::Miss => "Miss",
-        MoveVerdict::BestAvailable => "Best available",
-    }
-}
-
 pub(super) fn verdict_sentiment(v: MoveVerdict) -> Sentiment {
     match v {
         MoveVerdict::Best | MoveVerdict::Good => Sentiment::Positive,
@@ -212,21 +163,29 @@ pub(super) fn format_delta_pawns(delta_cp: i32) -> String {
     format!("{:+.2}", delta_cp as f32 / Value::PAWN_EG.0 as f32)
 }
 
-pub(super) fn surprise_note(verdict: MoveVerdict, surprise: Option<SurpriseKind>) -> Option<String> {
-    match (verdict, surprise) {
-        (MoveVerdict::Mistake | MoveVerdict::Blunder, Some(SurpriseKind::LooksGoodButBad)) => {
-            // Deliberately does NOT claim "gives back material" — a
-            // static-vs-search surprise is often an initiative/positional
-            // loss with material unchanged (e.g. a pawn lunge that invites
-            // a freeing reply). The specific mechanism (material vs
-            // initiative vs no-shorter-lesson) is carried by the dedicated
-            // body card (`build_initiative_item` / `build_depth_honesty_item`).
-            Some("This looked natural, but the deeper line doesn't hold up.".to_string())
-        }
-        (MoveVerdict::Best | MoveVerdict::Good, Some(SurpriseKind::LooksBadButGood)) => {
-            Some("This looked risky on the surface — the longer line pays off.".to_string())
-        }
-        _ => None,
-    }
+/// The shallow-vs-deep surprise note for the headline. Now delegates to
+/// the shared teaching translator: [`surprise_claim`] owns the salience
+/// (which verdict/kind combinations surface) and [`phrase`] owns the
+/// perspective-correct wording. Returns `None` when the combination is
+/// suppressed (e.g. a Blunder, where the verdict alone is clear).
+///
+/// The specific *mechanism* (material vs initiative vs no-shorter-lesson)
+/// is still carried by the dedicated body card
+/// (`build_initiative_item` / `build_depth_honesty_item`); this note is
+/// only the headline-level "looks one way, plays another" flag.
+pub(super) fn surprise_note(
+    verdict: MoveVerdict,
+    surprise: Option<SurpriseKind>,
+    perspective: Perspective,
+    mover: Color,
+) -> Option<String> {
+    let claim = surprise_claim(verdict, surprise, mover)?;
+    let ctx = PhrasingContext {
+        perspective,
+        locale: Locale::En,
+        verbosity: Verbosity::Normal,
+        reveal_moves: false,
+    };
+    Some(phrase(&claim, &ctx).summary)
 }
 

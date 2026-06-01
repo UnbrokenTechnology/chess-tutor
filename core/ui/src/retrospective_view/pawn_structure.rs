@@ -1,150 +1,207 @@
 //! Pawn-structure card builder.
 //!
+//! The prose (heading + detail, with the "you" / "they" reframe and the
+//! worsened/improved sub-term wording) is produced by the shared teaching
+//! translator ([`chess_tutor_teaching`]) from a [`Claim::PawnStructure`];
+//! the shared salience (per-sub-term threshold gating, worsened-over-
+//! improved precedence per side) lives in [`pawn_structure_claims`]. This
+//! builder owns only the *structured* card surface the translator
+//! deliberately doesn't carry — the sentiment and the terse summary.
+//!
 //! Split out of `retrospective_view`; the orchestrator
 //! ([`super::build_retrospective_view`]) assembles the cards.
 
 use chess_tutor_engine::analysis::PawnStructureOutcome;
-use chess_tutor_engine::eval::PawnsBreakdown;
 
-use crate::view::{
-    RetrospectiveCategory,
-    RetrospectiveItem, Sentiment,
+use chess_tutor_teaching::claim::{
+    pawn_structure_claims, Claim, PawnSide, StructureDirection,
 };
+use chess_tutor_teaching::phrasing::{phrase, Locale, Perspective, PhrasingContext, Verbosity};
 
+use crate::view::{RetrospectiveCategory, RetrospectiveItem, Sentiment};
 
 // ---------------------------------------------------------------------
 // Pawn structure
 // ---------------------------------------------------------------------
 
-const PAWN_STRUCTURE_DELTA_THRESHOLD_CP: i32 = 15;
-
-#[derive(Copy, Clone, Debug)]
-pub(super) enum PawnSubTerm {
-    Connected,
-    Isolated,
-    Backward,
-    Doubled,
-    WeakUnopposed,
-    WeakLever,
+/// Build the pawn-structure card for one analysed move. `perspective`
+/// selects "you" vs "they" and drives the student-POV sentiment colour.
+///
+/// Returns at most one card: `pawn_structure_claims` can emit one claim
+/// per side (mover + opponent), but the card surface is a single
+/// heading + detail, so the mover-side claim wins when present and the
+/// opponent-side claim is the fallback. (The CLI prints both lines; the
+/// GUI keeps one scannable card, matching the prior single-card shape.)
+pub(super) fn build_pawn_structure_item(
+    outcome: &PawnStructureOutcome,
+    perspective: Perspective,
+) -> Option<RetrospectiveItem> {
+    let ctx = PhrasingContext {
+        perspective,
+        locale: Locale::En,
+        verbosity: Verbosity::Normal,
+        reveal_moves: false,
+    };
+    // Prefer the mover-side claim (the move the user just made acting on
+    // their own structure is the more direct teaching point); fall back
+    // to the opponent-side claim when only that fired.
+    let claims = pawn_structure_claims(outcome);
+    let claim = claims
+        .iter()
+        .find(|c| matches!(c, Claim::PawnStructure { side: PawnSide::Mover, .. }))
+        .or_else(|| claims.first())?;
+    Some(pawn_structure_item(claim, &ctx))
 }
 
-impl PawnSubTerm {
-    const ALL: [PawnSubTerm; 6] = [
-        PawnSubTerm::Connected,
-        PawnSubTerm::Isolated,
-        PawnSubTerm::Backward,
-        PawnSubTerm::Doubled,
-        PawnSubTerm::WeakUnopposed,
-        PawnSubTerm::WeakLever,
-    ];
-    pub(super) fn delta_mg(self, pre: &PawnsBreakdown, post: &PawnsBreakdown) -> i32 {
-        match self {
-            PawnSubTerm::Connected => post.connected.mg().0 - pre.connected.mg().0,
-            PawnSubTerm::Isolated => post.isolated.mg().0 - pre.isolated.mg().0,
-            PawnSubTerm::Backward => post.backward.mg().0 - pre.backward.mg().0,
-            PawnSubTerm::Doubled => post.doubled.mg().0 - pre.doubled.mg().0,
-            PawnSubTerm::WeakUnopposed => post.weak_unopposed.mg().0 - pre.weak_unopposed.mg().0,
-            PawnSubTerm::WeakLever => post.weak_lever.mg().0 - pre.weak_lever.mg().0,
-        }
-    }
-    fn worsened_phrase(self) -> &'static str {
-        match self {
-            PawnSubTerm::Connected => "broke pawn connections",
-            PawnSubTerm::Isolated => "isolated a pawn",
-            PawnSubTerm::Backward => "created a backward pawn",
-            PawnSubTerm::Doubled => "doubled a pawn",
-            PawnSubTerm::WeakUnopposed => "exposed a weak pawn",
-            PawnSubTerm::WeakLever => "walked into a pawn lever",
-        }
-    }
-    fn improved_phrase(self) -> &'static str {
-        match self {
-            PawnSubTerm::Connected => "connected pawns",
-            PawnSubTerm::Isolated => "reconnected an isolated pawn",
-            PawnSubTerm::Backward => "freed a backward pawn",
-            PawnSubTerm::Doubled => "resolved a doubled pawn",
-            PawnSubTerm::WeakUnopposed => "covered a weak pawn",
-            PawnSubTerm::WeakLever => "resolved a pawn lever",
-        }
-    }
-}
-
-pub(super) fn pawn_clauses(pre: &PawnsBreakdown, post: &PawnsBreakdown) -> (Vec<&'static str>, Vec<&'static str>) {
-    let mut worsened = Vec::new();
-    let mut improved = Vec::new();
-    for st in PawnSubTerm::ALL.iter() {
-        let d = st.delta_mg(pre, post);
-        if d <= -PAWN_STRUCTURE_DELTA_THRESHOLD_CP {
-            worsened.push(st.worsened_phrase());
-        } else if d >= PAWN_STRUCTURE_DELTA_THRESHOLD_CP {
-            improved.push(st.improved_phrase());
-        }
-    }
-    (worsened, improved)
-}
-
-pub(super) fn build_pawn_structure_item(outcome: &PawnStructureOutcome) -> Option<RetrospectiveItem> {
-    let (ours_worsened, ours_improved) = pawn_clauses(&outcome.ours_pre, &outcome.ours_post);
-    let (theirs_worsened, theirs_improved) =
-        pawn_clauses(&outcome.theirs_pre, &outcome.theirs_post);
-
-    if ours_worsened.is_empty()
-        && ours_improved.is_empty()
-        && theirs_worsened.is_empty()
-        && theirs_improved.is_empty()
-    {
-        return None;
-    }
-
-    // Sentiment: worsened on our side hurts; worsened on theirs helps.
-    let net_our = ours_improved.len() as i32 - ours_worsened.len() as i32;
-    let net_their = theirs_worsened.len() as i32 - theirs_improved.len() as i32;
-    let net = net_our + net_their;
-    let (heading, sentiment) = if !ours_worsened.is_empty() {
-        ("Your pawn structure weakened", Sentiment::Negative)
-    } else if !theirs_worsened.is_empty() {
-        ("Weakened their pawn structure", Sentiment::Positive)
-    } else if !ours_improved.is_empty() {
-        ("Your pawn structure improved", Sentiment::Positive)
-    } else if net < 0 {
-        ("Their pawn structure improved", Sentiment::Negative)
-    } else {
-        ("Pawn structure changed", Sentiment::Mixed)
+/// Turn one [`Claim::PawnStructure`] into a card — prose from the
+/// translator, structured surface (sentiment, terse summary) computed
+/// here from the claim's payload.
+fn pawn_structure_item(claim: &Claim, ctx: &PhrasingContext) -> RetrospectiveItem {
+    let phrasing = phrase(claim, ctx);
+    let Claim::PawnStructure {
+        side,
+        direction,
+        categories,
+    } = claim
+    else {
+        unreachable!("pawn_structure_claims always returns Claim::PawnStructure");
     };
 
-    let summary_clauses: &[&'static str] = if !ours_worsened.is_empty() {
-        &ours_worsened
-    } else if !theirs_worsened.is_empty() {
-        &theirs_worsened
-    } else if !ours_improved.is_empty() {
-        &ours_improved
-    } else {
-        &theirs_improved
+    // The structure is the user's when the moving side is the user
+    // (Player + Mover); the player's POV is fixed here.
+    let structure_is_user =
+        (*side == PawnSide::Mover) == (ctx.perspective == Perspective::Player);
+
+    // Sentiment is a function of "good for the user?" — worsening the
+    // user's own structure is bad; worsening the opponent's is good.
+    let sentiment = match (direction, structure_is_user) {
+        (StructureDirection::Worsened, true) => Sentiment::Negative,
+        (StructureDirection::Worsened, false) => Sentiment::Positive,
+        (StructureDirection::Improved, true) => Sentiment::Positive,
+        (StructureDirection::Improved, false) => Sentiment::Negative,
     };
-    let summary = summary_clauses.join(", ");
 
-    let mut detail_lines = Vec::new();
-    if !ours_worsened.is_empty() {
-        detail_lines.push(format!("You: {}.", ours_worsened.join(", ")));
-    }
-    if !ours_improved.is_empty() {
-        detail_lines.push(format!("You: {}.", ours_improved.join(", ")));
-    }
-    if !theirs_worsened.is_empty() {
-        detail_lines.push(format!("Opponent: {}.", theirs_worsened.join(", ")));
-    }
-    if !theirs_improved.is_empty() {
-        detail_lines.push(format!("Opponent: {}.", theirs_improved.join(", ")));
-    }
-
-    Some(RetrospectiveItem {
+    RetrospectiveItem {
         category: RetrospectiveCategory::PawnStructure,
-        heading: heading.to_string(),
-        summary,
-        detail: detail_lines.join("\n"),
+        heading: phrasing.summary,
+        summary: format!("{} sub-term(s) shifted", categories.len()),
+        detail: phrasing.detail.unwrap_or_default(),
         score_delta_pawns: None,
         sentiment,
         annotations: Vec::new(),
-    })
+    }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chess_tutor_engine::eval::PawnsBreakdown;
+    use chess_tutor_engine::types::Score;
+
+    fn pb(
+        connected: i32,
+        isolated: i32,
+        backward: i32,
+        doubled: i32,
+        weak_unopposed: i32,
+        weak_lever: i32,
+    ) -> PawnsBreakdown {
+        PawnsBreakdown {
+            connected: Score::new(connected, 0),
+            isolated: Score::new(isolated, 0),
+            backward: Score::new(backward, 0),
+            doubled: Score::new(doubled, 0),
+            weak_unopposed: Score::new(weak_unopposed, 0),
+            weak_lever: Score::new(weak_lever, 0),
+        }
+    }
+
+    fn outcome(
+        ours_pre: PawnsBreakdown,
+        ours_post: PawnsBreakdown,
+        theirs_pre: PawnsBreakdown,
+        theirs_post: PawnsBreakdown,
+    ) -> PawnStructureOutcome {
+        PawnStructureOutcome {
+            ours_pre,
+            ours_post,
+            theirs_pre,
+            theirs_post,
+        }
+    }
+
+    #[test]
+    fn no_shift_yields_no_card() {
+        let o = outcome(
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+        );
+        assert!(build_pawn_structure_item(&o, Perspective::Player).is_none());
+    }
+
+    #[test]
+    fn our_doubled_pawn_is_negative_with_translator_heading() {
+        let o = outcome(
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, -20, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+        );
+        let card = build_pawn_structure_item(&o, Perspective::Player).expect("a worsened card");
+        assert_eq!(
+            card.heading,
+            "Your pawn structure weakened: doubled a pawn."
+        );
+        assert_eq!(card.sentiment, Sentiment::Negative);
+    }
+
+    #[test]
+    fn weakening_theirs_is_positive_opportunity() {
+        let o = outcome(
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, -20, 0, 0),
+        );
+        let card = build_pawn_structure_item(&o, Perspective::Player).expect("a their-weakened card");
+        assert!(
+            card.heading
+                .starts_with("You weakened the opponent's pawn structure"),
+            "{}",
+            card.heading
+        );
+        assert_eq!(card.sentiment, Sentiment::Positive);
+    }
+
+    #[test]
+    fn improving_our_structure_is_positive() {
+        let o = outcome(
+            pb(0, 0, 0, -20, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+        );
+        let card = build_pawn_structure_item(&o, Perspective::Player).expect("an improved card");
+        assert!(
+            card.heading.starts_with("Your pawn structure improved"),
+            "{}",
+            card.heading
+        );
+        assert_eq!(card.sentiment, Sentiment::Positive);
+    }
+
+    #[test]
+    fn mover_side_wins_when_both_fire() {
+        // Both sides moved a sub-term; the card shows the mover side.
+        let o = outcome(
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, -20, 0, 0),
+            pb(0, 0, 0, 0, 0, 0),
+            pb(0, 0, 0, -20, 0, 0),
+        );
+        let card = build_pawn_structure_item(&o, Perspective::Player).expect("a card");
+        assert!(card.heading.starts_with("Your pawn structure weakened"));
+    }
+}

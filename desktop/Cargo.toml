@@ -10,6 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 chess-tutor-engine = { path = "../core/engine" }
-chess-tutor-narration = { path = "../core/narration" }
+chess-tutor-teaching = { path = "../core/teaching" }
 chess-tutor-ui = { path = "../core/ui" }
 eframe = { version = "0.30", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }

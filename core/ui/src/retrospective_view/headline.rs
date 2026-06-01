@@ -10,6 +10,11 @@ use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::types::Color;
 
+use chess_tutor_teaching::claim::{verdict_claim, Claim};
+use chess_tutor_teaching::phrasing::{
+    phrase, Locale, Perspective, PhrasingContext, Verbosity,
+};
+
 use crate::view::{
     AnnotationKind, BoardAnnotation, RetrospectiveHeadline,
 };
@@ -20,12 +25,15 @@ use super::helpers::*;
 // Headline
 // ---------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_headline(
     pre_move_pos: &Position,
+    analyses: &[MoveAnalysis],
     best: &MoveAnalysis,
     user: &MoveAnalysis,
     verdict: MoveVerdict,
     root_stm: Color,
+    perspective: Perspective,
     reveal_best_moves: bool,
 ) -> RetrospectiveHeadline {
     let user_san = san::format(pre_move_pos, user.mv);
@@ -37,9 +45,27 @@ pub(super) fn build_headline(
         )
     );
     let san_annotation = sharp_or_verdict_annotation(verdict, user_is_sharp);
-    let verdict_label = verdict_label(verdict);
     let verdict_sentiment = verdict_sentiment(verdict);
     let user_score = format_score_pawns(user.score);
+
+    // Verdict label + verdict-specific note come from the teaching
+    // translator: it owns the chess.com tier remap ("Great" / "Brilliant"
+    // for an only-good-move sacrifice) and the perspective-correct
+    // sentence. `reveal_moves: false` here because the GUI carries the
+    // engine-preferred move in its own dedicated fields below (with a
+    // board arrow), not in the note text.
+    let claim = verdict_claim(pre_move_pos, analyses, best, user, verdict, false);
+    let ctx = PhrasingContext {
+        perspective,
+        locale: Locale::En,
+        verbosity: Verbosity::Normal,
+        reveal_moves: false,
+    };
+    // The GUI composes its own headline layout (SAN + label + score on
+    // separate widgets), so it reuses only the verdict *word* and the
+    // verdict-specific *note* from the translator, not the full sentence.
+    let phrasing = phrase(&claim, &ctx);
+    let verdict_label = verdict_tier_label_of(&claim);
 
     // Best-move reveal is opt-in. When off, the four "what the engine
     // would have played" fields stay `None` so renderers naturally
@@ -62,20 +88,15 @@ pub(super) fn build_headline(
         best_san = Some(san);
     }
 
-    let note = match verdict {
-        MoveVerdict::BestAvailable => Some(format!(
-            "Position was already lost ({}).",
-            format_score_pawns(best.score)
-        )),
-        MoveVerdict::Miss => Some(
-            "A stronger move won material here — this one let it slip.".to_string(),
-        ),
-        _ if user_is_sharp => Some(
-            "Well spotted — this looks risky at first glance, but the longer line pays off."
-                .to_string(),
-        ),
-        _ => surprise_note(verdict, user.surprise(root_stm)),
-    };
+    // Note precedence: the translator's verdict-specific note (lost
+    // position / missed material) wins; otherwise the shallow-vs-deep
+    // surprise note (a separate, surprise-driven concern the verdict
+    // claim doesn't carry) fills in — including the positive-surprise
+    // "well spotted" case that drives `user_is_sharp` above. Both come
+    // from the shared translator now (`surprise_claim` + `phrase`).
+    let note = phrasing
+        .detail
+        .or_else(|| surprise_note(verdict, user.surprise(root_stm), perspective, root_stm));
 
     RetrospectiveHeadline {
         user_san,
@@ -88,6 +109,24 @@ pub(super) fn build_headline(
         gap,
         note,
         best_move_annotation,
+    }
+}
+
+/// Pull the chess.com tier label out of an already-built verdict claim.
+fn verdict_tier_label_of(claim: &Claim) -> String {
+    match claim {
+        Claim::Verdict {
+            verdict,
+            only_good_move,
+            sacrifice,
+            ..
+        } => chess_tutor_teaching::phrasing::verdict_tier_label(
+            *verdict,
+            *only_good_move,
+            *sacrifice,
+        )
+        .to_string(),
+        _ => unreachable!("verdict_claim always returns Claim::Verdict"),
     }
 }
 

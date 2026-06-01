@@ -8,11 +8,11 @@ A **chess tutor**, not a chess engine. The product surface is move-by-move teach
 
 1. **The engine** — Stockfish-11 classical port (NNUE banned). 2000 ELO verified empirically. Search has most of the SF11 pruning stack; eval decomposes into 45 named sub-terms keyed by `TermId`, each with mg/eg components and a per-term tapered cp delta the teaching layer reads.
 2. **The teaching layer** — [`core/engine/src/analysis/`](core/engine/src/analysis/) — see that module's `//!` for the design principles. Traces every UI claim back to a concrete engine signal: term deltas, structured outcome snapshots, surprise classification, verdict.
-3. **The narration crate** (`core/narration/`) — renders structured outcomes into prose. Public surface: `format_retrospective(pre_move_pos, &[MoveAnalysis], user_move, &NarrationOptions) -> String`.
+3. **The teaching crate** (`core/teaching/`, formerly `core/narration/`) — the single prose translator. Carries the language-free **Claim IR** (`claim::Claim`, one variant per teaching point, mover-relative, **never says "you"**) + the salience builders (`claims_for` / per-category `*_claims`) + the one **`phrase(&Claim, &PhrasingContext) -> Phrasing`** translator where perspective ("you" vs "they"), the chess.com reframe, verbosity, and i18n live. Both the GUI (`core/ui`) and CLI consume Claims and call `phrase`; the engine stays pure. Public CLI surface unchanged in shape: `format_retrospective(pre_move_pos, &[MoveAnalysis], user_move, &NarrationOptions, perspective) -> String` (now a pure claims + phrase join — no hardcoded-prose path left). **Rust owns all prose; mobile receives final strings over FFI, not the IR** (see CLAUDE.md "Prose ownership"). This reverses the old "each platform writes its own prose" guidance.
 
 UIs: CLI (`chess-tutor`), egui desktop (`chess-tutor-desktop`), planned Apple + Android. FFI crate (`core/ffi/`) is the prerequisite for the platform apps and doesn't exist yet.
 
-Tests: **841 engine (+4 ignored) + 105 narration + 93 cli + 43 ui = 1082 passing**, clippy clean across all targets.
+Tests: **891 engine (+4 ignored) + 150 teaching + 103 cli + 92 ui = 1236 passing**, clippy clean across all targets.
 
 ## Status: the engine detour is COMPLETE — teaching UX is the active work
 
@@ -91,6 +91,7 @@ Per-search or per-engine allocations are fine. **Per-node allocations are not** 
 ## Pointers to inline design briefs
 
 - **Teaching analysis pipeline**: [`core/engine/src/analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!`
+- **Teaching translation layer (Claim IR + `phrase`)**: [`core/teaching/src/lib.rs`](core/teaching/src/lib.rs) `//!`, [`claim.rs`](core/teaching/src/claim.rs) (the language-free IR + salience builders), [`phrasing.rs`](core/teaching/src/phrasing.rs) (`PhrasingContext`, `Perspective`, the single `phrase` translator — home of "you"/"they" + the chess.com reframe)
 - **Tactic library (engine)**: [`core/engine/src/analysis/tactic_outcome/mod.rs`](core/engine/src/analysis/tactic_outcome/mod.rs) `//!` (predicate provenance; types + `compute_tactic_outcome`), `detectors.rs` (the per-pattern chain), `mate.rs` (named mates); plus [`overloading.rs`](core/engine/src/analysis/overloading.rs) + [`win_chances.rs`](core/engine/src/analysis/win_chances.rs)
 - **Trap library schema + four-gate validator**: [`core/engine/src/traps/mod.rs`](core/engine/src/traps/mod.rs) `//!`
 - **Engine public API surface**: [`core/engine/src/engine.rs`](core/engine/src/engine.rs)

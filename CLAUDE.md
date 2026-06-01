@@ -107,6 +107,8 @@ chess-tutor-2/
 ├── reference/Stockfish-sf_11/    # reference source (GPLv3, NOT shipped, NOT modified)
 ├── core/
 │   ├── engine/                   # chess-tutor-engine: the library (pure lib, no CLI deps)
+│   ├── teaching/                 # chess-tutor-teaching: Claim IR + phrase() — the single prose translator
+│   ├── ui/                       # chess-tutor-ui: renderer-neutral view models / events / overlays
 │   ├── cli/                      # chess-tutor-cli: interactive testing CLI
 │   └── ffi/                      # chess-tutor-ffi: C ABI for Swift/Kotlin bindings (TODO)
 ├── desktop/                      # chess-tutor-desktop: Rust egui app (Windows primary)
@@ -119,6 +121,12 @@ Confirmed decisions (2026-04-22):
 - **Engine is a pure library; CLI is a separate crate.** The CLI is just "another UI" alongside Apple/Android/egui. Keeping the engine free of CLI dependencies (line editors, colored-output crates, arg parsers) keeps it small when linked into mobile apps via FFI.
 - **The CLI keeps the prior repo's ANSI board renderer.** The old project at `~/Repos/work/chess-tutor/core/chess-tutor-cli/src/board.rs` renders a chess board in the terminal using 256-color ANSI backgrounds (chequered squares), Unicode chess glyphs with an `--ascii` fallback, amber highlight for last-move squares, board flip for Black's perspective, and a Windows-specific pawn workaround (Windows Terminal forces U+265F to an emoji, so both pawns use U+2659 with SGR foreground colors to distinguish sides). It looks really good and the user wants it preserved. Port that file over mostly verbatim — it takes a FEN string as input, so it's decoupled from engine types, and it's the user's own code (no license concerns).
 - **egui for Windows desktop.** Chosen over .NET/MAUI/Tauri/etc. for two reasons: (1) Rust toolchain is already installed, no second development environment; (2) egui compiles to a single stand-alone binary — no runtime install burden on the user. macOS is covered by the Swift app. Linux is likely free as a side effect of egui being cross-platform; not a primary target.
+
+Prose ownership (decided 2026-06-01, supersedes any earlier "each platform renders its own prose" note):
+
+- **Rust owns all teaching prose. There is exactly one translator.** The `core/teaching` crate carries a language-free **Claim IR** (`claim::Claim`, one variant per teaching point) and a single **`phrase(&Claim, &PhrasingContext) -> Phrasing`** function. Salience (`claims_for` / per-category claim builders) and prose generation both live here; the engine stays pure (raw structured outcomes only), and the GUI (`core/ui`) + CLI both consume Claims and call `phrase` — neither hand-writes prose. **Mobile (Swift/Kotlin) receives *final strings* over FFI, not the IR.** The translator is never re-implemented per platform. This *reverses* the old guidance that "desktop has more text space, each platform writes its own prose"; that rationale is dropped in favour of **short, mobile-first text everywhere + visual aids (arrows / highlights) over walls of text.**
+- **A `Claim` never says "you".** Direction is stored mover-relative (`mover: Color`, role enums, signed mover-POV cp). Perspective ("you" vs "they", and the chess.com reframe where the opponent's blunder becomes *your* chance) is applied *only* inside `phrase`, keyed by `PhrasingContext.perspective`. This is what unlocks opponent-move retrospective: the same Claims rendered from `Perspective::Opponent`.
+- **`PhrasingContext` carries `locale` + `verbosity` fields** (single `Locale::En` / `Verbosity::Normal` arm today) so i18n / skill-tier wording is a compile-error-driven checklist later, not a re-architecture. Build only the English-normal path now.
 
 ## Agent-facing CLI commands
 

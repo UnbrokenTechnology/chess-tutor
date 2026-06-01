@@ -189,8 +189,8 @@ pub use tactical_mode::{
 };
 pub use tactic_escape::{find_tactic_escape, EscapeKind, TacticEscape};
 pub use tactic_outcome::{
-    compute_tactic_outcome, find_best_tactic_in_position, find_tactic_in_line, Confidence,
-    MatePattern, PriorMove, TacticHit, TacticPattern, TacticsOutcome,
+    compute_tactic_outcome, find_best_tactic_in_position, find_tactic_in_line, is_sacrifice,
+    Confidence, MatePattern, PriorMove, TacticHit, TacticPattern, TacticsOutcome,
 };
 pub use term_delta::{compute_term_deltas, cumulative_prefix, TermDelta};
 pub use term_id::TermId;

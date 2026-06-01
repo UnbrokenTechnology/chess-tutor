@@ -15,22 +15,28 @@ use crate::learning_mode::{
 };
 
 /// Pick a post-move evaluation (white POV) off a single
-/// [`HistoryEntry`]. Engine moves carry the score directly on
-/// `engine_info`; user moves carry it on the retrospective's analysis
-/// of the move they actually played. The eval bar walks history
-/// backward through this so it updates on every move, not only engine
-/// replies.
+/// [`HistoryEntry`]. The **retrospective analysis** is the source of
+/// truth for *every* move — user or engine — because it's the unbiased
+/// analytical score (full analytical depth, `eval_mask: EMPTY`, never a
+/// noise pick), white-POV, PAWN_EG-scaled. The play-time `engine_info`
+/// score is play-depth and possibly eval-masked / a noise pick, so it's
+/// used only as a **transient placeholder** while the retrospective for
+/// an engine move is still computing (and for the rare wild pick that
+/// carries `engine_info` but whose retro hasn't landed). The eval bar
+/// walks history backward through this so it updates on every move.
 pub(crate) fn entry_eval_white_pov(e: &HistoryEntry) -> Option<Value> {
-    if let Some(info) = &e.engine_info {
-        return Some(info.score_white_pov);
+    if let Some(retro) = &e.retrospective {
+        if let Some(analysis) = retro.analyses.iter().find(|a| a.mv == retro.user_move) {
+            return Some(if e.moved_by == Color::White {
+                analysis.score
+            } else {
+                -analysis.score
+            });
+        }
     }
-    let retro = e.retrospective.as_ref()?;
-    let analysis = retro.analyses.iter().find(|a| a.mv == retro.user_move)?;
-    Some(if e.moved_by == Color::White {
-        analysis.score
-    } else {
-        -analysis.score
-    })
+    // Transient placeholder: the engine move's retrospective hasn't
+    // arrived yet (or a wild pick that the analytical pass missed).
+    e.engine_info.as_ref().map(|info| info.score_white_pov)
 }
 
 impl Session {

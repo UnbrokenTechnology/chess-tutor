@@ -1,18 +1,26 @@
 //! Mobility card builders, incl. per-piece highlights.
 //!
+//! The prose (heading + pre→post detail, with the "you" / "they"
+//! reframe and the improve/restrict wording) is produced by the shared
+//! teaching translator ([`chess_tutor_teaching`]) from a
+//! [`Claim::Mobility`]; the shared salience (per-piece-type threshold
+//! gating, biggest-first ordering) lives in [`mobility_claims`]. This
+//! builder owns only the *structured* card surface the translator
+//! deliberately doesn't carry — the sentiment, the terse stat summary,
+//! the score delta, and the per-square board annotations.
+//!
 //! Split out of `retrospective_view`; the orchestrator
 //! ([`super::build_retrospective_view`]) assembles the cards.
 
-use chess_tutor_engine::analysis::{
-    MobilityOutcome, PieceMobility,
-};
-use chess_tutor_engine::eval::MobilityBreakdown;
+use chess_tutor_engine::analysis::{MobilityOutcome, PieceMobility};
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, PieceType, Square};
 
+use chess_tutor_teaching::claim::{mobility_claims, Claim, MobilitySide};
+use chess_tutor_teaching::phrasing::{phrase, Locale, Perspective, PhrasingContext, Verbosity};
+
 use crate::view::{
-    AnnotationKind, BoardAnnotation, RetrospectiveCategory,
-    RetrospectiveItem, Sentiment,
+    AnnotationKind, BoardAnnotation, RetrospectiveCategory, RetrospectiveItem, Sentiment,
 };
 
 
@@ -29,119 +37,93 @@ const MOBILITY_DELTA_THRESHOLD_CP: i32 = 20;
 /// square appears in both snapshots and the delta is `post - pre`.
 const PER_PIECE_HIGHLIGHT_THRESHOLD_CP: i32 = 15;
 
+/// Build every mobility card for one analysed move. `perspective`
+/// selects "you" vs "they" and drives the student-POV sentiment colour.
 pub(super) fn build_mobility_items(
     outcome: &MobilityOutcome,
     _post_pos: &Position,
     _root_stm: Color,
     show_all: bool,
+    perspective: Perspective,
 ) -> Vec<RetrospectiveItem> {
-    // show_all drops the per-piece floor from 50 cp to 1 cp so a
-    // bishop's 12→13 reach surfaces. Without it, the default 50 cp
-    // gate hides knock-on shifts from pawn pushes that didn't really
-    // change the piece's role on the board.
+    // show_all drops the floor from 20 cp to 1 cp so a bishop's 12→13
+    // reach surfaces. Without it, the default gate hides knock-on
+    // shifts from pawn pushes that didn't really change the piece's
+    // role on the board.
     let threshold = if show_all { 1 } else { MOBILITY_DELTA_THRESHOLD_CP };
-    let mut items = Vec::new();
-
-    for (label, piece_type, delta, pre, post) in
-        mobility_all_shifts(&outcome.ours_pre, &outcome.ours_post, threshold)
-    {
-        let (heading, sentiment) = if delta < 0 {
-            (format!("Your {label} activity dropped"), Sentiment::Negative)
-        } else {
-            (format!("Your {label} activity improved"), Sentiment::Positive)
-        };
-        let annotations = highlight_specific_pieces(
-            &outcome.ours_per_piece_pre,
-            &outcome.ours_per_piece_post,
-            piece_type,
-            sentiment,
-        );
-        items.push(RetrospectiveItem {
-            category: RetrospectiveCategory::Mobility,
-            heading,
-            summary: format!(
-                "{:+.2} → {:+.2}",
-                pre as f32 / 100.0,
-                post as f32 / 100.0
-            ),
-            detail: format!(
-                "Stockfish's mobility term weights the squares this piece type attacks \
-                 inside its safe-area bitmap. A {label} climbing from {:+.2} to {:+.2} \
-                 typically means it found a more active diagonal, file, or outpost.",
-                pre as f32 / 100.0,
-                post as f32 / 100.0
-            ),
-            score_delta_pawns: Some(delta as f32 / 100.0),
-            sentiment,
-            annotations,
-        });
-    }
-
-    for (label, piece_type, delta, pre, post) in
-        mobility_all_shifts(&outcome.theirs_pre, &outcome.theirs_post, threshold)
-    {
-        let (heading, sentiment) = if delta < 0 {
-            (
-                format!("You restricted the opponent's {label}"),
-                Sentiment::Positive,
-            )
-        } else {
-            (
-                format!("The opponent's {label} got more active"),
-                Sentiment::Negative,
-            )
-        };
-        let annotations = highlight_specific_pieces(
-            &outcome.theirs_per_piece_pre,
-            &outcome.theirs_per_piece_post,
-            piece_type,
-            sentiment,
-        );
-        items.push(RetrospectiveItem {
-            category: RetrospectiveCategory::Mobility,
-            heading,
-            summary: format!(
-                "{:+.2} → {:+.2}",
-                pre as f32 / 100.0,
-                post as f32 / 100.0
-            ),
-            detail: format!(
-                "The opponent's {label} mobility shifted from {:+.2} to {:+.2}. \
-                 Restricting an opponent's piece is just as valuable as activating \
-                 your own — it tends to lock in long-term advantages.",
-                pre as f32 / 100.0,
-                post as f32 / 100.0
-            ),
-            score_delta_pawns: Some(-delta as f32 / 100.0),
-            sentiment,
-            annotations,
-        });
-    }
-
-    items
+    let ctx = PhrasingContext {
+        perspective,
+        locale: Locale::En,
+        verbosity: Verbosity::Normal,
+        reveal_moves: false,
+    };
+    mobility_claims(outcome, threshold)
+        .into_iter()
+        .map(|claim| mobility_item(&claim, outcome, &ctx))
+        .collect()
 }
 
-/// All per-piece-type mobility shifts whose `|delta_mg|` clears
-/// `threshold_cp`, sorted biggest-first. Returns up to four entries:
-/// (label, piece_type, delta, pre_mg, post_mg).
-pub(super) fn mobility_all_shifts(
-    pre: &MobilityBreakdown,
-    post: &MobilityBreakdown,
-    threshold_cp: i32,
-) -> Vec<(&'static str, PieceType, i32, i32, i32)> {
-    let candidates: [(&'static str, PieceType, i32, i32); 4] = [
-        ("knight", PieceType::Knight, pre.knight.mg().0, post.knight.mg().0),
-        ("bishop", PieceType::Bishop, pre.bishop.mg().0, post.bishop.mg().0),
-        ("rook", PieceType::Rook, pre.rook.mg().0, post.rook.mg().0),
-        ("queen", PieceType::Queen, pre.queen.mg().0, post.queen.mg().0),
-    ];
-    let mut shifts: Vec<_> = candidates
-        .into_iter()
-        .map(|(label, pt, pre_mg, post_mg)| (label, pt, post_mg - pre_mg, pre_mg, post_mg))
-        .filter(|(_, _, delta, _, _)| delta.abs() >= threshold_cp)
-        .collect();
-    shifts.sort_by_key(|(_, _, delta, _, _)| std::cmp::Reverse(delta.abs()));
-    shifts
+/// Turn one [`Claim::Mobility`] into a card — prose from the
+/// translator, structured surface (sentiment, stat summary, score
+/// delta, annotations) computed here from the claim's payload.
+fn mobility_item(
+    claim: &Claim,
+    outcome: &MobilityOutcome,
+    ctx: &PhrasingContext,
+) -> RetrospectiveItem {
+    let phrasing = phrase(claim, ctx);
+    let Claim::Mobility {
+        side,
+        piece,
+        pre_cp,
+        post_cp,
+    } = claim
+    else {
+        unreachable!("mobility_claims always returns Claim::Mobility");
+    };
+
+    let delta = post_cp - pre_cp;
+    // The piece is the user's when the moving side is the user (Player +
+    // Mover); the player's POV is fixed here.
+    let piece_is_user =
+        (*side == MobilitySide::Mover) == (ctx.perspective == Perspective::Player);
+    let improved = delta >= 0;
+
+    // Sentiment is a function of "good for the user?" — activating the
+    // user's own piece is good; restricting the opponent's is good too.
+    let sentiment = match (piece_is_user, improved) {
+        (true, true) => Sentiment::Positive,
+        (true, false) => Sentiment::Negative,
+        (false, true) => Sentiment::Negative,
+        (false, false) => Sentiment::Positive,
+    };
+
+    // Per-square highlights come from the side's own per-piece snapshots.
+    let (per_pre, per_post) = match side {
+        MobilitySide::Mover => (&outcome.ours_per_piece_pre, &outcome.ours_per_piece_post),
+        MobilitySide::Opponent => {
+            (&outcome.theirs_per_piece_pre, &outcome.theirs_per_piece_post)
+        }
+    };
+    let annotations = highlight_specific_pieces(per_pre, per_post, *piece, sentiment);
+
+    // The card's score delta is from the *user's* POV: a gain for the
+    // user's piece is positive, but the opponent's piece gaining reach
+    // is a loss for the user, so flip the sign on the opponent side.
+    let score_delta = match side {
+        MobilitySide::Mover => delta as f32 / 100.0,
+        MobilitySide::Opponent => -delta as f32 / 100.0,
+    };
+
+    RetrospectiveItem {
+        category: RetrospectiveCategory::Mobility,
+        heading: phrasing.summary,
+        summary: format!("{:+.2} → {:+.2}", *pre_cp as f32 / 100.0, *post_cp as f32 / 100.0),
+        detail: phrasing.detail.unwrap_or_default(),
+        score_delta_pawns: Some(score_delta),
+        sentiment,
+        annotations,
+    }
 }
 
 /// Pick the *specific* pieces of `piece_type` whose mobility shifted

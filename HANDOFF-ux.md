@@ -2,7 +2,9 @@
 
 Forward-looking UX context. The product surface is teaching feedback, not the engine. See [`HANDOFF.md`](HANDOFF.md) for the index, [`CLAUDE.md`](CLAUDE.md) for mission + ground rules, [`HANDOFF-perf.md`](HANDOFF-perf.md) for engine perf (only if perf becomes relevant to a UX task).
 
-> **The teaching UX is functional end-to-end with the engine surface.** The card-based retrospective, the three learning-mode axes, the live coaching panel, the intervention pause, board overlays, the trapped-piece overlay, and the tactic/mate cards have all landed (git history carries the wave-by-wave detail; inline `//!` docs carry design rationale). This file tracks **tuning, iteration, and surfaces not yet wired.**
+> **The teaching UX is functional end-to-end with the engine surface.** The card-based retrospective, the three learning-mode axes, the live coaching panel, the intervention pause, board overlays, the trapped-piece overlay, the tactic/mate cards, and (2026-06-01) the **teaching translation layer** + **opponent-move retrospective** have all landed (git history carries the wave-by-wave detail; inline `//!` docs carry design rationale). This file tracks **tuning, iteration, and surfaces not yet wired.**
+>
+> **Teaching translation layer (2026-06-01).** Prose is now authored once: `core/teaching` (renamed from `core/narration`) carries a language-free **Claim IR** + a single **`phrase(&Claim, &PhrasingContext)`** translator; both the GUI cards and the CLI text consume it. A Claim is mover-relative and never says "you" — perspective is applied only in `phrase`, which unlocked **opponent-move retrospective**: engine moves are analysed and graded as if a human played them (Best / Good / … / Miss / Blunder — never "book"/"wild"), rendered from `Perspective::Opponent` with the chess.com reframe (their blunder = your chance), and the eval bar reads the unbiased retrospective analysis. **Rust owns all prose; mobile gets final strings over FFI** (CLAUDE.md "Prose ownership", reverses the old per-platform-prose guidance).
 
 ## Learning-mode workflows — current state
 
@@ -76,11 +78,11 @@ Toggleable always-on highlights painted on the live/viewed position, independent
 
 ### Architectural decisions worth knowing
 
-- **`core/ui` does NOT depend on `core/narration`.** View-model logic reimplements some thresholds the narration crate has for text. Convergence (narration derives text from the view model) is a long-term refactor; today's duplication is accepted.
-- **`format_retrospective` (CLI text) is untouched and parallel** — same engine outcomes, different presentation; reads `HistoryEntry.retrospective` directly.
+- **`core/ui` depends on `core/teaching`** (renamed from `core/narration`). The duplicated salience-and-prose split is gone: both the GUI cards and the CLI text are built from the shared **Claim IR** + the single **`phrase(&Claim, &PhrasingContext)`** translator in `core/teaching`. The retrospective cards lay Claims out and call `phrase` for prose (`retrospective_view/*` import `chess_tutor_teaching::phrasing::{phrase, …}`); annotations / sentiment / score-chip stay structured. A `Claim` is **mover-relative and never says "you"** — perspective is applied only inside `phrase`, which is what unlocked opponent-move retrospective (`Perspective::Opponent`). **Rust owns all prose; mobile gets final strings over FFI** — see CLAUDE.md "Prose ownership" (reverses the old per-platform-prose guidance).
+- **`format_retrospective` (CLI text) shares the same translator** — it is now a pure `claims + phrase` join (no hardcoded-prose path left), taking a `Perspective` argument; reads the same engine outcomes the cards do.
 - **Per-frame view-model rebuild** — `build_retrospective_view` recomputes every egui frame (8× evaluator priming, low-ms). Cache on `HistoryEntry` if it becomes a hotspot.
 - **Annotation overlay is renderer-neutral** — `BoardView.annotations` is flat data; CLI's ANSI renderer ignores it; a future mobile shell paints its own way. No egui types in `core/ui`.
-- **Engine produces facts; renderers render.** Narration (text), `desktop/draw::*` (egui), future mobile = three renderers over the same `HistoryEntry` facts. Events name intents, not inputs (`Cancel`, `RequestNewGame`, `SelectSquare(sq)` — never `EscapePressed`). See memory [[feedback_ui_events_intent_not_input]].
+- **Engine produces facts; the translator phrases them; renderers render.** Engine emits raw outcomes → `core/teaching` turns them into Claims + final prose → renderers (`core/teaching` CLI text join, `desktop/draw::*` egui, future mobile) place that prose + the structured annotations. Prose is authored once, in Rust. Events name intents, not inputs (`Cancel`, `RequestNewGame`, `SelectSquare(sq)` — never `EscapePressed`). See memory [[feedback_ui_events_intent_not_input]].
 - **Tactics resolve before positional eval.** Chess is two modes; positional advice is only valid in a quiet position. The GUI must gate positional advice behind a tactical-mode check. See memory [[project_tactical_vs_positional_modes]].
 
 ## Backlog
@@ -113,7 +115,7 @@ Toggleable always-on highlights painted on the live/viewed position, independent
 5. **Pin arrows on live position** — `Arrow { Pin }` from `Position::blockers_for_king(us)` when no card selected; cheap, lives in `collect_board_annotations`.
 6. **Trap-refutation arrows** — when `pending_trap.is_some()`, parse the trap's main-line SAN → arrows for the punisher + reply.
 7. **Trap-threat warnings** — `Session::trap_threats()` returns candidate-uci + `TrapHit`; surface as red square on the at-risk candidate.
-8. **Detail-prose convergence** — card `detail` strings duplicate narration wording; eventually have narration derive text from the view model (one source of truth).
+8. **Detail-prose convergence** — ✅ DONE (2026-06-01). Card `detail` and CLI text now share the single `core/teaching` Claim IR + `phrase` translator; no duplicated wording, one source of truth.
 
 ### Tactic-library tuning (real-play feedback expected)
 
@@ -141,7 +143,7 @@ All four pillars (skeleton / opening book / eval-signal mask / move-noise+blunde
 Deferred follow-ons:
 - **Visible per-move noise badge** in the desktop move list (data already on `HistoryEntry.noise_pick`; ~5 lines).
 - **ELO presets** — `--bot-elo 1200` + a desktop "Preset" dropdown filling `(pool, temp, blunder, severity, guarantee, wild)`. Defer until manual knobs feel clunky in real play. See memory [[project_skill_level_and_multipv]] (also: MultiPV for variable-strength bots).
-- **Opponent-side retrospective** — "the bot played a deliberate mistake — find the punishment" when `noise_pick.is_some()` and the delta is large. Needs a *scoped* exception to the analytical-paths invariant.
+- **Opponent-side *noise-punishment* prompt** — distinct from the general opponent-move retrospective that landed 2026-06-01 (every opponent move is now analysed + graded + phrased from `Perspective::Opponent`). The deferred bit is the active "the bot played a *deliberate* mistake — find the punishment" framing, fired when `noise_pick.is_some()` and the delta is large. Needs a *scoped* exception to the analytical-paths invariant.
 - **More aggressive defaults** — ship a ~800-ELO default once presets are tuned.
 - **Seed surface in the GUI** — desktop logs the per-game seed to stderr; add a status line + paste-in field so varied games can be replayed.
 - **Desktop UI for allowed-openings + opening-status badge + book teaching-note overlay** — CLI has `openings list/allow/deny`; desktop needs the equivalent inside the New Game dialog, plus a "book: <opening>" badge. Transposition-aware book matching is low priority.
@@ -149,8 +151,8 @@ Deferred follow-ons:
 ## UX / platform, deferred
 
 - **FFI crate (`core/ffi/`)** — the prerequisite for the platform apps. Outstanding decisions: UniFFI vs raw C ABI, in-process vs out-of-process, how to expose `MoveAnalysis` + `BoardAnnotation` across the boundary.
-- **Mobile shells (`apple/`, `android/`)** — consume `chess_tutor_ui` via `core/ffi`; each is a renderer + event dispatcher (~hundreds of lines). Gated on the FFI crate.
-- **Hint-panel narration via narration-crate refactor** — hint panel shows `mv / score / PV` directly; factor `narration::render_report`'s middle into `render_per_term_narration(...)` and expose `format_candidate_explanation(...)` without verdict framing.
+- **Mobile shells (`apple/`, `android/`)** — consume `chess_tutor_ui` via `core/ffi`; each is a renderer + event dispatcher (~hundreds of lines) that paints **final strings** from `core/teaching` (it does NOT re-author prose — see CLAUDE.md "Prose ownership"). Gated on the FFI crate.
+- **Hint-panel prose via the teaching layer** — hint panel shows `mv / score / PV` directly; factor `chess_tutor_teaching::render_report`'s middle into a `render_per_term_narration(...)` helper and expose `format_candidate_explanation(...)` (Claims + `phrase`) without verdict framing.
 - **Real piece sprites** (cburnett, CC-BY-SA from Lichess) — 12 SVGs, `include_bytes!`, drop-in for the desktop's `piece_glyph` mapping.
 - **Teaching-layer Phases 2 & 4** (see [`analysis/mod.rs`](core/engine/src/analysis/mod.rs) `//!`) — Phase 2 cheap-pass + surprise detection (depth-1 qsearch + SEE per legal move); Phase 4 signal-mask (zero each `EvalTrace` term, re-rank, surface "you'd prefer M' if you undervalued X"). Phase 5 (tactic library) has largely landed.
 

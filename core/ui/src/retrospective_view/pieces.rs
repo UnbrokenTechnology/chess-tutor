@@ -1,222 +1,30 @@
-//! Piece-placement card builders (one card per sub-signal x side).
+//! Piece-placement card builders (one card per sub-signal × side).
+//!
+//! The prose (heading + detail, with the "you" / "they" reframe and the
+//! per-sub-term concept wording) is produced by the shared teaching
+//! translator ([`chess_tutor_teaching`]) from a [`Claim::PiecePlacement`];
+//! the shared salience (per-sub-term threshold gating, BishopPawns
+//! geometry suppression) lives in [`pieces_positional_claims`]. This
+//! builder owns only the *structured* card surface the translator
+//! deliberately doesn't carry — the sentiment, the score chip, and the
+//! capture-aware suppression (which needs the realised capture events the
+//! GUI already has in hand).
 //!
 //! Split out of `retrospective_view`; the orchestrator
 //! ([`super::build_retrospective_view`]) assembles the cards.
 
 use chess_tutor_engine::analysis::PiecesPositionalOutcome;
-use chess_tutor_engine::eval::PiecesBreakdown;
 use chess_tutor_engine::types::{Color, PieceType};
 
-use crate::view::{
-    RetrospectiveCategory,
-    RetrospectiveItem, Sentiment,
+use chess_tutor_teaching::claim::{
+    pieces_positional_claims, Claim, PlacementCategory, PlacementSide, StructureDirection,
 };
+use chess_tutor_teaching::phrasing::{phrase, Locale, Perspective, PhrasingContext, Verbosity};
 
-
-// ---------------------------------------------------------------------
-// Piece placement — one card per sub-signal × side
-// ---------------------------------------------------------------------
-
-const PIECES_DELTA_THRESHOLD_CP: i32 = 20;
-
-/// One per `PiecesBreakdown` sub-term — each describes a distinct
-/// chess concept (outpost claimed, rook on open file, bishop blocked
-/// by own pawns, etc.) and gets its own card. Mirrors the narration
-/// crate's `PieceSubTerm` (core/ui doesn't depend on narration).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum PieceSubTerm {
-    Outposts,
-    ReachableOutposts,
-    MinorBehindPawn,
-    KingProtector,
-    BishopPawns,
-    LongDiagonalBishop,
-    RookOnQueenFile,
-    RookOnOpenFile,
-    RookOnSemiopenFile,
-    TrappedRook,
-    WeakQueen,
-}
-
-impl PieceSubTerm {
-    const ALL: [PieceSubTerm; 11] = [
-        PieceSubTerm::Outposts,
-        PieceSubTerm::ReachableOutposts,
-        PieceSubTerm::MinorBehindPawn,
-        PieceSubTerm::KingProtector,
-        PieceSubTerm::BishopPawns,
-        PieceSubTerm::LongDiagonalBishop,
-        PieceSubTerm::RookOnQueenFile,
-        PieceSubTerm::RookOnOpenFile,
-        PieceSubTerm::RookOnSemiopenFile,
-        PieceSubTerm::TrappedRook,
-        PieceSubTerm::WeakQueen,
-    ];
-
-    fn delta_mg(self, pre: &PiecesBreakdown, post: &PiecesBreakdown) -> i32 {
-        match self {
-            PieceSubTerm::Outposts => post.outposts.mg().0 - pre.outposts.mg().0,
-            PieceSubTerm::ReachableOutposts => {
-                post.reachable_outposts.mg().0 - pre.reachable_outposts.mg().0
-            }
-            PieceSubTerm::MinorBehindPawn => {
-                post.minor_behind_pawn.mg().0 - pre.minor_behind_pawn.mg().0
-            }
-            PieceSubTerm::KingProtector => post.king_protector.mg().0 - pre.king_protector.mg().0,
-            PieceSubTerm::BishopPawns => post.bishop_pawns.mg().0 - pre.bishop_pawns.mg().0,
-            PieceSubTerm::LongDiagonalBishop => {
-                post.long_diagonal_bishop.mg().0 - pre.long_diagonal_bishop.mg().0
-            }
-            PieceSubTerm::RookOnQueenFile => {
-                post.rook_on_queen_file.mg().0 - pre.rook_on_queen_file.mg().0
-            }
-            PieceSubTerm::RookOnOpenFile => {
-                post.rook_on_open_file.mg().0 - pre.rook_on_open_file.mg().0
-            }
-            PieceSubTerm::RookOnSemiopenFile => {
-                post.rook_on_semiopen_file.mg().0 - pre.rook_on_semiopen_file.mg().0
-            }
-            PieceSubTerm::TrappedRook => post.trapped_rook.mg().0 - pre.trapped_rook.mg().0,
-            PieceSubTerm::WeakQueen => post.weak_queen.mg().0 - pre.weak_queen.mg().0,
-        }
-    }
-
-    /// Heading when our side's sub-term improved (good for the user).
-    fn ours_improved_heading(self) -> &'static str {
-        match self {
-            PieceSubTerm::Outposts => "Your knight reached an outpost",
-            PieceSubTerm::ReachableOutposts => "Your knight has a route to an outpost",
-            PieceSubTerm::MinorBehindPawn => "Your minor gained pawn cover",
-            PieceSubTerm::KingProtector => "Your minor rallied to defend the king",
-            PieceSubTerm::BishopPawns => "Your bishop freed itself from its pawn chain",
-            PieceSubTerm::LongDiagonalBishop => "Your bishop took the long diagonal",
-            PieceSubTerm::RookOnQueenFile => "Your rook reached the queen's file",
-            PieceSubTerm::RookOnOpenFile => "Your rook took the open file",
-            PieceSubTerm::RookOnSemiopenFile => "Your rook took a semi-open file",
-            PieceSubTerm::TrappedRook => "Your rook escaped its trap",
-            PieceSubTerm::WeakQueen => "Your queen shook off pressure",
-        }
-    }
-
-    /// Heading when our side's sub-term worsened (bad for the user).
-    fn ours_worsened_heading(self) -> &'static str {
-        match self {
-            PieceSubTerm::Outposts => "Your knight lost its outpost",
-            PieceSubTerm::ReachableOutposts => "Your knight's outpost route closed",
-            PieceSubTerm::MinorBehindPawn => "Your minor lost its pawn cover",
-            PieceSubTerm::KingProtector => "Your minor drifted away from the king",
-            PieceSubTerm::BishopPawns => "Your bishop is blocked by its own pawns",
-            PieceSubTerm::LongDiagonalBishop => "Your bishop left the long diagonal",
-            PieceSubTerm::RookOnQueenFile => "Your rook left the queen's file",
-            PieceSubTerm::RookOnOpenFile => "Your rook left the open file",
-            PieceSubTerm::RookOnSemiopenFile => "Your rook left a semi-open file",
-            PieceSubTerm::TrappedRook => "Your rook got trapped",
-            PieceSubTerm::WeakQueen => "Your queen is under x-ray pressure",
-        }
-    }
-
-    /// Heading when their side's sub-term improved (bad for the user).
-    fn theirs_improved_heading(self) -> &'static str {
-        match self {
-            PieceSubTerm::Outposts => "Opponent's knight reached an outpost",
-            PieceSubTerm::ReachableOutposts => "Opponent's knight has a route to an outpost",
-            PieceSubTerm::MinorBehindPawn => "Opponent's minor gained pawn cover",
-            PieceSubTerm::KingProtector => "Opponent's minor rallied to defend their king",
-            PieceSubTerm::BishopPawns => "Opponent's bishop freed itself from its pawn chain",
-            PieceSubTerm::LongDiagonalBishop => "Opponent's bishop took the long diagonal",
-            PieceSubTerm::RookOnQueenFile => "Opponent's rook reached your queen's file",
-            PieceSubTerm::RookOnOpenFile => "Opponent's rook took the open file",
-            PieceSubTerm::RookOnSemiopenFile => "Opponent's rook took a semi-open file",
-            PieceSubTerm::TrappedRook => "Opponent's rook escaped its trap",
-            PieceSubTerm::WeakQueen => "Opponent's queen shook off pressure",
-        }
-    }
-
-    /// Heading when their side's sub-term worsened (good for the user).
-    fn theirs_worsened_heading(self) -> &'static str {
-        match self {
-            PieceSubTerm::Outposts => "You denied the opponent's knight an outpost",
-            PieceSubTerm::ReachableOutposts => "You closed the opponent's outpost route",
-            PieceSubTerm::MinorBehindPawn => "You stripped the opponent's pawn cover",
-            PieceSubTerm::KingProtector => "Opponent's minor drifted from their king",
-            PieceSubTerm::BishopPawns => "Opponent's bishop is blocked by their own pawns",
-            PieceSubTerm::LongDiagonalBishop => "Opponent's bishop left the long diagonal",
-            PieceSubTerm::RookOnQueenFile => "Opponent's rook left your queen's file",
-            PieceSubTerm::RookOnOpenFile => "Opponent's rook left the open file",
-            PieceSubTerm::RookOnSemiopenFile => "Opponent's rook left a semi-open file",
-            PieceSubTerm::TrappedRook => "You trapped the opponent's rook",
-            PieceSubTerm::WeakQueen => "You put the opponent's queen under x-ray pressure",
-        }
-    }
-
-    /// Short prose explaining what this sub-term measures. Renders in
-    /// the card's expand-on-click detail.
-    fn detail(self) -> &'static str {
-        match self {
-            PieceSubTerm::Outposts => {
-                "An outpost is a square defended by your own pawn that the opponent's \
-                 pawns can't kick away. Knights and bishops are powerful on outposts \
-                 because no minor piece can dislodge them with a single move."
-            }
-            PieceSubTerm::ReachableOutposts => {
-                "Your knight is one move away from an outpost — a square defended by \
-                 your pawn that the opponent's pawns can't reach. Outposts are \
-                 strongest with a knight on them; this card means the route is open."
-            }
-            PieceSubTerm::MinorBehindPawn => {
-                "A minor piece directly behind one of your pawns is shielded from \
-                 captures along its file and tends to support pawn pushes."
-            }
-            PieceSubTerm::KingProtector => {
-                "Minor pieces lose a small bonus the further they sit from your own \
-                 king. Knights and bishops near home help shield the king from attacks."
-            }
-            PieceSubTerm::BishopPawns => {
-                "A bishop is penalised for each friendly pawn sitting on its color — \
-                 those pawns block the bishop's diagonals. Either trade the bishop or \
-                 push the pawns off its color."
-            }
-            PieceSubTerm::LongDiagonalBishop => {
-                "A bishop attacking both central squares (e4/e5 or d4/d5) along its \
-                 long diagonal exerts pressure on the center from a single piece."
-            }
-            PieceSubTerm::RookOnQueenFile => {
-                "A rook on the same file as the enemy queen exerts latent pressure \
-                 even with pawns in the way — when the file opens it becomes a tactic."
-            }
-            PieceSubTerm::RookOnOpenFile => {
-                "A rook on a file with no pawns of either color controls the entire \
-                 file. Open files are the rook's natural element."
-            }
-            PieceSubTerm::RookOnSemiopenFile => {
-                "A rook on a file with no friendly pawns but enemy pawns can pressure \
-                 those pawns directly — useful for attacking weak pawns."
-            }
-            PieceSubTerm::TrappedRook => {
-                "A rook stuck behind its own king after castling rights are gone has \
-                 almost no mobility. It blocks the king and contributes nothing."
-            }
-            PieceSubTerm::WeakQueen => {
-                "The queen sees a slider x-ray threat against it — a rook or bishop \
-                 aimed through one intervening piece. A discovered attack can win the \
-                 queen unless you defuse it."
-            }
-        }
-    }
-}
-
-/// Skip `BishopPawns` narration when bishop geometry didn't change on
-/// `side`. Without this filter, a central pawn push (1.e4 e5) that
-/// merely doubles the blocked-centre multiplier would fire phantom
-/// "bishop blocked by own pawns" cards on both sides — none of which
-/// describe anything a 1200-ELO student can act on. Mirrors the
-/// narration crate's `include_bishop_pawns`.
-fn include_sub_term(st: PieceSubTerm, bishop_geometry_changed: bool) -> bool {
-    st != PieceSubTerm::BishopPawns || bishop_geometry_changed
-}
+use crate::view::{RetrospectiveCategory, RetrospectiveItem, Sentiment};
 
 /// Capture-aware suppression flags built from the realized capture events,
-/// so the per-sub-term loop can drop cards whose term delta is an artifact
+/// so the per-claim loop can drop cards whose term delta is an artifact
 /// of a piece leaving the board (rather than a real repositioning).
 #[derive(Copy, Clone, Debug, Default)]
 pub(super) struct CaptureSuppression {
@@ -230,7 +38,7 @@ pub(super) struct CaptureSuppression {
     /// `true` when *our* ply-0 move was a capture made *by* a minor.
     /// The minor's "drift away from the king" is what enabled the
     /// capture; framing it as a cost mis-teaches. Drops the
-    /// `ours_worsened` direction only — improvements (a minor
+    /// `ours` worsened direction only — improvements (a minor
     /// rallying back to the king) still surface normally.
     pub(super) our_minor_capturing: bool,
     /// `true` when one of our rooks was captured. The trapped-rook
@@ -272,98 +80,224 @@ pub(super) fn capture_suppression(
     out
 }
 
+impl CaptureSuppression {
+    /// Whether a piece-placement claim should be dropped as a
+    /// capture-artifact rather than a real repositioning. Mirrors the
+    /// prior per-sub-term suppression, now keyed off the shared claim's
+    /// `(side, category, direction)`.
+    fn suppresses(&self, side: PlacementSide, category: PlacementCategory, worsened: bool) -> bool {
+        match (side, category) {
+            (PlacementSide::Mover, PlacementCategory::KingProtector) => {
+                // A captured minor "improves" its mates' king-distance by
+                // arithmetic; a minor capturing "drifts" only to make the
+                // capture — drop the worsened direction in that case.
+                self.ours_minor_captured || (self.our_minor_capturing && worsened)
+            }
+            (PlacementSide::Opponent, PlacementCategory::KingProtector) => {
+                self.theirs_minor_captured
+            }
+            (PlacementSide::Mover, PlacementCategory::TrappedRook) => self.ours_rook_captured,
+            (PlacementSide::Opponent, PlacementCategory::TrappedRook) => self.theirs_rook_captured,
+            _ => false,
+        }
+    }
+}
+
+/// Build the piece-placement cards for one analysed move. `perspective`
+/// selects "you" vs "they" and drives the student-POV sentiment colour.
 pub(super) fn build_pieces_positional_items(
     outcome: &PiecesPositionalOutcome,
     _root_stm: Color,
     kp_supp: CaptureSuppression,
+    perspective: Perspective,
 ) -> Vec<RetrospectiveItem> {
-    let mut items = Vec::new();
-
-    for st in PieceSubTerm::ALL {
-        // Our side.
-        if include_sub_term(st, outcome.ours_bishop_pawn_count_changed()) {
-            let delta = st.delta_mg(&outcome.ours_pre, &outcome.ours_post);
-            if delta.abs() >= PIECES_DELTA_THRESHOLD_CP {
-                let (heading, sentiment) = if delta > 0 {
-                    (st.ours_improved_heading(), Sentiment::Positive)
-                } else {
-                    (st.ours_worsened_heading(), Sentiment::Negative)
-                };
-                // King-protector capture-aware suppression. Two cases
-                // for our side:
-                //   - If one of our minors was just captured, the
-                //     remaining minors' average king-distance
-                //     "improved" purely by arithmetic — not a
-                //     defensive move. Drop in either direction.
-                //   - If our ply-0 capture was BY a minor, the "drift
-                //     away" variant misleadingly frames the
-                //     capture-enabling move as a cost. Drop only the
-                //     worsened direction; if the captor ends up
-                //     closer to our king (the engine likes the
-                //     square defensively), keep the improved card.
-                if st == PieceSubTerm::KingProtector {
-                    if kp_supp.ours_minor_captured {
-                        continue;
-                    }
-                    if kp_supp.our_minor_capturing && delta < 0 {
-                        continue;
-                    }
-                }
-                // A captured rook didn't "escape its trap" — its penalty
-                // just left the board with it. The material card already
-                // tells that story; this positional card would misnarrate.
-                if st == PieceSubTerm::TrappedRook && kp_supp.ours_rook_captured {
-                    continue;
-                }
-                items.push(RetrospectiveItem {
-                    category: RetrospectiveCategory::PiecePlacement,
-                    heading: heading.to_string(),
-                    summary: format!("{:+.2} pawns", delta as f32 / 100.0),
-                    detail: st.detail().to_string(),
-                    // User-POV delta: our improvement is positive for
-                    // us; our worsening is negative.
-                    score_delta_pawns: Some(delta as f32 / 100.0),
-                    sentiment,
-                    annotations: Vec::new(),
-                });
+    let ctx = PhrasingContext {
+        perspective,
+        locale: Locale::En,
+        verbosity: Verbosity::Normal,
+        reveal_moves: false,
+    };
+    pieces_positional_claims(outcome)
+        .iter()
+        .filter_map(|claim| {
+            let Claim::PiecePlacement {
+                side,
+                category,
+                direction,
+                ..
+            } = claim
+            else {
+                unreachable!("pieces_positional_claims always returns Claim::PiecePlacement");
+            };
+            let worsened = *direction == StructureDirection::Worsened;
+            if kp_supp.suppresses(*side, *category, worsened) {
+                return None;
             }
-        }
+            Some(pieces_item(claim, &ctx))
+        })
+        .collect()
+}
 
-        // Their side.
-        if include_sub_term(st, outcome.theirs_bishop_pawn_count_changed()) {
-            let delta = st.delta_mg(&outcome.theirs_pre, &outcome.theirs_post);
-            if delta.abs() >= PIECES_DELTA_THRESHOLD_CP {
-                let (heading, sentiment) = if delta > 0 {
-                    (st.theirs_improved_heading(), Sentiment::Negative)
-                } else {
-                    (st.theirs_worsened_heading(), Sentiment::Positive)
-                };
-                // Same KP capture-aware suppression for their side:
-                // if a minor of theirs came off the board, the
-                // delta is arithmetic — not their pieces "rallying."
-                if st == PieceSubTerm::KingProtector && kp_supp.theirs_minor_captured {
-                    continue;
-                }
-                // "Opponent's rook escaped its trap" must not fire when you
-                // just captured it — death is not an escape.
-                if st == PieceSubTerm::TrappedRook && kp_supp.theirs_rook_captured {
-                    continue;
-                }
-                items.push(RetrospectiveItem {
-                    category: RetrospectiveCategory::PiecePlacement,
-                    heading: heading.to_string(),
-                    summary: format!("{:+.2} pawns", delta as f32 / 100.0),
-                    detail: st.detail().to_string(),
-                    // User-POV delta: their improvement hurts us; their
-                    // worsening helps us — both flip sign vs. raw delta.
-                    score_delta_pawns: Some(-delta as f32 / 100.0),
-                    sentiment,
-                    annotations: Vec::new(),
-                });
-            }
+/// Turn one [`Claim::PiecePlacement`] into a card — prose from the
+/// translator, structured surface (sentiment, score chip, terse
+/// summary) computed here from the claim's payload.
+fn pieces_item(claim: &Claim, ctx: &PhrasingContext) -> RetrospectiveItem {
+    let phrasing = phrase(claim, ctx);
+    let Claim::PiecePlacement {
+        side,
+        category: _,
+        direction,
+        delta_mg,
+    } = claim
+    else {
+        unreachable!("pieces_positional_claims always returns Claim::PiecePlacement");
+    };
+
+    // The piece is the user's when the moving side is the user
+    // (Player + Mover); the player's POV is fixed here.
+    let piece_is_user = (*side == PlacementSide::Mover) == (ctx.perspective == Perspective::Player);
+
+    // Sentiment is "good for the user?": improving your own placement
+    // is good, improving the opponent's hurts you.
+    let sentiment = match (direction, piece_is_user) {
+        (StructureDirection::Improved, true) => Sentiment::Positive,
+        (StructureDirection::Worsened, true) => Sentiment::Negative,
+        (StructureDirection::Improved, false) => Sentiment::Negative,
+        (StructureDirection::Worsened, false) => Sentiment::Positive,
+    };
+
+    // User-POV score chip: the claim's `delta_mg` is side-relative
+    // (positive = that side improved). For the user's own side that maps
+    // straight through; for the opponent's it flips.
+    let score_delta_mg = if piece_is_user { *delta_mg } else { -*delta_mg };
+
+    // The translator's detail carries a parenthetical raw shift; the
+    // card already shows a numeric chip, so strip it for the body.
+    let detail = phrasing
+        .detail
+        .as_deref()
+        .map(strip_trailing_shift)
+        .unwrap_or_default();
+
+    RetrospectiveItem {
+        category: RetrospectiveCategory::PiecePlacement,
+        heading: phrasing.summary,
+        summary: format!("{:+.2} pawns", score_delta_mg as f32 / 100.0),
+        detail,
+        score_delta_pawns: Some(score_delta_mg as f32 / 100.0),
+        sentiment,
+        annotations: Vec::new(),
+    }
+}
+
+/// Drop the translator's trailing " (+0.30 this side)." shift clause —
+/// the card surfaces the same number in its own chip, so the prose body
+/// stays a clean concept explanation.
+fn strip_trailing_shift(detail: &str) -> String {
+    match detail.rfind(" (") {
+        Some(idx) if detail.trim_end().ends_with("this side).") => detail[..idx].to_string(),
+        _ => detail.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chess_tutor_engine::eval::PiecesBreakdown;
+    use chess_tutor_engine::types::Score;
+
+    fn pib_zero() -> PiecesBreakdown {
+        PiecesBreakdown {
+            outposts: Score::ZERO,
+            reachable_outposts: Score::ZERO,
+            minor_behind_pawn: Score::ZERO,
+            king_protector: Score::ZERO,
+            bishop_pawns: Score::ZERO,
+            long_diagonal_bishop: Score::ZERO,
+            rook_on_queen_file: Score::ZERO,
+            rook_on_open_file: Score::ZERO,
+            rook_on_semiopen_file: Score::ZERO,
+            trapped_rook: Score::ZERO,
+            weak_queen: Score::ZERO,
         }
     }
 
-    items
-}
+    fn outcome(
+        ours_pre: PiecesBreakdown,
+        ours_post: PiecesBreakdown,
+        theirs_pre: PiecesBreakdown,
+        theirs_post: PiecesBreakdown,
+    ) -> PiecesPositionalOutcome {
+        // Both sides' bishop geometry counted as changed (post != pre on
+        // the count), so non-suppression tests see every sub-term fire.
+        PiecesPositionalOutcome {
+            ours_pre,
+            ours_post,
+            theirs_pre,
+            theirs_post,
+            ours_bishop_pawn_count_pre: 0,
+            ours_bishop_pawn_count_post: 1,
+            theirs_bishop_pawn_count_pre: 0,
+            theirs_bishop_pawn_count_post: 1,
+        }
+    }
 
+    #[test]
+    fn our_outpost_claim_is_positive_with_translator_heading() {
+        let mut post = pib_zero();
+        post.outposts = Score::new(30, 0);
+        let o = outcome(pib_zero(), post, pib_zero(), pib_zero());
+        let cards = build_pieces_positional_items(&o, Color::White, CaptureSuppression::default(), Perspective::Player);
+        let card = cards
+            .iter()
+            .find(|c| c.heading == "Your knight reached an outpost")
+            .expect("an outpost card");
+        assert_eq!(card.sentiment, Sentiment::Positive);
+        assert_eq!(card.score_delta_pawns, Some(0.30));
+        // The shift clause must be stripped from the body.
+        assert!(!card.detail.contains("this side"), "body: {}", card.detail);
+    }
+
+    #[test]
+    fn denying_their_outpost_is_positive_opportunity() {
+        // Their outpost bonus dropped (worsened for them) → good for us.
+        let mut their_pre = pib_zero();
+        their_pre.outposts = Score::new(30, 0);
+        let o = outcome(pib_zero(), pib_zero(), their_pre, pib_zero());
+        let cards = build_pieces_positional_items(&o, Color::White, CaptureSuppression::default(), Perspective::Player);
+        let card = cards
+            .iter()
+            .find(|c| c.heading == "You denied the opponent's knight an outpost")
+            .expect("a denied-outpost card");
+        assert_eq!(card.sentiment, Sentiment::Positive);
+        // Their −0.30 flips to a +0.30 chip for us.
+        assert_eq!(card.score_delta_pawns, Some(0.30));
+    }
+
+    #[test]
+    fn captured_rook_does_not_narrate_escape() {
+        // Our trapped-rook penalty vanished (delta positive = improved),
+        // but it's because the rook was captured — suppress the card.
+        let mut pre = pib_zero();
+        pre.trapped_rook = Score::new(-40, 0);
+        let o = outcome(pre, pib_zero(), pib_zero(), pib_zero());
+        let supp = CaptureSuppression {
+            ours_rook_captured: true,
+            ..CaptureSuppression::default()
+        };
+        let cards = build_pieces_positional_items(&o, Color::White, supp, Perspective::Player);
+        assert!(
+            !cards.iter().any(|c| c.heading.contains("rook escaped")),
+            "captured rook must not read as an escape"
+        );
+    }
+
+    #[test]
+    fn below_threshold_yields_no_card() {
+        let mut post = pib_zero();
+        post.outposts = Score::new(10, 0);
+        let o = outcome(pib_zero(), post, pib_zero(), pib_zero());
+        assert!(build_pieces_positional_items(&o, Color::White, CaptureSuppression::default(), Perspective::Player)
+            .is_empty());
+    }
+}

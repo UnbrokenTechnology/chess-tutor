@@ -10,7 +10,8 @@ use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::traps::{TrapEvent, TrapHit, TrapThreatened};
 use chess_tutor_engine::types::{Color, Move, Value};
-use chess_tutor_narration::{format_retrospective, NarrationOptions};
+use chess_tutor_teaching::phrasing::Perspective;
+use chess_tutor_teaching::{format_retrospective, NarrationOptions};
 use chess_tutor_ui::session::{HistoryEntry, RetrospectiveResult};
 use chess_tutor_ui::view::BoardView;
 use chess_tutor_ui::NoisePickInfo;
@@ -27,7 +28,15 @@ pub(super) fn print_retrospective(
     explain_best: bool,
 ) -> io::Result<()> {
     let opts = NarrationOptions { explain_best };
-    let text = format_retrospective(pre_move_pos, &retro.analyses, retro.user_move, &opts);
+    // The CLI prints retrospectives for the user's own moves; the engine's
+    // moves print via `print_engine_move`. Player perspective here.
+    let text = format_retrospective(
+        pre_move_pos,
+        &retro.analyses,
+        retro.user_move,
+        &opts,
+        Perspective::Player,
+    );
     out.write_all(text.as_bytes())?;
     writeln!(
         out,

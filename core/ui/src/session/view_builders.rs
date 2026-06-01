@@ -71,6 +71,46 @@ pub(crate) fn review_headline_for(
 /// session.
 const EVAL_BAR_SATURATION_CP: f32 = 1000.0;
 
+/// Map the eval-bar's white-POV score to a `(fill_ratio, label)`.
+///
+/// The score is the analysis of the move that *reached* the viewed
+/// position, so it is rooted **one ply before** that position. For a
+/// continuous cp score that one-ply offset is invisible. For a **mate**
+/// score it is not: `MATE − |v|` is the plies-to-mate from the analysis
+/// root, so the distance from the position the bar actually labels is
+/// one ply less (the move already on the board). We therefore drop that
+/// ply and render the result in **moves** (`M{n}`), matching the
+/// retrospective headline's `#n` — not the raw plies the old formula
+/// showed. When the dropped ply *was* the mating move, the viewed
+/// position is checkmate itself: show a bare `#` and let the game-over
+/// text carry the result rather than printing a misleading "M0".
+///
+/// (This corrects only the display off-by-one + plies-vs-moves; the
+/// separate issue that independent retrospective searches can disagree
+/// on the true mate distance — the MultiPV-around-mate pathology — is
+/// tracked separately and not addressed here.)
+fn eval_bar_fill_and_label(score: Option<Value>) -> (f32, String) {
+    match score {
+        Some(v) if v.abs() >= Value::MATE_IN_MAX_PLY => {
+            let plies_here = (Value::MATE.0 - v.0.abs()) - 1;
+            let sign = if v.0 > 0 { "" } else { "-" };
+            let ratio = if v.0 > 0 { 1.0 } else { 0.0 };
+            let label = if plies_here <= 0 {
+                format!("{sign}#")
+            } else {
+                format!("{sign}M{}", (plies_here + 1) / 2)
+            };
+            (ratio, label)
+        }
+        Some(v) => {
+            let ratio = (v.0 as f32 / EVAL_BAR_SATURATION_CP).clamp(-1.0, 1.0);
+            let pawns = v.0 as f32 / Value::PAWN_EG.0 as f32;
+            (0.5 + 0.5 * ratio, format!("{:+.2}", pawns))
+        }
+        None => (0.5, String::from("—")),
+    }
+}
+
 /// Format a score for display in the hint panel. Root-stm POV is
 /// the natural reading there ("if you play this, you'll be at
 /// +0.30").
@@ -204,22 +244,7 @@ impl Session {
     }
 
     pub fn build_eval_bar_view(&self) -> EvalBarView {
-        let score = self.viewed_eval_white_pov();
-        let (white_ratio, label) = match score {
-            Some(v) if v.abs() >= Value::MATE_IN_MAX_PLY => {
-                if v.0 > 0 {
-                    (1.0, format!("M{}", (Value::MATE.0 - v.0).max(1)))
-                } else {
-                    (0.0, format!("-M{}", (Value::MATE.0 + v.0).max(1)))
-                }
-            }
-            Some(v) => {
-                let ratio = (v.0 as f32 / EVAL_BAR_SATURATION_CP).clamp(-1.0, 1.0);
-                let pawns = v.0 as f32 / Value::PAWN_EG.0 as f32;
-                (0.5 + 0.5 * ratio, format!("{:+.2}", pawns))
-            }
-            None => (0.5, String::from("—")),
-        };
+        let (white_ratio, label) = eval_bar_fill_and_label(self.viewed_eval_white_pov());
         EvalBarView { white_ratio, label }
     }
 
@@ -279,11 +304,16 @@ impl Session {
         let Some((entry_idx, entry)) = self.panel_entry_with_index() else {
             return out;
         };
-        if !self.is_user_move(entry) {
-            return out;
-        }
         let Some(result) = &entry.retrospective else {
             return out;
+        };
+        // Same card path for user and engine moves — only the perspective
+        // differs (the board annotations themselves are perspective-neutral
+        // geometry; perspective only flips which side a card frames).
+        let perspective = if self.is_user_move(entry) {
+            chess_tutor_teaching::phrasing::Perspective::Player
+        } else {
+            chess_tutor_teaching::phrasing::Perspective::Opponent
         };
         let pre = self.pre_move_position(entry_idx);
         let prior_move = self.prior_move_for(entry_idx);
@@ -294,6 +324,7 @@ impl Session {
             self.show_all_signals,
             self.learning.reveal_best_moves,
             prior_move,
+            perspective,
         );
         if let Some(ann) = vm.headline.best_move_annotation {
             out.push(ann);
@@ -385,39 +416,40 @@ impl Session {
             };
         };
         let viewing_back_san = (!self.is_viewing_live()).then(|| entry.san.clone());
-        let kind = if self.is_user_move(entry) {
-            match &entry.retrospective {
-                Some(result) => {
-                    let pre = self.pre_move_position(entry_index);
-                    let prior_move = self.prior_move_for(entry_index);
-                    let view_model = crate::retrospective_view::build_retrospective_view(
-                        &pre,
-                        &result.analyses,
-                        result.user_move,
-                        self.show_all_signals,
-                        self.learning.reveal_best_moves,
-                        prior_move,
-                    );
-                    let selected_item = match self.selected_retrospective {
-                        Some((h, i)) if h == entry_index => Some(i),
-                        _ => None,
-                    };
-                    RetrospectiveKind::UserMoveReady {
-                        view_model: Box::new(view_model),
-                        selected_item,
-                    }
-                }
-                None => RetrospectiveKind::UserMoveAnalyzing,
-            }
-        } else if let Some(info) = &entry.engine_info {
-            RetrospectiveKind::EngineMove {
-                san: entry.san.clone(),
-                eval_pawns: info.score_white_pov.0 as f32 / Value::PAWN_EG.0 as f32,
-                depth: info.depth,
-                elapsed_ms: info.elapsed.as_millis(),
-            }
+        // Both user and engine moves are now analysed retrospectively and
+        // rendered through the *same* card path — only the perspective
+        // differs (`Player` for the user's own moves, `Opponent` for the
+        // engine's). A move whose retrospective worker job hasn't returned
+        // yet shows the analysing spinner regardless of who moved.
+        let perspective = if self.is_user_move(entry) {
+            chess_tutor_teaching::phrasing::Perspective::Player
         } else {
-            RetrospectiveKind::EngineInfoMissing
+            chess_tutor_teaching::phrasing::Perspective::Opponent
+        };
+        let kind = match &entry.retrospective {
+            Some(result) => {
+                let pre = self.pre_move_position(entry_index);
+                let prior_move = self.prior_move_for(entry_index);
+                let view_model = crate::retrospective_view::build_retrospective_view(
+                    &pre,
+                    &result.analyses,
+                    result.user_move,
+                    self.show_all_signals,
+                    self.learning.reveal_best_moves,
+                    prior_move,
+                    perspective,
+                );
+                let selected_item = match self.selected_retrospective {
+                    Some((h, i)) if h == entry_index => Some(i),
+                    _ => None,
+                };
+                RetrospectiveKind::MoveReady {
+                    perspective,
+                    view_model: Box::new(view_model),
+                    selected_item,
+                }
+            }
+            None => RetrospectiveKind::Analyzing,
         };
         RetrospectivePanelView {
             game_outcome,
@@ -503,3 +535,7 @@ impl Session {
         Some(NewGameDialogView { form, first_launch })
     }
 }
+
+#[cfg(test)]
+#[path = "view_builders_tests.rs"]
+mod tests;

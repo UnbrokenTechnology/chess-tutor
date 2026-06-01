@@ -346,8 +346,8 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         depth: u32,
         /// Multi-PV breadth per run. Defaults to the retrospective's
-        /// `RETROSPECTIVE_MULTI_PV` (3).
-        #[arg(long, default_value_t = 3)]
+        /// `RETROSPECTIVE_MULTI_PV` (2).
+        #[arg(long, default_value_t = 2)]
         multi_pv: usize,
         /// Number of threads. Defaults to 8 — typical Lazy-SMP load on
         /// the desktop's `available_parallelism()` default.

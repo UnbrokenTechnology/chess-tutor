@@ -9,7 +9,8 @@ name = "chess_tutor_ui"
 
 [dependencies]
 chess-tutor-engine = { path = "../engine" }
-# Note: no chess-tutor-narration dep. Worker returns raw MoveAnalysis;
-# each renderer (desktop, CLI, future mobile) calls format_retrospective
-# itself with its own NarrationOptions. Keeps narration as "the text
-# renderer" — same conceptual layer as draw::board, not a shared dep.
+# The retrospective view consumes the shared Claim IR + translator
+# (`claim` / `phrasing`) from chess-tutor-teaching so the GUI and CLI
+# render headline/category prose through one perspective-correct
+# translator instead of two drifting copies (PLAN decision A/B).
+chess-tutor-teaching = { path = "../teaching" }

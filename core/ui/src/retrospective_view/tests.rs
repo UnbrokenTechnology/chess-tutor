@@ -44,7 +44,7 @@
         // the view model.
         let user_move = analyses[0].mv;
         let pre = Position::startpos();
-        let vm = build_retrospective_view(&pre, &analyses, user_move, false, false, None);
+        let vm = build_retrospective_view(&pre, &analyses, user_move, false, false, None, chess_tutor_teaching::phrasing::Perspective::Player);
         assert!(!vm.headline.user_san.is_empty());
         assert!(!vm.headline.verdict_label.is_empty());
         assert!(!vm.headline.user_score.is_empty());
@@ -78,7 +78,7 @@
             analyses.iter().any(|a| a.mv == mating_move),
             "force_include should have analyzed the mating move"
         );
-        let vm = build_retrospective_view(&pre, &analyses, mating_move, false, false, None);
+        let vm = build_retrospective_view(&pre, &analyses, mating_move, false, false, None, chess_tutor_teaching::phrasing::Perspective::Player);
         assert!(!vm.headline.user_san.is_empty(), "headline still populated");
         assert!(
             vm.items.is_empty(),
@@ -109,7 +109,7 @@
             chess_tutor_engine::types::Square::A2,
         );
         let pre = Position::startpos();
-        let vm = build_retrospective_view(&pre, &analyses, bogus, false, false, None);
+        let vm = build_retrospective_view(&pre, &analyses, bogus, false, false, None, chess_tutor_teaching::phrasing::Perspective::Player);
         assert!(vm.headline.user_san.is_empty());
         assert!(vm.items.is_empty());
     }
@@ -138,7 +138,12 @@
             last_ply: 14,
         };
         let pre = Position::startpos();
-        let item = build_material_item(&pre, &outcome, Color::White);
+        let item = build_material_item(
+            &pre,
+            &outcome,
+            Color::White,
+            chess_tutor_teaching::phrasing::Perspective::Player,
+        );
         assert!(
             item.is_none(),
             "ply-15 capture must not drive a material card, got {item:?}"
@@ -180,8 +185,13 @@
             last_ply: 1,
         };
         let pre = Position::startpos();
-        let item = build_material_item(&pre, &outcome, Color::White)
-            .expect("two ply-0+ply-1 captures must produce a card");
+        let item = build_material_item(
+            &pre,
+            &outcome,
+            Color::White,
+            chess_tutor_teaching::phrasing::Perspective::Player,
+        )
+        .expect("two ply-0+ply-1 captures must produce a card");
         assert_eq!(item.heading, "Even trade");
         // Score-delta chip suppressed because point parity is even.
         assert!(item.score_delta_pawns.is_none());
@@ -440,7 +450,12 @@
             user.pv.len() >= 2,
             "expected at least one opponent reply in PV"
         );
-        let items = build_forced_consequences_items(user, &pre, Color::White);
+        let items = build_forced_consequences_items(
+            user,
+            &pre,
+            Color::White,
+            chess_tutor_teaching::phrasing::Perspective::Player,
+        );
         assert!(
             items.iter().any(|it| it.heading.contains("doubled pawns")),
             "expected a 'doubled pawns' forced-consequences card after Bxh6, got: {:?}",
@@ -466,7 +481,12 @@
             pre_score: chess_tutor_engine::types::Value::ZERO,
             term_deltas: Vec::new(),
         };
-        let items = build_forced_consequences_items(&user, &pre, Color::White);
+        let items = build_forced_consequences_items(
+            &user,
+            &pre,
+            Color::White,
+            chess_tutor_teaching::phrasing::Perspective::Player,
+        );
         assert!(items.is_empty(), "no PV reply => no card");
     }
 
@@ -623,9 +643,16 @@
             last_ply: 1,
         };
         let pre = Position::startpos();
-        let item = build_material_item(&pre, &outcome, Color::White)
-            .expect("R-for-B is a card");
-        assert_eq!(item.heading, "You won material");
+        let item = build_material_item(
+            &pre,
+            &outcome,
+            Color::White,
+            chess_tutor_teaching::phrasing::Perspective::Player,
+        )
+        .expect("R-for-B is a card");
+        // Both sides captured, so the swing reads as the points ledger:
+        // White won a rook (5) and gave back a bishop (3) → net +2.
+        assert_eq!(item.heading, "You won 2 points (rook for bishop)");
         assert!(item.score_delta_pawns.is_some());
     }
 
@@ -655,7 +682,12 @@
             last_ply: 1,
         };
         let pre = Position::startpos();
-        let item = build_material_item(&pre, &outcome, Color::White);
+        let item = build_material_item(
+            &pre,
+            &outcome,
+            Color::White,
+            chess_tutor_teaching::phrasing::Perspective::Player,
+        );
         assert!(
             item.is_none(),
             "opponent-only realized capture is a hang — threats card handles it; \
@@ -663,19 +695,3 @@
         );
     }
 
-    #[test]
-    fn capitalize_handles_empty_and_unicode() {
-        assert_eq!(capitalize(""), "");
-        assert_eq!(capitalize("knight"), "Knight");
-    }
-
-    #[test]
-    fn join_with_and_handles_zero_one_two_three() {
-        assert_eq!(join_with_and(&[]), "");
-        assert_eq!(join_with_and(&["a".into()]), "a");
-        assert_eq!(join_with_and(&["a".into(), "b".into()]), "a and b");
-        assert_eq!(
-            join_with_and(&["a".into(), "b".into(), "c".into()]),
-            "a, b, and c"
-        );
-    }

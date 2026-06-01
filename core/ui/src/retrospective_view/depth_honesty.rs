@@ -1,25 +1,29 @@
 //! Silent-sequencing depth-honesty note (PLAN §4.3).
 //!
+//! The prose (summary + detail, with the "you" / "they" reframe) is
+//! produced by the shared teaching translator ([`chess_tutor_teaching`])
+//! from a [`Claim::DepthHonesty`]; the shared salience (the
+//! silent-sequencing gate via the engine
+//! [`chess_tutor_engine::analysis::is_silent_sequencing`]) lives in
+//! [`depth_honesty_claim`]. This builder owns only the *structured* card
+//! surface the translator deliberately doesn't carry — the category, the
+//! fixed heading, and the (neutral) sentiment.
+//!
 //! Split out of `retrospective_view`; assembled by
 //! [`super::build_retrospective_view`].
 //!
 //! When a move the engine hates qualifies as **silent sequencing** — the
 //! gap is invisible at human depth, large at full depth, and no detector
-//! fires (see [`chess_tutor_engine::analysis::is_silent_sequencing`] and
-//! the [`silent-sequencing-after-qc8`](teaching-positions/silent-sequencing-after-qc8.md)
-//! case) — the retrospective must be **honest about its own limits**: show
-//! the visible static-counting facts and say plainly that the reason the
-//! move is worse is beyond practical calculation depth. No "blunder"
-//! stamp, no fabricated mechanism. Lying about a mechanism is worse than
-//! admitting we can't explain it.
-//!
-//! The note is intentionally narrow: it only fires on a move that already
-//! tripped the bad-eval pipeline (`best.mv != user.mv` with a real gap),
-//! so the bounded two-depth search inside `is_silent_sequencing` runs
-//! rarely.
+//! fires — the retrospective must be **honest about its own limits**: no
+//! "blunder" stamp, no fabricated mechanism. Lying about a mechanism is
+//! worse than admitting we can't explain it.
 
-use chess_tutor_engine::analysis::{is_silent_sequencing, MoveAnalysis, PriorMove};
+use chess_tutor_engine::analysis::{MoveAnalysis, PriorMove};
 use chess_tutor_engine::position::Position;
+use chess_tutor_engine::types::Color;
+
+use chess_tutor_teaching::claim::depth_honesty_claim;
+use chess_tutor_teaching::phrasing::{phrase, Locale, Perspective, PhrasingContext, Verbosity};
 
 use crate::view::{RetrospectiveCategory, RetrospectiveItem, Sentiment};
 
@@ -29,32 +33,32 @@ use crate::view::{RetrospectiveCategory, RetrospectiveItem, Sentiment};
 /// `best` / `user` are the engine's preferred move and the user's move
 /// from the same root; `pre_move_pos` is the position they were played
 /// from; `prior_move` feeds the detector chain's recapture guard.
+/// `root_stm` is the side that moved.
+///
+/// `perspective` selects "you" vs "they" in the translator's prose.
 pub(super) fn build_depth_honesty_item(
     pre_move_pos: &Position,
     best: &MoveAnalysis,
     user: &MoveAnalysis,
+    root_stm: Color,
     prior_move: Option<PriorMove>,
+    perspective: Perspective,
 ) -> Option<RetrospectiveItem> {
-    if best.mv == user.mv {
-        return None;
-    }
-    // Deep gap from the already-searched analyses (root-STM POV cp).
-    let deep_gap_cp = best.score.0 - user.score.0;
-    if !is_silent_sequencing(pre_move_pos, user.mv, best.mv, deep_gap_cp, prior_move) {
-        return None;
-    }
+    let claim = depth_honesty_claim(pre_move_pos, best, user, root_stm, prior_move)?;
+    let ctx = PhrasingContext {
+        perspective,
+        locale: Locale::En,
+        verbosity: Verbosity::Normal,
+        reveal_moves: false,
+    };
+    let phrasing = phrase(&claim, &ctx);
     Some(RetrospectiveItem {
         category: RetrospectiveCategory::Secondary,
+        // Fixed heading (the renderer / tests key on it); the translator's
+        // summary carries the full perspective-correct sentence.
         heading: "No shorter lesson here".to_string(),
-        summary: "the engine sees trouble several moves out — beyond practical calculation depth"
-            .to_string(),
-        detail:
-            "The engine evaluates this as worse than its top choice, but the difference doesn't \
-             resolve until well past the depth a person can calculate over the board, and no \
-             tactic, pin, fork, or loose piece explains it. This isn't a move you should feel \
-             you missed — there isn't a shorter, teachable reason. Not every move the engine \
-             dislikes has a lesson a human could have used."
-                .to_string(),
+        summary: phrasing.summary,
+        detail: phrasing.detail.unwrap_or_default(),
         score_delta_pawns: None,
         sentiment: Sentiment::Neutral,
         annotations: Vec::new(),
@@ -93,10 +97,9 @@ mod tests {
         let (pre, analyses, user_mv) = analyses_for(QC8_FEN, "Qc8");
         let best = &analyses[0];
         let user = analyses.iter().find(|a| a.mv == user_mv).unwrap();
-        let item = build_depth_honesty_item(&pre, best, user, None)
+        let item = build_depth_honesty_item(&pre, best, user, Color::Black, None, Perspective::Player)
             .expect("…Qc8 must produce a depth-honesty note");
         let blob = format!("{} {} {}", item.heading, item.summary, item.detail).to_lowercase();
-        // No blunder stamp; no fabricated mechanism.
         assert!(!blob.contains("blunder"), "must not stamp blunder: {blob}");
         assert!(!blob.contains("you walked into"), "no fake walked-into: {blob}");
         assert!(blob.contains("calculation depth"));
@@ -106,8 +109,10 @@ mod tests {
     fn silent_when_user_played_best() {
         let (pre, analyses, _) = analyses_for(QC8_FEN, "Be5");
         let best = &analyses[0];
-        // Pretend the user played the best move.
-        assert!(build_depth_honesty_item(&pre, best, best, None).is_none());
+        assert!(
+            build_depth_honesty_item(&pre, best, best, Color::Black, None, Perspective::Player)
+                .is_none()
+        );
     }
 }
 
@@ -132,10 +137,17 @@ mod integration_check {
             ..SearchParams::default()
         });
         let pre = Position::from_fen(fen).unwrap();
-        let vm = build_retrospective_view(&pre, &analyses, qc8, false, false, None);
+        let vm = build_retrospective_view(
+            &pre,
+            &analyses,
+            qc8,
+            false,
+            false,
+            None,
+            chess_tutor_teaching::phrasing::Perspective::Player,
+        );
         let has_depth_honesty = vm.items.iter().any(|i| i.heading == "No shorter lesson here");
         assert!(has_depth_honesty, "qc8 view must carry the depth-honesty note");
-        // No fabricated mechanism / blunder framing.
         for it in &vm.items {
             let blob = format!("{} {}", it.heading, it.detail).to_lowercase();
             assert!(!blob.contains("you walked into"), "no walked-into card on qc8: {}", it.heading);

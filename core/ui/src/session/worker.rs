@@ -69,6 +69,47 @@ pub(crate) fn log_noise_pick_to_stderr(
 }
 
 impl Session {
+    /// Queue an analytical retrospective for an already-applied engine
+    /// move at `target_index` (book / wild / search — all of them).
+    ///
+    /// This mirrors [`Session::apply_user_move`]'s retrospective job: it
+    /// roots the search at the *pre-move* position and force-includes the
+    /// move the engine actually chose, at `ANALYTICAL_DEPTH` with
+    /// `eval_mask: EMPTY` and multi-PV — i.e. the unbiased analytical
+    /// config, independent of the bot's play depth / mask / noise. The
+    /// result is graded **as if a human played it** (no "book" / "wild"
+    /// labels ever surface — that's a load-bearing non-goal), and it fills
+    /// the eval/verdict gap for opening-book and wild moves that carry no
+    /// `engine_info`. Only fires when `auto_retrospective` is on, matching
+    /// the user-move path.
+    pub(crate) fn queue_engine_move_retrospective(&mut self, target_index: usize) {
+        if !self.auto_retrospective {
+            return;
+        }
+        let Some(entry) = self.history.get(target_index) else {
+            return;
+        };
+        let engine_move = entry.mv;
+        let pre_move_pos = self.pre_move_position(target_index);
+        // History keys *before* the pre-move position. `position_keys`
+        // currently ends with the post-move key (the move is already
+        // applied), so drop it and let `game_history_for_search` drop the
+        // pre-move position's own key.
+        let pre_move_history = if self.position_keys.is_empty() {
+            Vec::new()
+        } else {
+            game_history_for_search(&self.position_keys[..self.position_keys.len() - 1])
+        };
+        let _ = self.worker_tx.send(WorkerJob::Retrospective {
+            pre_move_pos: Box::new(pre_move_pos),
+            user_move: engine_move,
+            depth: self.retrospective_depth,
+            game_history: pre_move_history,
+            gen: self.gen,
+            target_index,
+        });
+    }
+
     pub(crate) fn maybe_queue_engine_search(&mut self) {
         // Loop because in self-play (EngineMode::Both) consecutive book
         // moves can fire synchronously — after each one it's *still*
@@ -121,6 +162,10 @@ impl Session {
                 // we want the announcement to print fresh.
                 self.book_out_announced = false;
                 self.apply_move(book_pick.mv);
+                // Book moves carry no `engine_info` and were never graded;
+                // analyse them retrospectively just like any other move so
+                // the eval bar + verdict don't gap out on book openings.
+                self.queue_engine_move_retrospective(self.history.len() - 1);
                 continue;
             }
             // No book match on this position. Announce once per
@@ -209,6 +254,7 @@ impl Session {
                 }
                 let root_stm = self.position.side_to_move();
                 self.apply_move(mv);
+                let engine_move_index = self.history.len() - 1;
                 // Wild picks have no SearchLine (no search for that
                 // exact move); the per-move score badge stays empty.
                 if let Some(line) = line {
@@ -230,6 +276,13 @@ impl Session {
                 if let Some(entry) = self.history.last_mut() {
                     entry.noise_pick = noise_pick;
                 }
+                // Analyse the engine's move retrospectively (unbiased
+                // config) so it gets an honest verdict + eval-bar score,
+                // exactly like a user move. The `engine_info` above is the
+                // play-time score (play depth, possibly masked / a noise
+                // pick) and is only a transient eval-bar placeholder; the
+                // retrospective analysis is the source of truth.
+                self.queue_engine_move_retrospective(engine_move_index);
                 // Engine just moved — any open Hint was for the prior
                 // position, so close it.
                 self.close_hint();

@@ -377,7 +377,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chess-tutor-engine",
- "chess-tutor-narration",
+ "chess-tutor-teaching",
  "chess-tutor-ui",
  "clap",
  "dhat",
@@ -390,7 +390,7 @@ name = "chess-tutor-desktop"
 version = "0.1.0"
 dependencies = [
  "chess-tutor-engine",
- "chess-tutor-narration",
+ "chess-tutor-teaching",
  "chess-tutor-ui",
  "eframe",
 ]
@@ -400,7 +400,7 @@ name = "chess-tutor-engine"
 version = "0.1.0"
 
 [[package]]
-name = "chess-tutor-narration"
+name = "chess-tutor-teaching"
 version = "0.1.0"
 dependencies = [
  "chess-tutor-engine",
@@ -411,6 +411,7 @@ name = "chess-tutor-ui"
 version = "0.1.0"
 dependencies = [
  "chess-tutor-engine",
+ "chess-tutor-teaching",
 ]
 
 [[package]]

@@ -46,6 +46,8 @@ use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Move, Square};
 
+use chess_tutor_teaching::phrasing::Perspective;
+
 use crate::view::{
     RetrospectiveItem, RetrospectiveViewModel,
 };
@@ -92,6 +94,16 @@ use helpers::*;
 /// used by the tactic detector's hanging-capture recapture guard so a
 /// trade isn't mis-labelled "free piece." Pass `None` at game start /
 /// for ad-hoc analyses without history; the guard simply isn't applied.
+///
+/// `perspective` selects "you" vs "they": `Player` when the user made
+/// the move (`moved_by == user_color`), `Opponent` when the engine /
+/// other side did. It threads into every per-card builder's
+/// [`PhrasingContext`] so opponent-move retrospectives reframe to the
+/// student's benefit (an opponent's blunder is *your* chance). The
+/// builders' sentiment colouring derives from the same perspective, so
+/// a card stays green/red from the *student's* point of view regardless
+/// of who moved. The translator (`core/teaching`) is the single home for
+/// the reframe; this layer only carries the perspective through.
 pub fn build_retrospective_view(
     pre_move_pos: &Position,
     analyses: &[MoveAnalysis],
@@ -99,6 +111,7 @@ pub fn build_retrospective_view(
     show_all: bool,
     reveal_best_moves: bool,
     prior_move: Option<PriorMove>,
+    perspective: Perspective,
 ) -> RetrospectiveViewModel {
     if analyses.is_empty() {
         return RetrospectiveViewModel::default();
@@ -117,7 +130,19 @@ pub fn build_retrospective_view(
     let verdict =
         user.classify_with_material(best.score, material_outcome.net_mg_cp, best_material.net_mg_cp);
 
-    let headline = build_headline(pre_move_pos, best, user, verdict, root_stm, reveal_best_moves);
+    // `perspective` is threaded from the caller: `Player` for the user's
+    // own moves, `Opponent` for engine moves. The translator owns the
+    // "you" / "they" reframe; here we just carry the perspective through.
+    let headline = build_headline(
+        pre_move_pos,
+        analyses,
+        best,
+        user,
+        verdict,
+        root_stm,
+        perspective,
+        reveal_best_moves,
+    );
 
     // Game-over short-circuit: if the user's move leaves the
     // opponent with no legal replies (checkmate or stalemate), the
@@ -149,7 +174,12 @@ pub fn build_retrospective_view(
     // the student sees *why* the move was best — same intent as
     // narration's `explain_best = true` default.
 
-    if let Some(it) = build_material_item(pre_move_pos, &material_outcome, root_stm) {
+    if let Some(it) = build_material_item(
+        pre_move_pos,
+        &material_outcome,
+        root_stm,
+        perspective,
+    ) {
         items.push(it);
     }
 
@@ -164,7 +194,7 @@ pub fn build_retrospective_view(
         .map(|ev| (ev.square, ev.captured_piece.classical_points()))
         .collect();
     let threats_outcome = compute_threats_outcome(user, pre_move_pos, root_stm);
-    for it in build_threat_items(&threats_outcome, &user_captures_by_square) {
+    for it in build_threat_items(&threats_outcome, &user_captures_by_square, perspective) {
         items.push(it);
     }
     if !threats_items_empty(&threats_outcome) {
@@ -182,7 +212,7 @@ pub fn build_retrospective_view(
     }
 
     let king_safety_outcome = compute_king_safety_outcome(user, pre_move_pos, root_stm);
-    for it in build_king_safety_items(&king_safety_outcome) {
+    for it in build_king_safety_items(&king_safety_outcome, perspective) {
         items.push(it);
         consumed_terms.extend_from_slice(&[
             TermId::KingPawnShield,
@@ -193,7 +223,7 @@ pub fn build_retrospective_view(
     }
 
     let pawn_structure_outcome = compute_pawn_structure_outcome(user, pre_move_pos, root_stm);
-    if let Some(it) = build_pawn_structure_item(&pawn_structure_outcome) {
+    if let Some(it) = build_pawn_structure_item(&pawn_structure_outcome, perspective) {
         items.push(it);
         consumed_terms.extend_from_slice(&[
             TermId::PawnsConnected,
@@ -209,7 +239,7 @@ pub fn build_retrospective_view(
     // opponent's best reply *creates on their side*. Cheap walk one
     // ply past the user's move; surfaces e.g. doubled h-pawns after
     // gxh6.
-    for it in build_forced_consequences_items(user, pre_move_pos, root_stm) {
+    for it in build_forced_consequences_items(user, pre_move_pos, root_stm, perspective) {
         items.push(it);
     }
 
@@ -225,6 +255,7 @@ pub fn build_retrospective_view(
         root_stm,
         prior_move,
         reveal_best_moves,
+        perspective,
     ) {
         items.push(it);
     }
@@ -232,14 +263,14 @@ pub fn build_retrospective_view(
     // Desperado-aware material narration (PLAN §4): when a doomed piece
     // cashes a pawn with check before it falls, narrate "−X becomes
     // −X+pawn", not "you're fine".
-    if let Some(it) = build_desperado_item(pre_move_pos, user, root_stm) {
+    if let Some(it) = build_desperado_item(pre_move_pos, user, root_stm, perspective) {
         items.push(it);
     }
 
     // Static-vs-search override note (PLAN §4.2): when the term ledger and
     // the search rank the user's move and the engine's pick in opposite
     // directions, say so — never invent a positional justification.
-    if let Some(it) = build_override_note_item(best, user, root_stm) {
+    if let Some(it) = build_override_note_item(best, user, root_stm, perspective) {
         items.push(it);
     }
 
@@ -249,13 +280,14 @@ pub fn build_retrospective_view(
     // human-findable lesson, so the depth-honesty fallback below stays
     // quiet (the two are mutually exclusive: one says "here's the
     // mechanism", the other says "there's no shorter lesson").
-    let had_initiative_note =
-        if let Some(it) = build_initiative_item(pre_move_pos, best, user, root_stm, prior_move) {
-            items.push(it);
-            true
-        } else {
-            false
-        };
+    let had_initiative_note = if let Some(it) =
+        build_initiative_item(pre_move_pos, best, user, root_stm, prior_move, perspective)
+    {
+        items.push(it);
+        true
+    } else {
+        false
+    };
 
     // Silent-sequencing depth-honesty note (PLAN §4.3): when the move is
     // worse only beyond practical calculation depth and no detector fires,
@@ -263,13 +295,15 @@ pub fn build_retrospective_view(
     // inside the detector; only runs on a non-best move with a real gap.
     // Suppressed when the initiative note already supplied the mechanism.
     if !had_initiative_note {
-        if let Some(it) = build_depth_honesty_item(pre_move_pos, best, user, prior_move) {
+        if let Some(it) =
+            build_depth_honesty_item(pre_move_pos, best, user, root_stm, prior_move, perspective)
+        {
             items.push(it);
         }
     }
 
     let mobility_outcome = compute_mobility_outcome(user, pre_move_pos, root_stm);
-    for it in build_mobility_items(&mobility_outcome, &post_pos, root_stm, show_all) {
+    for it in build_mobility_items(&mobility_outcome, &post_pos, root_stm, show_all, perspective) {
         items.push(it);
         consumed_terms.extend_from_slice(&[
             TermId::MobilityKnight,
@@ -280,7 +314,7 @@ pub fn build_retrospective_view(
     }
 
     let passed_outcome = compute_passed_pawns_outcome(user, pre_move_pos, root_stm);
-    if let Some(it) = build_passed_pawns_item(&passed_outcome) {
+    if let Some(it) = build_passed_pawns_item(&passed_outcome, perspective) {
         items.push(it);
         consumed_terms.extend_from_slice(&[
             TermId::PassedRankBonus,
@@ -296,7 +330,7 @@ pub fn build_retrospective_view(
     // build_pieces_positional_items can drop misleading KP cards
     // without re-walking events.
     let kp_supp = capture_suppression(&material_outcome, root_stm);
-    for it in build_pieces_positional_items(&pieces_outcome, root_stm, kp_supp) {
+    for it in build_pieces_positional_items(&pieces_outcome, root_stm, kp_supp, perspective) {
         items.push(it);
     }
     // Always consume every piece TermId — sub-terms that fired above
@@ -318,7 +352,7 @@ pub fn build_retrospective_view(
     ]);
 
     let space_outcome = compute_space_outcome(user, pre_move_pos, root_stm);
-    let space_items = build_space_items(&space_outcome, show_all);
+    let space_items = build_space_items(&space_outcome, show_all, perspective);
     if !space_items.is_empty() {
         consumed_terms.push(TermId::Space);
     }
@@ -326,7 +360,7 @@ pub fn build_retrospective_view(
         items.push(it);
     }
 
-    if let Some(it) = build_secondary_item(user, root_stm, &consumed_terms, show_all) {
+    if let Some(it) = build_secondary_item(user, root_stm, &consumed_terms, show_all, perspective) {
         items.push(it);
     }
 

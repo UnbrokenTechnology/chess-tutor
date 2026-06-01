@@ -1,16 +1,25 @@
-//! Threats card builders (hanging / SEE-losing / pressure).
+//! Threats card builders (hanging / SEE-losing).
+//!
+//! The prose (heading + per-piece attacker detail, with the "you" /
+//! "they" reframe) is produced by the shared teaching translator
+//! ([`chess_tutor_teaching`]) from a [`Claim::Threats`]; this builder
+//! owns only the *structured* card surface the translator deliberately
+//! doesn't carry — sentiment, the structured summary line, and the
+//! per-square board annotations — plus the GUI-specific misleading-hang
+//! salience ([`filter_misleading_hangs`]) that needs the realised
+//! captures the claim layer doesn't see.
 //!
 //! Split out of `retrospective_view`; the orchestrator
 //! ([`super::build_retrospective_view`]) assembles the cards.
 
-use chess_tutor_engine::analysis::{
-    HangingPiece, ThreatsOutcome,
-};
+use chess_tutor_engine::analysis::{HangingPiece, ThreatsOutcome};
 use chess_tutor_engine::types::Square;
 
+use chess_tutor_teaching::claim::{threats_claim_group, Claim, ThreatKind, ThreatSide, ThreatTarget};
+use chess_tutor_teaching::phrasing::{phrase, Locale, Perspective, PhrasingContext, Verbosity};
+
 use crate::view::{
-    AnnotationKind, BoardAnnotation, RetrospectiveCategory,
-    RetrospectiveItem, Sentiment,
+    AnnotationKind, BoardAnnotation, RetrospectiveCategory, RetrospectiveItem, Sentiment,
 };
 
 use super::helpers::*;
@@ -28,10 +37,19 @@ pub(super) fn threats_items_empty(outcome: &ThreatsOutcome) -> bool {
         && outcome.theirs_pressured.is_empty()
 }
 
+/// Build every threat card for one analysed move. `perspective` selects
+/// "you" vs "they" and drives the student-POV sentiment colour.
 pub(super) fn build_threat_items(
     outcome: &ThreatsOutcome,
     user_captures_by_square: &[(Square, u8)],
+    perspective: Perspective,
 ) -> Vec<RetrospectiveItem> {
+    let ctx = PhrasingContext {
+        perspective,
+        locale: Locale::En,
+        verbosity: Verbosity::Normal,
+        reveal_moves: false,
+    };
     let mut items = Vec::new();
 
     // Highest-value guaranteed counter-threat — used to suppress
@@ -39,70 +57,138 @@ pub(super) fn build_threat_items(
     // opponent has a bigger problem on the board. Computed once
     // across both guaranteed-hanging and guaranteed-SEE-losing lists
     // since either qualifies as a winning counter-threat.
-    let max_counter_threat_points =
-        max_target_points(&outcome.theirs_hanging_guaranteed)
-            .max(max_target_points(&outcome.theirs_see_losing_guaranteed));
+    let max_counter_threat_points = max_target_points(&outcome.theirs_hanging_guaranteed)
+        .max(max_target_points(&outcome.theirs_see_losing_guaranteed));
 
-    // Our hanging pieces — filter for misleading entries. Two cases
-    // get filtered out:
-    //   (1) "Planned recapture" — we just captured a piece of ≥ equal
-    //       point value on the same square. The bishop on h6 right
-    //       after Bxh6 is the second leg of a trade we initiated.
-    //   (2) "Compensating counter-attack" — we have a guaranteed
-    //       higher-value win elsewhere. The opponent has to address
-    //       that bigger problem; our hanging bishop is no longer
-    //       their best response.
+    // Our hanging pieces — filter for misleading entries (planned
+    // recapture; compensating counter-attack). See
+    // [`filter_misleading_hangs`].
     let ours_hanging_filtered = filter_misleading_hangs(
         &outcome.ours_hanging,
         user_captures_by_square,
         max_counter_threat_points,
     );
-    if !ours_hanging_filtered.is_empty() {
-        items.push(threat_item_from_hangs(
-            &ours_hanging_filtered,
-            "Your piece is hanging",
-            Sentiment::Negative,
-            true,
-        ));
-    }
+    push_threat_card(
+        &mut items,
+        &ctx,
+        ThreatSide::Mover,
+        ThreatKind::Hanging,
+        &ours_hanging_filtered,
+    );
 
     // "You can win material" only fires off the *guaranteed* list —
     // entries that survive every legal opponent response. The raw
     // theirs_hanging is a static snapshot and would mis-teach the
     // student about defensible threats (Nf3 attacks e5 but ...Nc6
     // defends, etc.).
-    if !outcome.theirs_hanging_guaranteed.is_empty() {
-        items.push(threat_item_from_hangs(
-            &outcome.theirs_hanging_guaranteed,
-            "You can win material",
-            Sentiment::Positive,
-            false,
-        ));
-    }
+    push_threat_card(
+        &mut items,
+        &ctx,
+        ThreatSide::Opponent,
+        ThreatKind::Hanging,
+        &outcome.theirs_hanging_guaranteed,
+    );
 
     let ours_see_losing_filtered = filter_misleading_hangs(
         &outcome.ours_see_losing,
         user_captures_by_square,
         max_counter_threat_points,
     );
-    if !ours_see_losing_filtered.is_empty() {
-        items.push(threat_item_from_hangs(
-            &ours_see_losing_filtered,
-            "Your piece loses to a trade",
-            Sentiment::Negative,
-            true,
-        ));
-    }
-    if !outcome.theirs_see_losing_guaranteed.is_empty() {
-        items.push(threat_item_from_hangs(
-            &outcome.theirs_see_losing_guaranteed,
-            "Their piece loses to a trade",
-            Sentiment::Positive,
-            false,
-        ));
-    }
+    push_threat_card(
+        &mut items,
+        &ctx,
+        ThreatSide::Mover,
+        ThreatKind::SeeLosing,
+        &ours_see_losing_filtered,
+    );
+    push_threat_card(
+        &mut items,
+        &ctx,
+        ThreatSide::Opponent,
+        ThreatKind::SeeLosing,
+        &outcome.theirs_see_losing_guaranteed,
+    );
 
     items
+}
+
+/// Build one threat card from the already-salience-filtered `hangs`,
+/// pushing it onto `items` when non-empty. The heading + per-piece
+/// detail prose come from the translator (perspective-correct); the
+/// structured summary and the board annotations are computed here. The
+/// sentiment and the "is the target ours?" annotation flavour are
+/// derived from the threatened side *relative to the user* (so an
+/// opponent-move retrospective colours the opponent's hanging piece as
+/// the student's opportunity), matching the translator's `victim_is_user`
+/// reframe exactly.
+fn push_threat_card(
+    items: &mut Vec<RetrospectiveItem>,
+    ctx: &PhrasingContext,
+    side: ThreatSide,
+    kind: ThreatKind,
+    hangs: &[HangingPiece],
+) {
+    let pieces: Vec<ThreatTarget> = hangs.iter().map(ThreatTarget::from).collect();
+    let Some(claim) = threats_claim_group(side, kind, pieces) else {
+        return;
+    };
+    let phrasing = phrase(&claim, ctx);
+    let Claim::Threats { pieces, .. } = &claim else {
+        unreachable!("threats_claim_group always returns Claim::Threats");
+    };
+
+    // The threatened piece belongs to the user when the moving side is the
+    // user (Mover + Player) or the non-moving side is the user (Opponent +
+    // Opponent) — the same predicate the translator uses for `victim_is_user`.
+    // A user piece in danger is Negative (a warning); an opponent piece in
+    // danger is Positive (the student's opportunity).
+    let target_is_ours =
+        (side == ThreatSide::Mover) == (ctx.perspective == Perspective::Player);
+    let sentiment = if target_is_ours {
+        Sentiment::Negative
+    } else {
+        Sentiment::Positive
+    };
+
+    let summary = if pieces.len() == 1 {
+        format!(
+            "{} on {}",
+            piece_name(pieces[0].location.piece),
+            pieces[0].location.square.to_algebraic()
+        )
+    } else {
+        format!("{} pieces", pieces.len())
+    };
+
+    let mut annotations = Vec::new();
+    for p in pieces {
+        for a in &p.attackers {
+            annotations.push(BoardAnnotation::Arrow {
+                from: a.square,
+                to: p.location.square,
+                kind: AnnotationKind::Attacker,
+            });
+        }
+        let target_kind = if target_is_ours {
+            AnnotationKind::Threat
+        } else {
+            AnnotationKind::GoodPiece
+        };
+        annotations.push(BoardAnnotation::SquareHighlight {
+            square: p.location.square,
+            kind: target_kind,
+        });
+    }
+
+    items.push(RetrospectiveItem {
+        category: RetrospectiveCategory::Threats,
+        heading: phrasing.summary,
+        summary,
+        detail: phrasing.detail.unwrap_or_default(),
+        score_delta_pawns: None,
+        sentiment,
+        annotations,
+    });
 }
 
 /// Drop hanging-piece entries that would mislead the student. Two
@@ -164,59 +250,135 @@ pub(super) fn max_target_points(hangs: &[HangingPiece]) -> u8 {
         .unwrap_or(0)
 }
 
-pub(super) fn threat_item_from_hangs(
-    hangs: &[HangingPiece],
-    heading: &str,
-    sentiment: Sentiment,
-    target_is_ours: bool,
-) -> RetrospectiveItem {
-    let summary = if hangs.len() == 1 {
-        format!(
-            "{} on {}",
-            piece_name(hangs[0].location.piece),
-            hangs[0].location.square.to_algebraic()
-        )
-    } else {
-        format!("{} pieces", hangs.len())
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chess_tutor_engine::analysis::PieceLocation;
+    use chess_tutor_engine::types::PieceType;
 
-    let mut detail_lines = Vec::new();
-    let mut annotations = Vec::new();
-    for h in hangs {
-        let mut attacker_strs = Vec::new();
-        for a in &h.attackers {
-            attacker_strs.push(format!("{} on {}", piece_name(a.piece), a.square.to_algebraic()));
-            annotations.push(BoardAnnotation::Arrow {
-                from: a.square,
-                to: h.location.square,
-                kind: AnnotationKind::Attacker,
-            });
-        }
-        let target_kind = if target_is_ours {
-            AnnotationKind::Threat
-        } else {
-            AnnotationKind::GoodPiece
-        };
-        annotations.push(BoardAnnotation::SquareHighlight {
-            square: h.location.square,
-            kind: target_kind,
-        });
-        detail_lines.push(format!(
-            "{} on {} — attacked by {}.",
-            capitalize(piece_name(h.location.piece)),
-            h.location.square.to_algebraic(),
-            join_with_and(&attacker_strs),
-        ));
+    fn pl(square: Square, piece: PieceType) -> PieceLocation {
+        PieceLocation { square, piece }
     }
 
-    RetrospectiveItem {
-        category: RetrospectiveCategory::Threats,
-        heading: heading.to_string(),
-        summary,
-        detail: detail_lines.join("\n"),
-        score_delta_pawns: None,
-        sentiment,
-        annotations,
+    fn hang(square: Square, piece: PieceType, attackers: Vec<PieceLocation>) -> HangingPiece {
+        HangingPiece {
+            location: pl(square, piece),
+            attackers,
+        }
+    }
+
+    /// A mover-side hang renders the player-perspective warning heading
+    /// from the translator, with the attacker geometry in the detail and
+    /// matching board annotations.
+    #[test]
+    fn ours_hanging_card_warns_with_translator_heading() {
+        let outcome = ThreatsOutcome {
+            ours_hanging: vec![hang(
+                Square::D2,
+                PieceType::Knight,
+                vec![pl(Square::E3, PieceType::Pawn)],
+            )],
+            ours_hanging_delta: 1,
+            theirs_hanging: vec![],
+            ours_see_losing: vec![],
+            theirs_see_losing: vec![],
+            theirs_hanging_guaranteed: vec![],
+            theirs_see_losing_guaranteed: vec![],
+            ours_pressured: vec![],
+            theirs_pressured: vec![],
+            theirs_hanging_delta: 0,
+            ours_see_losing_delta: 0,
+            theirs_see_losing_delta: 0,
+            ours_pressured_delta: 0,
+            theirs_pressured_delta: 0,
+        };
+        let items = build_threat_items(&outcome, &[], Perspective::Player);
+        let card = items
+            .iter()
+            .find(|i| i.heading.contains("hanging"))
+            .expect("a hanging card");
+        assert_eq!(card.heading, "Your knight on d2 is hanging");
+        assert_eq!(card.summary, "knight on d2");
+        assert_eq!(card.sentiment, Sentiment::Negative);
+        assert!(card.detail.contains("attacked by the e3 pawn"), "{}", card.detail);
+        // One attacker arrow + one threat highlight.
+        assert_eq!(card.annotations.len(), 2);
+
+        // Same outcome, opponent perspective: the *mover* is now the
+        // opponent, so their hanging knight is the student's opportunity —
+        // positive sentiment + a "You can win material" reframe, never a
+        // "Your … is hanging" warning.
+        let opp_items = build_threat_items(&outcome, &[], Perspective::Opponent);
+        let opp_card = opp_items
+            .iter()
+            .find(|i| i.heading.contains("hanging") || i.heading.contains("win material"))
+            .expect("an opponent-hang card");
+        assert!(
+            opp_card.heading.starts_with("You can win material"),
+            "opponent-move hang must reframe as the student's chance: {}",
+            opp_card.heading
+        );
+        assert_eq!(opp_card.sentiment, Sentiment::Positive);
+    }
+
+    /// A guaranteed opponent hang renders the opportunity heading ("You
+    /// can win material"), positive sentiment, GoodPiece highlight.
+    #[test]
+    fn theirs_hanging_card_is_opportunity() {
+        let outcome = ThreatsOutcome {
+            ours_hanging: vec![],
+            ours_hanging_delta: 0,
+            theirs_hanging: vec![hang(
+                Square::D7,
+                PieceType::Bishop,
+                vec![pl(Square::E6, PieceType::Pawn)],
+            )],
+            theirs_hanging_guaranteed: vec![hang(
+                Square::D7,
+                PieceType::Bishop,
+                vec![pl(Square::E6, PieceType::Pawn)],
+            )],
+            ours_see_losing: vec![],
+            theirs_see_losing: vec![],
+            theirs_see_losing_guaranteed: vec![],
+            ours_pressured: vec![],
+            theirs_pressured: vec![],
+            theirs_hanging_delta: 1,
+            ours_see_losing_delta: 0,
+            theirs_see_losing_delta: 0,
+            ours_pressured_delta: 0,
+            theirs_pressured_delta: 0,
+        };
+        let items = build_threat_items(&outcome, &[], Perspective::Player);
+        let card = items
+            .iter()
+            .find(|i| i.heading.starts_with("You can win material"))
+            .expect("an opportunity card");
+        assert_eq!(card.sentiment, Sentiment::Positive);
+        assert!(card.heading.contains("bishop on d7"), "{}", card.heading);
+        // GoodPiece highlight on the target (the opponent's piece we win).
+        assert!(card.annotations.iter().any(|a| matches!(
+            a,
+            BoardAnnotation::SquareHighlight {
+                kind: AnnotationKind::GoodPiece,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn planned_recapture_is_filtered() {
+        let hangs = vec![hang(Square::H6, PieceType::Bishop, vec![pl(Square::G7, PieceType::Pawn)])];
+        // We just captured a bishop (3 pts) on h6 — a fair recapture.
+        let kept = filter_misleading_hangs(&hangs, &[(Square::H6, 3)], 0);
+        assert!(kept.is_empty(), "an equal-value recapture must be filtered");
+    }
+
+    #[test]
+    fn compensating_counter_threat_filters_lower_value_hang() {
+        let hangs = vec![hang(Square::B5, PieceType::Bishop, vec![pl(Square::A6, PieceType::Pawn)])];
+        // A guaranteed queen (9 pts) win elsewhere dwarfs our bishop (3).
+        let kept = filter_misleading_hangs(&hangs, &[], 9);
+        assert!(kept.is_empty(), "a bigger counter-threat must suppress the hang");
     }
 }
-

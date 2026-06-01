@@ -4,6 +4,7 @@
 
 use super::{BoardAnnotation, RetrospectiveCategory, RetrospectiveViewModel, Sentiment};
 use crate::session::NewGameForm;
+use chess_tutor_teaching::phrasing::Perspective;
 
 /// Right side panel: move list on top, then either retrospective or
 /// hint body depending on whether the hint panel is open.
@@ -313,12 +314,23 @@ pub enum RetrospectiveBody {
 }
 
 pub enum RetrospectiveKind {
-    /// User move; retrospective worker job still in flight.
-    UserMoveAnalyzing,
-    /// User move; retrospective is ready. The session builds a
-    /// structured [`RetrospectiveViewModel`] per frame from the raw
-    /// analyses; renderers paint cards from it and emit
+    /// A move whose retrospective worker job is still in flight —
+    /// regardless of who made it. The renderer shows a spinner. (The
+    /// engine's reply and the user's own move both land here while their
+    /// analysis is computing; the `perspective`-correct cards arrive once
+    /// the worker returns and the kind becomes [`Self::MoveReady`].)
+    Analyzing,
+    /// A move whose retrospective is ready — the user's *or* the engine's.
+    /// The session builds a structured [`RetrospectiveViewModel`] per
+    /// frame from the raw analyses; renderers paint cards from it and emit
     /// [`crate::event::Event::SelectRetrospectiveItem`] on click.
+    ///
+    /// `perspective` is `Player` when the user made the move
+    /// (`moved_by == user_color`) and `Opponent` when the engine did; it
+    /// is baked into the view model's prose already, but is also surfaced
+    /// here so renderers can theme the "you / they" framing if desired.
+    /// The cards render identically regardless of mover (decision: one
+    /// translation layer, one renderer).
     ///
     /// `selected_item` is the index into `view_model.items` of the
     /// currently-selected card (if any). Renderers use it to choose
@@ -327,17 +339,11 @@ pub enum RetrospectiveKind {
     ///
     /// Boxed because the view model is the largest variant and
     /// would otherwise inflate every other arm's size.
-    UserMoveReady {
+    MoveReady {
+        perspective: Perspective,
         view_model: Box<RetrospectiveViewModel>,
         selected_item: Option<usize>,
     },
-    EngineMove {
-        san: String,
-        eval_pawns: f32,
-        depth: u32,
-        elapsed_ms: u128,
-    },
-    EngineInfoMissing,
 }
 
 pub struct HintPanelView {

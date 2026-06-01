@@ -18,7 +18,13 @@ use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Move, Value};
 use crate::session::RepaintFn;
 
-const RETROSPECTIVE_MULTI_PV: usize = 3;
+/// Best + true-second-best + the force-included user line. The second
+/// line powers the `only_good_move` signal on the verdict claim (and
+/// thus chess.com's "Great" / "Brilliant" tiers in the translator); the
+/// cards otherwise consume only `analyses[0]` + the user line, so PV3+
+/// bought nothing. See PLAN-teaching-translation-layer.md §"Analysis
+/// config".
+const RETROSPECTIVE_MULTI_PV: usize = 2;
 /// Safety caps for analytical searches that auto-fire (retrospective,
 /// hint panel). Without these, pathological positions — notably
 /// MultiPV around a found mate — can pin the worker thread for

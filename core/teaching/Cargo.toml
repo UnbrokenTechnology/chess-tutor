@@ -1,11 +1,11 @@
 [package]
-name = "chess-tutor-narration"
+name = "chess-tutor-teaching"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "chess_tutor_narration"
+name = "chess_tutor_teaching"
 
 [dependencies]
 chess-tutor-engine = { path = "../engine" }

@@ -43,29 +43,21 @@ pub(super) fn draw_retrospective(
                 ui.separator();
             }
             match kind {
-                RetrospectiveKind::UserMoveReady { view_model, selected_item } => {
+                RetrospectiveKind::MoveReady {
+                    view_model,
+                    selected_item,
+                    ..
+                } => {
+                    // Same cards regardless of who moved — the perspective
+                    // ("you" vs "they") is already baked into the prose by
+                    // the teaching translator.
                     draw_retrospective_cards(ui, view_model, *selected_item, events);
                 }
-                RetrospectiveKind::UserMoveAnalyzing => {
+                RetrospectiveKind::Analyzing => {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("analyzing your move…");
+                        ui.label("analyzing the move…");
                     });
-                }
-                RetrospectiveKind::EngineMove {
-                    san,
-                    eval_pawns,
-                    depth,
-                    elapsed_ms,
-                } => {
-                    ui.monospace(format!("Engine played {}", san));
-                    ui.monospace(format!(
-                        "eval {:+.2}    depth {}    {} ms",
-                        eval_pawns, depth, elapsed_ms,
-                    ));
-                }
-                RetrospectiveKind::EngineInfoMissing => {
-                    ui.label("(engine info missing)");
                 }
             }
         }
