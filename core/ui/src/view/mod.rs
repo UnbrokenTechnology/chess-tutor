@@ -242,6 +242,15 @@ pub enum AnnotationKind {
     /// Generic teaching highlight (yellow). Used when no more
     /// specific kind applies.
     Highlight,
+    /// The move that *springs* a future tactic — drawn as an arrow from
+    /// the piece's current square to where it lands. Used by the
+    /// walked-into pin card: the pinning piece isn't on the pin line yet,
+    /// so this arrow shows the opponent reply that puts it there (e.g.
+    /// `…Bf4`), making the pin-line arrow from the (still-empty) pinning
+    /// square read. Distinct hue from [`Self::BestMove`] so a "you walked
+    /// into …" card never paints the opponent's move in the engine's
+    /// own best-move colour.
+    TriggerMove,
 }
 
 /// Per-side sentiment of a retrospective item — used by renderers to

@@ -264,9 +264,10 @@ fn annotation_square_colors(
             None,
         ),
         // Arrow-only kinds — square fallback is just a subtle tint.
-        AnnotationKind::BestMove | AnnotationKind::Attacker | AnnotationKind::Defender => {
-            (None, None)
-        }
+        AnnotationKind::BestMove
+        | AnnotationKind::Attacker
+        | AnnotationKind::Defender
+        | AnnotationKind::TriggerMove => (None, None),
     }
 }
 
@@ -316,6 +317,9 @@ fn arrow_color(kind: AnnotationKind) -> egui::Color32 {
             egui::Color32::from_rgba_unmultiplied(0x90, 0x20, 0x20, 0xd0)
         }
         AnnotationKind::Highlight => egui::Color32::from_rgba_unmultiplied(0xff, 0xc0, 0x10, 0xd0),
+        // Gold — a "heads up, this move springs it" arrow, distinct from the
+        // red attacker line and the blue best-move arrow.
+        AnnotationKind::TriggerMove => egui::Color32::from_rgba_unmultiplied(0xf0, 0xb0, 0x20, 0xe0),
     }
 }
 
