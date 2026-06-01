@@ -256,3 +256,40 @@ fn skips_pawn_x_pawn_alignments_below_threshold() {
         "low-value pawn rear shouldn't fire latent DA; got {threats:#?}"
     );
 }
+
+#[test]
+fn skips_discovered_attack_when_pawn_vehicle_cannot_leave_the_ray() {
+    // From the real game (after 5.Nh4). Black rook h8, Black pawn h6,
+    // White knight h4 — all on the h-file. Geometry looks like a
+    // discovered attack (move the h6 pawn, the rook hits Nh4), but the
+    // pawn can ONLY push along the h-file (h6-h5 stays on the ray) and has
+    // no diagonal capture to step off it, so it can never spring the
+    // attack. Must NOT be reported as a standing threat against White.
+    let pos =
+        Position::from_fen("r1b1k2r/ppqn1pQ1/3bp1np/1B6/7N/8/PPP2PPP/RNB2RK1 b - - 4 5").unwrap();
+    let threats = find_latent_threats(&pos, Color::White);
+    assert!(
+        !threats.iter().any(|t| {
+            t.pattern == TacticPattern::DiscoveredAttack
+                && t.vehicle == Some(Square::H6)
+                && t.target == Square::H4
+        }),
+        "a pawn that can't leave the rook's file is not a discovery vehicle; got {threats:#?}"
+    );
+}
+
+#[test]
+fn discovered_attack_still_fires_when_pawn_vehicle_has_a_diagonal_capture() {
+    // Same h-file geometry — Black Rh8 behind Black ph6, aiming at White
+    // Rh2 — but now the h6 pawn HAS a diagonal capture (hxg5 takes the
+    // white knight) that steps it off the file, so it CAN discover. The
+    // standing threat against White's rook must still be reported.
+    let pos = Position::from_fen("k6r/8/7p/6N1/8/8/7R/K7 b - - 0 1").unwrap();
+    let threats = find_latent_threats(&pos, Color::White);
+    assert!(
+        threats.iter().any(|t| t.pattern == TacticPattern::DiscoveredAttack
+            && t.vehicle == Some(Square::H6)
+            && t.target == Square::H2),
+        "a pawn with a diagonal capture off the file CAN discover; got {threats:#?}"
+    );
+}

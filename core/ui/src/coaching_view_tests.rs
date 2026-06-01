@@ -9,7 +9,7 @@ fn coaching_view_lists_their_undefended_piece_after_a_blunder() {
         "rnbqk1nr/pppp1ppp/8/4p3/4P1b1/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3",
     )
     .unwrap();
-    let view = build_coaching_view(&pos, Color::White, None);
+    let view = build_coaching_view(&pos, Color::White, None, None);
     assert!(
         view.items
             .iter()
@@ -31,7 +31,7 @@ fn coaching_view_suppresses_unreachable_captures_when_in_check() {
         "2k4r/1ppbR1pp/pqp5/8/B5n1/2P3P1/PP2QrKP/RN6 w - - 0 1",
     )
     .unwrap();
-    let view = build_coaching_view(&pos, Color::White, None);
+    let view = build_coaching_view(&pos, Color::White, None, None);
     assert!(
         !view.items.iter().any(|it| it.heading == "Look for a capture"),
         "no legal capture reaches an undefended piece while in check, \
@@ -56,7 +56,7 @@ fn coaching_view_check_card_lists_response_counts() {
         "2k4r/1ppbR1pp/pqp5/8/B5n1/2P3P1/PP2QrKP/RN6 w - - 0 1",
     )
     .unwrap();
-    let view = build_coaching_view(&pos, Color::White, None);
+    let view = build_coaching_view(&pos, Color::White, None, None);
     let check_card = view
         .items
         .iter()
@@ -90,7 +90,7 @@ fn coaching_view_surfaces_en_passant_opportunity() {
         "rnbqkbnr/pp2pppp/8/2pPp3/8/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 3",
     )
     .unwrap();
-    let view = build_coaching_view(&pos, Color::White, None);
+    let view = build_coaching_view(&pos, Color::White, None, None);
     let ep_card = view
         .items
         .iter()
@@ -111,7 +111,7 @@ fn coaching_view_is_empty_on_startpos() {
     // structural weaknesses. The coaching panel should have
     // nothing to say beyond an encouragement to think.
     let pos = Position::startpos();
-    let view = build_coaching_view(&pos, Color::White, None);
+    let view = build_coaching_view(&pos, Color::White, None, None);
     assert!(
         view.items.is_empty(),
         "startpos coaching should be empty, got: {:?}",
@@ -137,7 +137,7 @@ fn coaching_tactic_card_names_pattern_without_square_annotations() {
         mate_pattern: None,
         key_move: None,
     };
-    let view = build_coaching_view(&pos, Color::White, Some(&hit));
+    let view = build_coaching_view(&pos, Color::White, Some(&hit), None);
     let card = view
         .items
         .iter()
@@ -169,7 +169,7 @@ fn coaching_tactic_card_suppressed_when_medium_confidence() {
         mate_pattern: None,
         key_move: None,
     };
-    let view = build_coaching_view(&pos, Color::White, Some(&hit));
+    let view = build_coaching_view(&pos, Color::White, Some(&hit), None);
     assert!(
         view.items.iter().all(|i| !i.heading.starts_with("There's")),
         "Medium-confidence hits stay off the coaching surface (retrospective only)"
@@ -184,7 +184,7 @@ fn coaching_view_surfaces_overloaded_enemy_defender() {
     // should name the overload and highlight all three squares.
     let pos =
         Position::from_fen("3n2k1/8/2b1b3/8/8/8/8/2R1R1K1 w - - 0 1").unwrap();
-    let view = build_coaching_view(&pos, Color::White, None);
+    let view = build_coaching_view(&pos, Color::White, None, None);
     let card = view
         .items
         .iter()
@@ -220,9 +220,91 @@ fn coaching_mate_hint_uses_named_heading_for_back_rank() {
         mate_pattern: Some(MatePattern::BackRank),
         key_move: None,
     };
-    let view = build_coaching_view(&pos, Color::White, Some(&hit));
+    let view = build_coaching_view(&pos, Color::White, Some(&hit), None);
     assert!(
         view.items.iter().any(|i| i.heading.contains("back-rank mate")),
         "Back-rank mate must use its named heading on the coaching surface"
     );
+}
+
+#[test]
+fn coaching_view_latent_threat_leads_and_demotes_positional_when_live() {
+    // The discovered-attack-after-qxe6 case study FEN (White to move,
+    // after …Qxe6). CLI confirms Black has a DiscoveredAttack loaded on
+    // White's Re1 (fires via …Bxh2+) plus a RelativePin on Ra1, and a
+    // hanging white Qc4 — i.e. the tactical-mode gate is LIVE. The
+    // latent-threat card must lead and any positional (pawn) card must
+    // be demoted under the quiet-position fold.
+    //
+    // Verified with: chess-tutor tactics
+    //   "1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1" --latent
+    let pos = Position::from_fen(
+        "1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1",
+    )
+    .unwrap();
+    let view = build_coaching_view(&pos, Color::White, None, None);
+
+    // A latent-threat card must be present and must NOT be demoted.
+    let latent_idx = view
+        .items
+        .iter()
+        .position(|it| it.heading.starts_with("Your opponent has"))
+        .expect("expected a latent-threat card to lead");
+    assert!(
+        !view.items[latent_idx].demoted,
+        "the latent-threat card must lead, not be demoted"
+    );
+    // Pre-move pedagogical rule: the latent-threat card names no squares.
+    assert!(
+        view.items[latent_idx].annotations.is_empty(),
+        "the latent-threat card must not leak squares: {:?}",
+        view.items[latent_idx].annotations
+    );
+    assert_eq!(view.items[latent_idx].sentiment, Sentiment::Negative);
+
+    // Any positional pawn-weakness card present must be demoted (the
+    // gate is live), and must appear AFTER the latent-threat card.
+    for (i, it) in view.items.iter().enumerate() {
+        if it.category == RetrospectiveCategory::PawnStructure {
+            assert!(
+                it.demoted,
+                "positional card '{}' must be demoted when the gate is live",
+                it.heading
+            );
+            assert!(
+                i > latent_idx,
+                "positional cards must follow the tactical cards"
+            );
+        }
+    }
+}
+
+#[test]
+fn coaching_view_does_not_demote_in_quiet_position() {
+    // A quiet endgame: Black has doubled + isolated c-pawns (a real
+    // positional weakness the pawn-weakness card fires on) but there are
+    // NO tactical reasons — no check, no latent threat, no check-
+    // followup, no king-hunt, no tactic, no loose piece. The gate is
+    // NOT live, so the positional card must lead and nothing is demoted.
+    //
+    // Verified with: chess-tutor tactics
+    //   "4k3/p1p2ppp/2p5/8/8/8/PP3PPP/4K3 w - - 0 1" --latent
+    //   (no tactic, no latent threats) and chess-tutor eval (Black
+    //   isolated mg -15, doubled mg -11).
+    let pos =
+        Position::from_fen("4k3/p1p2ppp/2p5/8/8/8/PP3PPP/4K3 w - - 0 1").unwrap();
+    let view = build_coaching_view(&pos, Color::White, None, None);
+
+    // A pawn-weakness card must be present (Black's c-pawns).
+    let pawn_card = view
+        .items
+        .iter()
+        .find(|it| it.category == RetrospectiveCategory::PawnStructure)
+        .expect("expected a pawn-weakness card on the doubled/isolated c-pawns");
+    // Nothing is demoted in a quiet position.
+    assert!(
+        view.items.iter().all(|it| !it.demoted),
+        "no card may be demoted when the tactical-mode gate is not live"
+    );
+    assert_eq!(pawn_card.sentiment, Sentiment::Positive); // theirs = opportunity
 }

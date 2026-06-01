@@ -656,7 +656,17 @@ pub fn compute_tactic_outcome(
             let mut after = pre_move_pos.clone();
             let sub_prior = PriorMove::new(pre_move_pos, first);
             after.do_move(first);
+            // First, the PV path: the opponent *actually plays* a tactic on
+            // their best reply. Then, the latent fallback: even if the
+            // opponent's PV doesn't realize it inside the material window, a
+            // standing alignment the user's move *failed to disrupt* is still
+            // a tactic they walked into. The discovered-attack-after-qxe6
+            // case turns on this — `Qc5+` leaves Black's qe6/be5/Re1
+            // discovered attack loaded, and the search realizes it several
+            // plies out (past the 4-ply detector window), so without the
+            // latent fallback the walked-into slot stays empty.
             detect_line_tactic(&after, &user_ma.pv[1..], !root_stm, 1, Some(sub_prior))
+                .or_else(|| walked_into_latent(&after, root_stm))
         }
         _ => None,
     };
@@ -698,6 +708,53 @@ fn escape_for(
         board.do_move(mv);
     }
     find_tactic_escape(&board, hit, owner)
+}
+
+/// Pre-emptive `user_walked_into` from a standing alignment the user's
+/// move failed to disrupt. `after` is the position right after the
+/// user's move (so `!root_stm` — the opponent — is to move); we scan it
+/// for the opponent's loaded tactics against `root_stm`. Returns the
+/// most-instructive surviving latent threat as a [`TacticHit`], or
+/// `None` when the move left nothing loaded.
+///
+/// This is the "fires pre-emptively" wiring PLAN §4.1 asks for: the
+/// PV-based detector only catches a tactic the opponent *plays* inside
+/// the 4-ply material window, but a discovered attack whose payoff the
+/// search defers past that window (the `Qc5+` case) still leaves the
+/// alignment standing — and that is what the student walked into.
+fn walked_into_latent(after: &Position, root_stm: Color) -> Option<TacticHit> {
+    use crate::analysis::latent_threats::find_latent_threats;
+    // The opponent (`!root_stm`) is the attacker; the user (`root_stm`)
+    // is the defender whose pieces are under the standing threat.
+    let threats = find_latent_threats(after, root_stm);
+    // `find_latent_threats` returns most-instructive-first (discovered
+    // attacks, then remove-the-defender, then pins/skewers), so the head
+    // is the lesson to surface.
+    let threat = threats.into_iter().next()?;
+    Some(latent_threat_to_hit(&threat))
+}
+
+/// Convert a [`LatentThreat`] into a `user_walked_into` [`TacticHit`].
+/// `pv_ply = 1` marks it as the opponent's reply slot (matching the
+/// PV-based walked-into framing). `material_gain` carries the threat's
+/// conservative point estimate converted to midgame cp so the card's
+/// "their reply wins material (X)" line reads in the same units as the
+/// other slots.
+fn latent_threat_to_hit(threat: &crate::analysis::latent_threats::LatentThreat) -> TacticHit {
+    // `min_gain` is in classical points (P=1, N/B=3, R=5, Q=9); the other
+    // slots carry midgame-cp gains, so scale by the midgame pawn value.
+    let gain_cp = threat.min_gain * Value::PAWN_MG.0;
+    TacticHit {
+        pattern: threat.pattern,
+        pv_ply: 1,
+        primary_piece: threat.discoverer,
+        targets: vec![threat.target],
+        material_gain: Some(gain_cp),
+        confidence: threat.confidence,
+        sacrifice: false,
+        mate_pattern: None,
+        key_move: None,
+    }
 }
 
 /// Build a standalone [`TacticPattern::Sacrifice`] hit for a line with no

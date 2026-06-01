@@ -432,36 +432,37 @@ pub enum Command {
         /// `eval-mask` command can toggle individual categories.
         #[arg(long = "disable-eval", value_name = "CATEGORY[,CATEGORY...]")]
         disable_eval: Option<String>,
-        /// How many top search lines the bot may sample from when
-        /// softmax noise fires. Default 1 (no sampling — always #1).
-        /// Pair with `--noise-temp` to actually pick from the pool;
-        /// higher values cost roughly K× the per-move search time.
-        #[arg(long = "noise-pool", value_name = "N", default_value_t = 1)]
-        noise_pool: usize,
-        /// Softmax temperature in centipawns. Default 0 (always pick
-        /// #1 even when `--noise-pool > 1`). At 50 a line 50 cp behind
-        /// has ~37% the weight of #1; at 200 it has ~78%. Use to dial
-        /// up variety among close-scoring moves.
-        #[arg(long = "noise-temp", value_name = "CP", default_value_t = 0)]
-        noise_temp: i32,
-        /// Per-move probability the bot drops a deliberate blunder
-        /// (range 0.0–1.0). Default 0.0 (off). When > 0, the search
-        /// widens to surface enough worse-than-best alternatives.
+        /// Variety dial: the average *rank* of the move the bot plays,
+        /// from 1.0 (default — always the engine's #1) up to ~10.0.
+        /// Picks are sampled from a normal distribution centred here, so
+        /// 3.0 mostly plays the 2nd–4th best move. When > 1.0 the search
+        /// widens to 10 lines (≈K× the per-move time).
+        #[arg(long = "avg-move-rank", value_name = "RANK", default_value_t = 1.0)]
+        avg_move_rank: f32,
+        /// Per-move probability the bot drops a deliberate blunder — a
+        /// move that loses material by force (range 0.0–1.0). Default
+        /// 0.0 (off). When > 0, the search widens to surface candidate
+        /// moves to classify.
         #[arg(long = "blunder-chance", value_name = "P", default_value_t = 0.0)]
         blunder_chance: f32,
-        /// Minimum loss (centipawns vs #1) for an alternative line to
-        /// count as "in band" for the blunder picker. Default 100 — a
-        /// clear pawn-down move the student can plausibly punish.
-        #[arg(long = "blunder-min-loss", value_name = "CP", default_value_t = 100)]
-        blunder_min_loss: i32,
-        /// Maximum loss (centipawns vs #1) for an alternative line to
-        /// count as "in band". Default 400 — caps blunders at roughly
-        /// an exchange sacrifice; raise to allow more catastrophic
-        /// blunders (~900 for queen hangs). When the band is empty
-        /// the picker falls back to the closest-loss lines on each
-        /// side of the band but excludes distant outliers.
-        #[arg(long = "blunder-max-loss", value_name = "CP", default_value_t = 400)]
-        blunder_max_loss: i32,
+        /// Smallest material loss (in points; a pawn = 1.0) for a move
+        /// to count as an "in band" blunder. Default 1.0 — a hung pawn,
+        /// the lightest punishable mistake.
+        #[arg(long = "blunder-min-material", value_name = "PTS", default_value_t = 1.0)]
+        blunder_min_material: f32,
+        /// Largest material loss (points; pawn = 1.0) for a move to
+        /// count as "in band". Default 4.0 — caps deliberate blunders
+        /// at roughly a minor-and-pawn / the exchange, so the bot won't
+        /// gift its queen. Raise toward 9.0 for heavier hangs.
+        #[arg(long = "blunder-max-material", value_name = "PTS", default_value_t = 4.0)]
+        blunder_max_material: f32,
+        /// Per-move probability the bot plays a "miss" — declining a
+        /// move that wins material by force and playing the best move
+        /// that doesn't (range 0.0–1.0). Default 0.0 (off). No effect
+        /// when no material-winning move exists. Same mate-guard as
+        /// `--blunder-chance`.
+        #[arg(long = "miss-chance", value_name = "P", default_value_t = 0.0)]
+        miss_chance: f32,
         /// Smallest mate the bot is guaranteed to convert — blunders
         /// are suppressed when `lines[0]` is a mate-in-N for
         /// `N <= guaranteed_mate_in`. Default 1 (mate-in-1 is never

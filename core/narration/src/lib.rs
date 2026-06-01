@@ -125,7 +125,14 @@ pub fn format_retrospective(
         return String::from("[retrospective unavailable]\n");
     };
 
-    let verdict = user.classify(best.score);
+    // Material-aware verdict so the CLI retrospective distinguishes a
+    // Miss (declined a forced material win) from a Blunder (hung your
+    // own material) — same signal the GUI and the opponent bot use.
+    let root_stm = pre_move_pos.side_to_move();
+    let user_material = compute_material_outcome(user, pre_move_pos, root_stm);
+    let best_material = compute_material_outcome(best, pre_move_pos, root_stm);
+    let verdict =
+        user.classify_with_material(best.score, user_material.net_mg_cp, best_material.net_mg_cp);
     let mut buf: Vec<u8> = Vec::with_capacity(512);
     // Writing to a Vec<u8> is infallible, so `expect` here would
     // only fire on an out-of-memory panic, which the allocator
@@ -227,7 +234,8 @@ fn render_report(
         MoveVerdict::Good
         | MoveVerdict::Inaccuracy
         | MoveVerdict::Mistake
-        | MoveVerdict::Blunder => {
+        | MoveVerdict::Blunder
+        | MoveVerdict::Miss => {
             writeln!(
                 out,
                 "[retrospective] You played {user_san}{annotation} — {verdict_label_str} ({user_score_str} vs {best_score_str} best, Δ {gap_str})."

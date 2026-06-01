@@ -5,7 +5,6 @@ use super::*;
 
 use chess_tutor_engine::engine::SearchParams;
 use chess_tutor_engine::movegen::legal_moves_vec;
-use chess_tutor_engine::opponent::NoiseProfile;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::types::{Color, Move};
@@ -23,20 +22,13 @@ pub(crate) fn log_noise_pick_to_stderr(
     info: &NoisePickInfo,
     pos: &Position,
     mv: Move,
-    noise: &NoiseProfile,
 ) {
     match info {
-        NoisePickInfo::Softmax {
+        NoisePickInfo::Variety {
             pick_idx,
             num_lines,
-            delta_from_top_cp,
         } => {
-            eprintln!(
-                "noise: softmax picked #{} of {} ({:+} cp from #1)",
-                pick_idx + 1,
-                num_lines,
-                delta_from_top_cp,
-            );
+            eprintln!("noise: variety played #{} of {}", pick_idx + 1, num_lines);
         }
         NoisePickInfo::Blunder {
             pick_idx,
@@ -50,18 +42,16 @@ pub(crate) fn log_noise_pick_to_stderr(
                 delta_from_top_cp,
             );
         }
-        NoisePickInfo::BlunderSkipped {
-            closest_above_loss_cp,
+        NoisePickInfo::Miss {
+            pick_idx,
+            num_lines,
+            engine_top,
         } => {
-            let cap = (noise.blunder_max_loss_cp as f32
-                * chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE)
-                as i32;
             eprintln!(
-                "noise: blunder roll fired but closest plausible alternative \
-                 was -{closest_above_loss_cp} cp (exceeds {}× max-loss = {} cp \
-                 cap); bot plays best.",
-                chess_tutor_engine::noise::BLUNDER_FALLBACK_TOLERANCE,
-                cap,
+                "noise: miss — bot declined material-winning {} and played #{} of {}.",
+                san::format(pos, *engine_top),
+                pick_idx + 1,
+                num_lines,
             );
         }
         NoisePickInfo::Wild {
@@ -214,7 +204,7 @@ impl Session {
                 };
                 if self.log_to_stderr {
                     if let Some(info) = &noise_pick {
-                        log_noise_pick_to_stderr(info, &self.position, mv, &self.opponent.noise);
+                        log_noise_pick_to_stderr(info, &self.position, mv);
                     }
                 }
                 let root_stm = self.position.side_to_move();
@@ -288,12 +278,14 @@ impl Session {
                     && target_index + 1 == self.history.len()
                 {
                     self.awaiting_intervention_decision = false;
+                    let prior_move = self.prior_move_for(target_index);
                     let assessment = pre_pos.as_ref().map(|pp| {
                         chess_tutor_engine::analysis::classify_user_move(
                             pp,
                             &analyses,
                             user_move,
                             &gating_config_for(self.learning.mistake_handling),
+                            prior_move,
                         )
                     });
                     if let Some(assessment) = assessment {

@@ -190,6 +190,37 @@ fn outcome_reports_walked_into_fork() {
     assert!(outcome.user_played_tactic.is_none());
 }
 
+// ---- latent walked-into (PLAN §4.1 pre-emptive wiring) --------------
+
+#[test]
+fn walked_into_latent_fires_when_move_leaves_standing_alignment() {
+    // discovered-attack-after-qxe6 case study. White (the user) plays the
+    // natural-looking Qc5+ (c4c5) instead of the defusing Qxe6+. Qc5+ does
+    // NOT remove the black queen on e6, so the discovered-attack alignment
+    // (qe6 -> be5 -> Re1) stays loaded against White. The search realizes
+    // the rook loss several plies out — past the 4-ply detector window — so
+    // the PV-based walked-into detector finds nothing, and only the latent
+    // fallback catches it.
+    let pre = pos("1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1");
+    // Qc5+ then a forced quiet king move; the bishop never moves in this
+    // short line, so the discovery is not *played* — it's merely standing.
+    let pv = vec![
+        Move::normal(Square::C4, Square::C5),
+        Move::normal(Square::E7, Square::F7),
+    ];
+    let ma = ma_with_pv(pv, Some(1));
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::White, None);
+
+    let walked = outcome
+        .user_walked_into
+        .expect("the standing discovered attack on Re1 must surface pre-emptively");
+    assert_eq!(walked.pattern, TacticPattern::DiscoveredAttack);
+    assert_eq!(walked.pv_ply, 1);
+    // The discoverer is the black queen on e6; the target is the rook e1.
+    assert_eq!(walked.primary_piece, Square::E6);
+    assert_eq!(walked.targets, vec![Square::E1]);
+}
+
 // ---- detect_hanging_capture -----------------------------------------
 
 // White rook on d1 captures an undefended black bishop on d5.
@@ -344,6 +375,34 @@ fn capturing_the_sole_defender_fires_removing_defender() {
     assert_eq!(hit.pv_ply, 0);
     assert_eq!(hit.primary_piece, Square::F6);
     assert_eq!(hit.targets, vec![Square::D5]);
+}
+
+#[test]
+fn not_attacking_f2f7_when_the_capturer_is_just_lost() {
+    // From the real game (White queen on g7). Qxf7+ grabs the f7 pawn next
+    // to the uncastled king, but f7 is defended by the king AND the c7
+    // queen — the capturer is simply recaptured. Geometry says "attack on
+    // f7"; SEE says it's a queen blunder. Must not fire.
+    let pre = pos("rnb1k2r/ppq2pQ1/3bp1np/8/2B5/5N2/PPP2PPP/RNB2RK1 w - - 1 4");
+    let qxf7 = Move::normal(Square::G7, Square::F7);
+    assert!(
+        detect_line_tactic(&pre, &[qxf7], Color::White, 0, None).is_none(),
+        "Qxf7+ loses the queen to the recapture — not an attack-on-f7 tactic"
+    );
+}
+
+#[test]
+fn not_removing_defender_when_capturing_the_defender_loses_material() {
+    // The defender (rook h8) is itself guarded by a knight (g6), so taking
+    // it with the queen is SEE −4 — a queen blunder, not a tactic. From the
+    // real game (before the Qxh8 desperado). Geometry says "remove the
+    // rook to win the h6 pawn"; SEE says no. Must not fire.
+    let pre = pos("r1b1k2r/ppqn1pQ1/4p1np/1B2b3/7N/8/PPP2PPP/RNB2RK1 w - - 5 6");
+    let qxh8 = Move::normal(Square::G7, Square::H8);
+    assert!(
+        detect_line_tactic(&pre, &[qxh8], Color::White, 0, None).is_none(),
+        "Qxh8 loses the queen (rook is knight-defended) — not a removing-the-defender tactic"
+    );
 }
 
 #[test]

@@ -63,12 +63,12 @@
 //! against them; the CLI surfaces both colours symmetrically.
 
 use crate::analysis::tactic_outcome::{Confidence, TacticPattern};
-use crate::attacks::aligned;
+use crate::attacks::{aligned, attacks_bb, pawn_attacks_from};
 use crate::bitboard::{square_bb, Bitboard};
 use crate::magics::{bishop_attacks, rook_attacks};
 use crate::movegen::legal_moves_vec;
 use crate::position::Position;
-use crate::types::{Color, Move, Piece, PieceType, Square};
+use crate::types::{Color, Direction, Move, Piece, PieceType, Square};
 
 #[cfg(test)]
 #[path = "latent_threats_tests.rs"]
@@ -243,6 +243,42 @@ fn slider_attacks(sq: Square, occ: Bitboard, orthogonal: bool) -> Bitboard {
     }
 }
 
+/// Whether the vehicle (an enemy piece blocking its own slider) has any
+/// pseudo-legal move that *leaves* the slider→target line. A move that
+/// stays on that line keeps the ray blocked and discovers nothing — the
+/// canonical case being a pawn on the same file as the rook behind it: it
+/// can only push along the file (staying on the ray) and has no diagonal
+/// capture to step off it, so it can never spring the discovered attack.
+///
+/// Conservative by design: it counts a move as "leaving the ray" only when
+/// the destination is off the slider/target line (`!aligned`). That can
+/// miss a few exotic on-line discoveries, but a false negative (missing a
+/// real threat) is far cheaper here than the false positive it removes
+/// (warning about a threat the opponent physically cannot execute).
+fn vehicle_can_leave_ray(
+    pos: &Position,
+    vehicle_sq: Square,
+    slider_sq: Square,
+    target_sq: Square,
+) -> bool {
+    let Some(piece) = pos.piece_on(vehicle_sq) else {
+        return false;
+    };
+    let color = piece.color();
+    let occ = pos.occupied();
+    let dests = if piece.kind() == PieceType::Pawn {
+        // Diagonal captures step off the file; the forward push stays on it.
+        let captures = pawn_attacks_from(color, vehicle_sq) & pos.pieces_by_color(!color);
+        let push = square_bb(vehicle_sq).shift(Direction::pawn_push(color)) & !occ;
+        captures | push
+    } else {
+        attacks_bb(piece.kind(), vehicle_sq, occ) & !pos.pieces_by_color(color)
+    };
+    dests
+        .into_iter()
+        .any(|d| !aligned(slider_sq, target_sq, d))
+}
+
 /// Given (slider, vehicle, target) on a common ray, decide which
 /// pattern (if any) fires and push it to `out`. The slider is always
 /// attacker-color; `vehicle_color × target_color` selects the shape:
@@ -279,6 +315,16 @@ fn classify_slider_triple(
     let target_defender = defender_bb.contains(target_sq);
 
     if vehicle_attacker && target_defender {
+        // The vehicle must actually be able to *leave* the slider→target
+        // line. A piece that can only move along that line never discovers
+        // the attack — the classic case being a pawn pinned to its own file
+        // by a rook/queen on that file (it can push along the file but
+        // can't step off it, so the ray stays blocked). Without this guard
+        // the detector reports a "loaded discovered attack" the opponent
+        // physically cannot spring.
+        if !vehicle_can_leave_ray(pos, vehicle_sq, slider_sq, target_sq) {
+            return;
+        }
         // DiscoveredAttack — slider captures target after the vehicle
         // moves. Compute defenders of target in the post-vehicle-move
         // occupancy (removing the vehicle can also *reveal* a defender

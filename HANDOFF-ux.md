@@ -85,6 +85,14 @@ Toggleable always-on highlights painted on the live/viewed position, independent
 
 ## Backlog
 
+> **Active design brief: [`PLAN-teaching-gui.md`](PLAN-teaching-gui.md)** — how to
+> surface the CLI's teaching power (latent threats, `critique`/ALLOWED reframe,
+> tactical-vs-positional gating) in the GUI's three modes *without an LLM/NN*.
+> Decided: the tactical-mode gate is **detectors-only** (if no human-findable
+> pattern fires, the position is "quiet" for teaching — a search-only tactic is
+> engine noise with nothing to learn). Carries the per-position regression
+> matrix that is the done-definition. Read it before touching the items below.
+
 ### Learning-mode polish (rough priority order)
 
 1. **Persistence design** — storage trait + per-platform impls (filesystem desktop, Core Data / Room mobile), past-games sidebar, user erase / clear-history UX. Foundation for drills + per-concept mastery fading. **Needs a design conversation before code lands** (storage semantics + delete model differ across platforms). User-flagged as the gate for this work. *(This is the "open thread" HANDOFF.md points at.)*

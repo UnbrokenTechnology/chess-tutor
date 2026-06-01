@@ -5,7 +5,7 @@
 
 use chess_tutor_engine::analysis::PiecesPositionalOutcome;
 use chess_tutor_engine::eval::PiecesBreakdown;
-use chess_tutor_engine::types::Color;
+use chess_tutor_engine::types::{Color, PieceType};
 
 use crate::view::{
     RetrospectiveCategory,
@@ -215,12 +215,11 @@ fn include_sub_term(st: PieceSubTerm, bishop_geometry_changed: bool) -> bool {
     st != PieceSubTerm::BishopPawns || bishop_geometry_changed
 }
 
-/// Capture-aware suppression flags for the king-protector
-/// sub-term — built from the realized capture events so the
-/// per-sub-term loop can drop arithmetic-noise variants of the
-/// card.
+/// Capture-aware suppression flags built from the realized capture events,
+/// so the per-sub-term loop can drop cards whose term delta is an artifact
+/// of a piece leaving the board (rather than a real repositioning).
 #[derive(Copy, Clone, Debug, Default)]
-pub(super) struct KingProtectorSuppression {
+pub(super) struct CaptureSuppression {
     /// `true` when at least one of our minors was captured at ply
     /// ≤ 1. Their average king-distance "improves" purely because a
     /// minor came off the board — no actual repositioning happened.
@@ -234,13 +233,21 @@ pub(super) struct KingProtectorSuppression {
     /// `ours_worsened` direction only — improvements (a minor
     /// rallying back to the king) still surface normally.
     pub(super) our_minor_capturing: bool,
+    /// `true` when one of our rooks was captured. The trapped-rook
+    /// penalty vanishes when the rook leaves the board — but a captured
+    /// rook didn't "escape its trap," it died. Drop the ours TrappedRook
+    /// card so we don't narrate a capture as an escape.
+    pub(super) ours_rook_captured: bool,
+    /// Same for the opponent's rook (the "Opponent's rook escaped its
+    /// trap" misfire when you just captured it).
+    pub(super) theirs_rook_captured: bool,
 }
 
-pub(super) fn king_protector_suppression(
+pub(super) fn capture_suppression(
     material: &chess_tutor_engine::analysis::MaterialOutcome,
     root_stm: Color,
-) -> KingProtectorSuppression {
-    let mut out = KingProtectorSuppression::default();
+) -> CaptureSuppression {
+    let mut out = CaptureSuppression::default();
     for ev in material.realized_events() {
         if ev.captured_piece.is_minor() {
             if ev.captor == root_stm {
@@ -249,6 +256,13 @@ pub(super) fn king_protector_suppression(
             } else {
                 // They captured one of ours.
                 out.ours_minor_captured = true;
+            }
+        }
+        if ev.captured_piece == PieceType::Rook {
+            if ev.captor == root_stm {
+                out.theirs_rook_captured = true;
+            } else {
+                out.ours_rook_captured = true;
             }
         }
         if ev.ply == 0 && ev.captor == root_stm && ev.captor_piece.is_minor() {
@@ -261,7 +275,7 @@ pub(super) fn king_protector_suppression(
 pub(super) fn build_pieces_positional_items(
     outcome: &PiecesPositionalOutcome,
     _root_stm: Color,
-    kp_supp: KingProtectorSuppression,
+    kp_supp: CaptureSuppression,
 ) -> Vec<RetrospectiveItem> {
     let mut items = Vec::new();
 
@@ -295,6 +309,12 @@ pub(super) fn build_pieces_positional_items(
                         continue;
                     }
                 }
+                // A captured rook didn't "escape its trap" — its penalty
+                // just left the board with it. The material card already
+                // tells that story; this positional card would misnarrate.
+                if st == PieceSubTerm::TrappedRook && kp_supp.ours_rook_captured {
+                    continue;
+                }
                 items.push(RetrospectiveItem {
                     category: RetrospectiveCategory::PiecePlacement,
                     heading: heading.to_string(),
@@ -322,6 +342,11 @@ pub(super) fn build_pieces_positional_items(
                 // if a minor of theirs came off the board, the
                 // delta is arithmetic — not their pieces "rallying."
                 if st == PieceSubTerm::KingProtector && kp_supp.theirs_minor_captured {
+                    continue;
+                }
+                // "Opponent's rook escaped its trap" must not fire when you
+                // just captured it — death is not an escape.
+                if st == PieceSubTerm::TrappedRook && kp_supp.theirs_rook_captured {
                     continue;
                 }
                 items.push(RetrospectiveItem {

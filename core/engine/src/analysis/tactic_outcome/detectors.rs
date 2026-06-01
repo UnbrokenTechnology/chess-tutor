@@ -307,6 +307,27 @@ fn detect_removing_defender(
     }
     freed.sort_by_key(|s| s.index());
 
+    // Soundness gate — keyed off SEE, not pure geometry. The whole point of
+    // removing-the-defender is to win the *freed* piece, so the tactic is
+    // sound iff the net is non-negative: SEE(capture of the defender) + the
+    // value of the best freed piece ≥ 0. `pre.see_ge(key, -freed)` tests
+    // exactly that (SEE ≥ −freed ⇔ SEE + freed ≥ 0) without needing a full
+    // SEE value.
+    //   - `Qxh8` (knight-guarded rook, frees only the h6 pawn): SEE ≈ −1262,
+    //     freed ≈ +124 → net < 0 → suppressed. The illusory queen-blunder.
+    //   - `…Nxe4` (the desperado case study: sacrifices the knight to e4,
+    //     frees Nf5): SEE ≈ −657, freed ≈ +781 → net ≥ 0 → kept.
+    //   - `exf6` (pawn takes a g7-guarded knight, frees the d5 bishop):
+    //     SEE ≈ +657 → trivially kept.
+    let best_freed_mg = freed
+        .iter()
+        .filter_map(|&s| post.piece_on(s).map(|p| Value::mg_of_piece(p.kind()).0))
+        .max()
+        .unwrap_or(0);
+    if !pre.see_ge(key_move, Value(-best_freed_mg)) {
+        return None;
+    }
+
     Some(TacticHit {
         pattern: TacticPattern::RemovingDefender,
         pv_ply: base_ply,
@@ -1221,6 +1242,16 @@ fn detect_attacking_f2_f7(
     };
     let king = post.piece_on(king_sq)?;
     if king.kind() != PieceType::King || king.color() != !mover {
+        return None;
+    }
+    // Soundness: the piece that landed on f2/f7 must not just be lost. The
+    // payoff of this pattern is the f7/f2 capture itself (there's no freed
+    // piece to compensate, unlike RemovingDefender), so the fork detector's
+    // resting-square test is exactly right: if the capturer is hanging or
+    // SEE-losing on f7/f2 it's a material giveaway, not a tactic. This kills
+    // the illusory "attack on f7" when the queen is the sole attacker and
+    // the king (or another defender) just recaptures it.
+    if is_in_bad_spot(post, key_move.to()) {
         return None;
     }
     Some(TacticHit {

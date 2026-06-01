@@ -37,8 +37,13 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
     ui.separator();
     match &view.body {
         SidePanelBody::Intervention(prompt) => {
-            ui.heading("Pause");
-            ui.separator();
+            draw_panel_header(
+                ui,
+                "\u{23f8}",
+                "Pause — on your move",
+                "Your move triggered something worth a look before you continue.",
+                PANEL_PAUSE,
+            );
             egui::ScrollArea::vertical()
                 .id_salt("intervention_scroll")
                 .auto_shrink([false, false])
@@ -47,8 +52,13 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                 });
         }
         SidePanelBody::Hint(hint) => {
-            ui.heading("Hint");
-            ui.separator();
+            draw_panel_header(
+                ui,
+                "\u{1f4a1}",
+                "Hint — this position",
+                "The engine's top moves from the position in front of you.",
+                PANEL_HINT,
+            );
             egui::ScrollArea::vertical()
                 .id_salt("hint_scroll")
                 .auto_shrink([false, false])
@@ -57,8 +67,17 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                 });
         }
         SidePanelBody::Retrospective(retro) => {
-            ui.heading("Retrospective");
-            ui.separator();
+            // Backward-looking. The temporally-explicit title + distinct
+            // colour is what stops the student confusing this with the
+            // forward-looking coaching panel (they share this slot but
+            // never render at once).
+            draw_panel_header(
+                ui,
+                "\u{1f4cb}",
+                "After your move",
+                "What the move you just played changed — looking back.",
+                PANEL_RETRO,
+            );
             egui::ScrollArea::vertical()
                 .id_salt("retro_scroll")
                 .auto_shrink([false, false])
@@ -67,8 +86,15 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                 });
         }
         SidePanelBody::Coaching(coaching) => {
-            ui.heading("Coaching");
-            ui.separator();
+            // Forward-looking — the deliberate contrast with the
+            // retrospective's "After your move" header above.
+            draw_panel_header(
+                ui,
+                "\u{1f50e}",
+                "Before your move",
+                "What to notice in the position in front of you — you pick the move.",
+                PANEL_COACHING,
+            );
             egui::ScrollArea::vertical()
                 .id_salt("coaching_scroll")
                 .auto_shrink([false, false])
@@ -77,8 +103,13 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                 });
         }
         SidePanelBody::GameReview(review) => {
-            ui.heading("Game Review");
-            ui.separator();
+            draw_panel_header(
+                ui,
+                "\u{1f4d6}",
+                "Game review",
+                "The most significant moments across the whole game.",
+                PANEL_REVIEW,
+            );
             egui::ScrollArea::vertical()
                 .id_salt("review_scroll")
                 .auto_shrink([false, false])
@@ -89,19 +120,52 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
     }
 }
 
+// Distinct per-panel accent colours. The load-bearing pair is
+// Coaching (forward-looking, teal) vs Retrospective (backward-looking,
+// indigo): different enough that a glance tells the student whether a card
+// is about the move they're *about* to make or the one they *just* made.
+const PANEL_COACHING: egui::Color32 = egui::Color32::from_rgb(0x00, 0x83, 0x77); // teal
+const PANEL_RETRO: egui::Color32 = egui::Color32::from_rgb(0x51, 0x39, 0x9a); // indigo
+const PANEL_HINT: egui::Color32 = egui::Color32::from_rgb(0x15, 0x65, 0xc0); // blue
+const PANEL_PAUSE: egui::Color32 = egui::Color32::from_rgb(0xc6, 0x28, 0x28); // red
+const PANEL_REVIEW: egui::Color32 = egui::Color32::from_rgb(0xb8, 0x55, 0x00); // amber
+
+/// A colour-coded, temporally-explicit banner that heads each side-panel
+/// body. Replaces the bare `ui.heading(...)` so the two look-alike panels
+/// (coaching vs retrospective) are instantly distinguishable.
+fn draw_panel_header(
+    ui: &mut egui::Ui,
+    icon: &str,
+    title: &str,
+    subtitle: &str,
+    accent: egui::Color32,
+) {
+    let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38);
+    egui::Frame::group(ui.style())
+        .fill(bg)
+        .stroke(egui::Stroke::new(1.5, accent))
+        .inner_margin(egui::Margin::same(8.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(icon).size(18.0));
+                ui.label(
+                    egui::RichText::new(title)
+                        .strong()
+                        .size(16.0)
+                        .color(accent),
+                );
+            });
+            if !subtitle.is_empty() {
+                ui.label(egui::RichText::new(subtitle).small().italics());
+            }
+        });
+    ui.add_space(6.0);
+}
+
 fn draw_coaching_panel(ui: &mut egui::Ui, view: &CoachingPanelView) {
-    // Intro: italics keeps it visually subordinate to cards without
-    // dropping to a near-illegible small/weak combo. The whole panel
-    // *is* the value here — the student should be able to read every
-    // word of it without squinting.
-    ui.label(
-        egui::RichText::new(
-            "Features to notice in this position. No move recommendations — \
-             that's your decision.",
-        )
-        .italics(),
-    );
-    ui.add_space(8.0);
+    // The colour-coded "Before your move" header (drawn by the caller)
+    // already frames this panel as forward-looking and move-free, so no
+    // intro line here — straight to the cards.
     if view.view_model.items.is_empty() {
         ui.label(
             egui::RichText::new(
@@ -112,9 +176,33 @@ fn draw_coaching_panel(ui: &mut egui::Ui, view: &CoachingPanelView) {
         );
         return;
     }
-    for item in &view.view_model.items {
+    // Tactical / leading cards first (non-demoted). When the
+    // tactical-mode gate fired, the demoted positional cards are
+    // collapsed under a muted fold below; otherwise nothing is demoted
+    // and everything renders inline as before.
+    for item in view.view_model.items.iter().filter(|it| !it.demoted) {
         draw_coaching_item(ui, item);
         ui.add_space(8.0);
+    }
+    let demoted: Vec<&CoachingItem> =
+        view.view_model.items.iter().filter(|it| it.demoted).collect();
+    if !demoted.is_empty() {
+        ui.add_space(4.0);
+        // Minimal first pass at the collapse treatment (the user will
+        // refine visuals during GUI testing): a muted, default-collapsed
+        // header makes clear these are not the priority right now.
+        egui::CollapsingHeader::new(
+            egui::RichText::new("Quiet-position notes — not the priority right now")
+                .small()
+                .weak(),
+        )
+        .default_open(false)
+        .show(ui, |ui| {
+            for item in demoted {
+                draw_coaching_item(ui, item);
+                ui.add_space(8.0);
+            }
+        });
     }
 }
 

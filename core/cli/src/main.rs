@@ -1277,11 +1277,11 @@ fn main() -> Result<()> {
             seed,
             no_book,
             disable_eval,
-            noise_pool,
-            noise_temp,
+            avg_move_rank,
             blunder_chance,
-            blunder_min_loss,
-            blunder_max_loss,
+            blunder_min_material,
+            blunder_max_material,
+            miss_chance,
             guaranteed_mate_in,
             wild_chance,
         } => {
@@ -1310,20 +1310,23 @@ fn main() -> Result<()> {
             if !(0.0..=1.0).contains(&wild_chance) {
                 anyhow::bail!("--wild-chance must be in [0.0, 1.0], got {wild_chance}");
             }
-            if noise_pool == 0 {
-                anyhow::bail!("--noise-pool must be at least 1");
+            if !(0.0..=1.0).contains(&miss_chance) {
+                anyhow::bail!("--miss-chance must be in [0.0, 1.0], got {miss_chance}");
             }
-            if blunder_min_loss < 0 || blunder_max_loss < blunder_min_loss {
+            if avg_move_rank < 1.0 {
+                anyhow::bail!("--avg-move-rank must be at least 1.0, got {avg_move_rank}");
+            }
+            if blunder_min_material < 0.0 || blunder_max_material < blunder_min_material {
                 anyhow::bail!(
-                    "--blunder-min-loss / --blunder-max-loss must be 0 <= min <= max (got min={blunder_min_loss}, max={blunder_max_loss})",
+                    "--blunder-min-material / --blunder-max-material must be 0 <= min <= max (got min={blunder_min_material}, max={blunder_max_material})",
                 );
             }
             opponent.noise = chess_tutor_engine::opponent::NoiseProfile {
-                candidate_pool: noise_pool,
-                temperature_cp: noise_temp,
+                avg_move_rank,
                 blunder_chance,
-                blunder_min_loss_cp: blunder_min_loss,
-                blunder_max_loss_cp: blunder_max_loss,
+                blunder_min_material_cp: (blunder_min_material * 100.0) as i32,
+                blunder_max_material_cp: (blunder_max_material * 100.0) as i32,
+                miss_chance,
                 guaranteed_mate_in,
                 wild_chance,
             };

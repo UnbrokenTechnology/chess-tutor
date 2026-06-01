@@ -18,12 +18,12 @@
 //!   move arrow.
 
 use chess_tutor_engine::analysis::{
-    compute_tactic_outcome, EscapeKind, MatePattern, MoveAnalysis, PriorMove, TacticEscape,
-    TacticHit, TacticPattern, TacticsOutcome,
+    compute_tactic_outcome, gave_away_advantage, EscapeKind, MatePattern, MoveAnalysis, PriorMove,
+    TacticEscape, TacticHit, TacticPattern, TacticsOutcome,
 };
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
-use chess_tutor_engine::types::{Color, Move};
+use chess_tutor_engine::types::{Color, Move, Value};
 
 use crate::view::{
     AnnotationKind, BoardAnnotation, RetrospectiveCategory, RetrospectiveItem, Sentiment,
@@ -72,9 +72,69 @@ pub(super) fn build_tactic_items(
     }
     if let Some(hit) = user_walked_into {
         let esc = user_walked_into_escape.map(|e| escape_text(pre_move_pos, &user.pv, &hit, &e));
-        items.push(walked_into_item(&hit, esc.as_ref()));
+        // ALLOWED-not-MISSED reframe (PLAN §4.1): when the move *also* gave
+        // away the advantage, lead the card with the swing and the
+        // opponent's punishing continuation, mirroring the CLI's
+        // `print_allowed_banner`. The walked-into hit names *what* was
+        // loaded; the reframe makes the question "what did I let them do?"
+        // instead of "what better move did I miss?".
+        let allowed = gave_away_advantage(best.score, user.score)
+            .then(|| allowed_reframe(pre_move_pos, best.score, user.score, root_stm, &user.pv));
+        items.push(walked_into_item(&hit, esc.as_ref(), allowed.as_ref()));
     }
     items
+}
+
+/// The ALLOWED-not-MISSED lead for a walked-into card: the eval swing and
+/// the opponent's punishing continuation from the played move's own PV.
+/// Built only when [`gave_away_advantage`] holds. Mirrors the CLI's
+/// `print_allowed_banner` content (without the box-drawing chrome the GUI
+/// doesn't need).
+struct AllowedReframe {
+    /// "+2.04 → -1.27" (root-STM POV), plus the pawn swing magnitude.
+    swing_line: String,
+    /// The opponent's punishing line in SAN, e.g. "Qc5+ Kf7 b3 …". Empty
+    /// when the PV is too short to show a reply.
+    continuation: String,
+}
+
+fn allowed_reframe(
+    pre: &Position,
+    best_score: Value,
+    user_score: Value,
+    _root_stm: Color,
+    user_pv: &[Move],
+) -> AllowedReframe {
+    let swing_pawns = (best_score.0 - user_score.0) as f32 / Value::PAWN_EG.0 as f32;
+    // `MoveAnalysis::score` is already root-STM (the user's) POV, so this is
+    // a straight cp→pawn conversion on the PawnEG scale.
+    let best_pawns = best_score.0 as f32 / Value::PAWN_EG.0 as f32;
+    let user_pawns = user_score.0 as f32 / Value::PAWN_EG.0 as f32;
+    let swing_line = format!(
+        "eval {:+.2} → {:+.2} (your POV) — a {:.1}-pawn swing in the opponent's favour. \
+         Your move didn't lose to a better move you missed; it ALLOWED the opponent a \
+         strong reply you didn't address.",
+        best_pawns, user_pawns, swing_pawns
+    );
+    // The punishing continuation, straight from the played move's PV:
+    // pv[0] is the user's move, the tail is the refutation.
+    let continuation = pv_to_san(pre, user_pv).join(" ");
+    AllowedReframe {
+        swing_line,
+        continuation,
+    }
+}
+
+/// Walk a PV from `root`, emitting SAN per ply. Stops on any ply that
+/// doesn't apply cleanly (shouldn't happen with a real engine PV).
+fn pv_to_san(root: &Position, pv: &[Move]) -> Vec<String> {
+    let mut out = Vec::with_capacity(pv.len());
+    let mut pos = root.clone();
+    for &mv in pv {
+        out.push(san::format(&pos, mv));
+        pos.do_move(mv);
+    }
+    out
 }
 
 /// A tactic card's escape annotation, rendered for display: the refuting
@@ -154,7 +214,11 @@ fn missed_item(
     }
 }
 
-fn walked_into_item(hit: &TacticHit, escape: Option<&EscapeText>) -> RetrospectiveItem {
+fn walked_into_item(
+    hit: &TacticHit,
+    escape: Option<&EscapeText>,
+    allowed: Option<&AllowedReframe>,
+) -> RetrospectiveItem {
     // "Walked into" framing: the opponent now has the tactic on the
     // best reply. Pattern names the lesson; targets are *our* pieces
     // (from the opponent's POV) that the tactic hits. Always surface
@@ -162,11 +226,39 @@ fn walked_into_item(hit: &TacticHit, escape: Option<&EscapeText>) -> Retrospecti
     // *student's* missed move; it's warning about the opponent's
     // response, which the student needs to see to learn the cost of
     // their own move.
+    //
+    // When the move ALSO gave away the advantage, lead with the
+    // ALLOWED-not-MISSED reframe (PLAN §4.1): the swing comes first, then
+    // the opponent's punishing line, then the per-pattern lesson.
+    let heading = match allowed {
+        Some(_) => format!("You allowed {}", pattern_phrase(hit.pattern)),
+        None => walked_into_heading(hit),
+    };
+    let detail = match allowed {
+        Some(r) => {
+            let cont = if r.continuation.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " How it turns out: {}. Read past your move to see the reply that does \
+                     the damage.",
+                    r.continuation
+                )
+            };
+            format!(
+                "{}{} {}",
+                r.swing_line,
+                cont,
+                walked_into_detail(hit, escape)
+            )
+        }
+        None => walked_into_detail(hit, escape),
+    };
     RetrospectiveItem {
         category: RetrospectiveCategory::Tactic,
-        heading: walked_into_heading(hit),
+        heading,
         summary: walked_into_summary(hit),
-        detail: walked_into_detail(hit, escape),
+        detail,
         score_delta_pawns: hit.material_gain.map(|cp| -(cp as f32) / 100.0),
         sentiment: Sentiment::Negative,
         annotations: tactic_annotations(hit),
@@ -620,7 +712,7 @@ mod tests {
 
     #[test]
     fn walked_into_card_is_negative_with_warning_framing() {
-        let card = walked_into_item(&fork_hit(), None);
+        let card = walked_into_item(&fork_hit(), None, None);
         assert_eq!(card.sentiment, Sentiment::Negative);
         assert!(card.heading.starts_with("If they reply"));
     }
@@ -643,13 +735,85 @@ mod tests {
             san: "Nf6".to_string(),
             kind: EscapeKind::AdequateRetreat,
         };
-        let card = walked_into_item(&fork_hit(), Some(&esc));
+        let card = walked_into_item(&fork_hit(), Some(&esc), None);
         assert!(card.detail.contains("Nf6"), "{}", card.detail);
         assert!(card.detail.contains("good news"), "{}", card.detail);
         assert!(
             card.detail.contains("moving the attacked piece to safety"),
             "{}",
             card.detail
+        );
+    }
+
+    #[test]
+    fn allowed_reframe_leads_card_with_swing_and_continuation() {
+        let reframe = AllowedReframe {
+            swing_line: "eval +2.04 → -1.27 (your POV) — a 3.3-pawn swing".to_string(),
+            continuation: "Qc5+ Kf7 b3 Ne7".to_string(),
+        };
+        let card = walked_into_item(&fork_hit(), None, Some(&reframe));
+        assert_eq!(card.sentiment, Sentiment::Negative);
+        assert!(card.heading.starts_with("You allowed"), "{}", card.heading);
+        // Swing comes first, then the punishing continuation, then the
+        // per-pattern lesson.
+        assert!(card.detail.contains("3.3-pawn swing"), "{}", card.detail);
+        assert!(card.detail.contains("Qc5+ Kf7"), "{}", card.detail);
+        let swing_at = card.detail.find("3.3-pawn").unwrap();
+        let lesson_at = card.detail.find("fork is one piece").unwrap();
+        assert!(swing_at < lesson_at, "swing must lead the lesson");
+    }
+
+    #[test]
+    fn build_tactic_items_fires_allowed_reframe_on_qc5_case_study() {
+        use chess_tutor_engine::position::Position;
+        use chess_tutor_engine::san;
+        use chess_tutor_engine::types::Move;
+
+        // discovered-attack-after-qxe6 FEN. The user plays Qc5+ (giving away
+        // a winning position) instead of Qxe6+; the standing discovered
+        // attack on Re1 must surface as a walked-into card led by the
+        // ALLOWED reframe.
+        let fen = "1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1";
+        let mut pre = Position::from_fen(fen).unwrap();
+        let qc5 = san::parse(&mut pre, "Qc5+").unwrap();
+        let pre = Position::from_fen(fen).unwrap();
+        // user line: Qc5+ then a forced king move (the discovery isn't
+        // *played* in this short line — it's standing).
+        let user_pv = vec![qc5, Move::normal(Square::E7, Square::F7)];
+        let user = MoveAnalysis {
+            mv: qc5,
+            score: Value(-270), // ~-1.27 pawns, root (White) POV
+            depth: 1,
+            pv: user_pv,
+            ply_traces: Vec::new(),
+            settled_ply: Some(1),
+            pre_move_trace: chess_tutor_engine::eval::EvalTrace::zero(),
+            pre_score: Value::ZERO,
+            term_deltas: Vec::new(),
+        };
+        let mut best_pos = Position::from_fen(fen).unwrap();
+        let qxe6 = san::parse(&mut best_pos, "Qxe6+").unwrap();
+        let best = MoveAnalysis {
+            mv: qxe6,
+            score: Value(434), // ~+2.04 pawns, root POV
+            depth: 1,
+            pv: vec![qxe6],
+            ply_traces: Vec::new(),
+            settled_ply: Some(0),
+            pre_move_trace: chess_tutor_engine::eval::EvalTrace::zero(),
+            pre_score: Value::ZERO,
+            term_deltas: Vec::new(),
+        };
+        let items = build_tactic_items(&pre, &best, &user, Color::White, None, false);
+        let walked = items
+            .iter()
+            .find(|it| it.heading.starts_with("You allowed"))
+            .expect("Qc5+ must surface a walked-into card with the ALLOWED reframe");
+        assert!(walked.detail.contains("swing in the opponent's favour"));
+        assert!(
+            walked.detail.to_lowercase().contains("discovered attack"),
+            "{}",
+            walked.detail
         );
     }
 

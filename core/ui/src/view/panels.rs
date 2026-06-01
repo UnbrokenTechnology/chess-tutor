@@ -73,6 +73,14 @@ pub struct CoachingItem {
     pub detail: String,
     pub sentiment: Sentiment,
     pub annotations: Vec<BoardAnnotation>,
+    /// `true` when this is a positional / quiet-position note that has
+    /// been demoted because the position is tactically live (the
+    /// tactical-mode gate fired). The renderer collapses demoted items
+    /// under a muted "Quiet-position notes — not the priority right
+    /// now" section, rendered *after* the tactical cards. Always
+    /// `false` when the gate is not live (positional cards lead, as
+    /// before). See `PLAN-teaching-gui.md` §2.
+    pub demoted: bool,
 }
 
 /// Post-game review surface: a list of significant moments derived

@@ -83,13 +83,17 @@ pub(crate) fn format_score_pawns(score: Value) -> String {
             format!("-#{}", moves)
         }
     } else {
-        format!("{:+.2}", score.0 as f32 / 100.0)
+        // Engine score → chess.com-aligned pawns. The score is raw
+        // engine-cp (tapered pawn 128→213); divide by PAWN_EG to match
+        // the CLI's `units.rs` and the GUI's headline.
+        format!("{:+.2}", score.0 as f32 / Value::PAWN_EG.0 as f32)
     }
 }
 
-/// Format a delta (user_score - best_score) in pawn-equivalents.
+/// Format a delta (user_score - best_score) in pawn-equivalents, on
+/// the same PAWN_EG scale as [`format_score_pawns`].
 pub(crate) fn format_delta_pawns(delta_cp: i32) -> String {
-    format!("{:+.2}", delta_cp as f32 / 100.0)
+    format!("{:+.2}", delta_cp as f32 / Value::PAWN_EG.0 as f32)
 }
 
 /// Human-readable label for a [`MoveVerdict`].
@@ -100,6 +104,7 @@ pub(crate) fn verdict_label(v: MoveVerdict) -> &'static str {
         MoveVerdict::Inaccuracy => "Inaccuracy",
         MoveVerdict::Mistake => "Mistake",
         MoveVerdict::Blunder => "Blunder",
+        MoveVerdict::Miss => "Miss",
         MoveVerdict::BestAvailable => "Best available",
     }
 }
@@ -112,7 +117,9 @@ pub(crate) fn verdict_label(v: MoveVerdict) -> &'static str {
 ///   — i.e. the move looked risky to a shallow reader but the
 ///   deeper engine sees through).
 /// - Empty string for a plain Good / Inaccuracy / Best /
-///   BestAvailable.
+///   BestAvailable / Miss. A Miss carries no SAN suffix — the move
+///   itself was sound (it didn't hang material), so a `?`/`??` glyph
+///   would mislead; the "Miss" verdict label carries the meaning.
 pub(crate) fn sharp_or_verdict_annotation(v: MoveVerdict, is_sharp: bool) -> &'static str {
     if is_sharp {
         return "!";
@@ -123,6 +130,7 @@ pub(crate) fn sharp_or_verdict_annotation(v: MoveVerdict, is_sharp: bool) -> &'s
         MoveVerdict::Best => "",
         MoveVerdict::Good => "",
         MoveVerdict::Inaccuracy => "",
+        MoveVerdict::Miss => "",
         MoveVerdict::BestAvailable => "",
     }
 }
@@ -165,6 +173,7 @@ mod tests {
             MoveVerdict::Inaccuracy,
             MoveVerdict::Mistake,
             MoveVerdict::Blunder,
+            MoveVerdict::Miss,
             MoveVerdict::BestAvailable,
         ] {
             assert!(!verdict_label(v).is_empty());
@@ -173,9 +182,17 @@ mod tests {
 
     #[test]
     fn format_delta_pawns_signs_and_rounds() {
+        // Engine-cp → pawns on the PAWN_EG (213) scale, matching the
+        // CLI's units.rs. One engine pawn (PAWN_EG) reads as 1.00.
         assert_eq!(format_delta_pawns(0), "+0.00");
-        assert_eq!(format_delta_pawns(150), "+1.50");
-        assert_eq!(format_delta_pawns(-320), "-3.20");
+        assert_eq!(format_delta_pawns(Value::PAWN_EG.0), "+1.00");
+        assert_eq!(format_delta_pawns(-2 * Value::PAWN_EG.0), "-2.00");
+    }
+
+    #[test]
+    fn format_score_pawns_uses_pawn_eg_scale() {
+        assert_eq!(format_score_pawns(Value(Value::PAWN_EG.0)), "+1.00");
+        assert_eq!(format_score_pawns(Value(0)), "+0.00");
     }
 
     #[test]

@@ -20,8 +20,9 @@
 use std::collections::HashSet;
 
 use chess_tutor_engine::analysis::{
-    find_overloaded, list_hanging, Confidence, HangingPiece, MatePattern, OverloadedPiece,
-    TacticHit, TacticPattern,
+    classify_tactical_mode, find_overloaded, list_hanging, CheckFollowup, Confidence,
+    HangingPiece, LatentThreat, MatePattern, OverloadedPiece, PriorMove, TacticHit, TacticPattern,
+    TacticalReason,
 };
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::pawns::PawnsEval;
@@ -50,17 +51,64 @@ pub fn build_coaching_view(
     pos: &Position,
     user_color: Color,
     tactic_hint: Option<&TacticHit>,
+    prior_move: Option<PriorMove>,
 ) -> CoachingViewModel {
     let mut items: Vec<CoachingItem> = Vec::new();
+
+    // The tactical-mode gate (PLAN §1/§2): a detectors-only scan of the
+    // live position. When it fires, opponent-threat cards lead and the
+    // positional (pawn-weakness) cards are demoted under a muted fold.
+    // When it does not fire, behaviour is exactly as before — positional
+    // cards lead and nothing is demoted. The gate is pure/static/sub-ms,
+    // safe to run every frame alongside the rest of coaching.
+    let state = classify_tactical_mode(pos, user_color, prior_move);
+    let live = state.live;
 
     // Tactic card first when one fires — it's the strongest signal
     // ("look for a fork here") and the rest of the panel becomes
     // secondary context once the student knows there's a combination
     // to find. The High-confidence gate keeps misfires off this
     // pre-move surface (see HANDOFF-ux Tactic library design brief).
+    //
+    // This is the OurTactic surface. We route it through the existing
+    // session-fed `tactic_hint` (PV-reuse + static scan, richer than the
+    // gate's bare `find_best_tactic_in_position`) and therefore SKIP the
+    // gate's own `OurTactic` reason below to avoid emitting two tactic
+    // cards for the same combination.
     if let Some(hit) = tactic_hint {
         if hit.confidence == Confidence::High {
             items.push(tactic_card(hit));
+        }
+    }
+
+    // New opponent-threat cards, emitted from the gate's `reasons` in
+    // priority order (the vec is already sorted: InCheck <
+    // OpponentLatentThreat < OpponentCheckFollowup < ForcingCheckChain <
+    // OurTactic < LoosePiece). We render only the *new* threat cards
+    // here. InCheck / LoosePiece / OurTactic are already served by the
+    // existing richer builders below (check_card, opportunity/risk/
+    // en-passant/overloaded, tactic_hint), so we skip those reasons to
+    // avoid double-emission. The new cards lead because the gate places
+    // them above the existing low-priority loose-piece/positional cards.
+    for reason in &state.reasons {
+        match reason {
+            TacticalReason::OpponentLatentThreat(threat) => {
+                items.push(latent_threat_card(threat));
+            }
+            TacticalReason::OpponentCheckFollowup(cf) => {
+                items.push(check_followup_card(cf));
+            }
+            TacticalReason::ForcingCheckChain { depth } => {
+                items.push(king_hunt_card(*depth));
+            }
+            // InCheck -> existing check_card (emitted below, with its
+            // richer checker/response-count detail).
+            // OurTactic -> existing tactic_hint card (emitted above).
+            // LoosePiece -> existing opportunity/risk/en-passant cards
+            //   (emitted below, legal-filtered and with attacker info).
+            TacticalReason::InCheck
+            | TacticalReason::OurTactic(_)
+            | TacticalReason::LoosePiece { .. } => {}
         }
     }
 
@@ -136,10 +184,19 @@ pub fn build_coaching_view(
 
     // Pawn weakness scan for both sides. Builds at most one card per
     // side per weakness kind (doubled / isolated / backward), so the
-    // panel stays scannable.
+    // panel stays scannable. These are *positional* cards — when the
+    // gate is live they are demoted (rendered after the tactical cards,
+    // collapsed under a muted "Quiet-position notes" fold).
     let pawns = chess_tutor_engine::pawns::evaluate(pos);
-    items.extend(pawn_weakness_cards(&pawns, user_color, true));
-    items.extend(pawn_weakness_cards(&pawns, !user_color, false));
+    let mut positional: Vec<CoachingItem> = Vec::new();
+    positional.extend(pawn_weakness_cards(&pawns, user_color, true));
+    positional.extend(pawn_weakness_cards(&pawns, !user_color, false));
+    if live {
+        for card in &mut positional {
+            card.demoted = true;
+        }
+    }
+    items.extend(positional);
 
     CoachingViewModel { items }
 }
@@ -170,9 +227,9 @@ fn tactic_card(hit: &TacticHit) -> CoachingItem {
         "the engine sees the pattern in this position".to_string()
     };
     let detail = format!(
-        "{} Look for it before you move. If you can't find it, play your best \
-         move and come back to the retrospective afterwards — the card will \
-         show the line.",
+        "{} Look for it before you move. If you can't find it, play the best \
+         move you can — you can review this position afterwards to study what \
+         was there.",
         coaching_pattern_lesson(hit.pattern)
     );
     CoachingItem {
@@ -184,6 +241,7 @@ fn tactic_card(hit: &TacticHit) -> CoachingItem {
         // Pedagogically: no annotations on the coaching surface — the
         // student should locate the pattern themselves.
         annotations: Vec::new(),
+        demoted: false,
     }
 }
 
@@ -331,6 +389,140 @@ fn check_card(pos: &Position, legal_moves: &[Move]) -> CoachingItem {
         detail,
         sentiment: Sentiment::Negative,
         annotations,
+        demoted: false,
+    }
+}
+
+/// Build the **opponent-latent-threat** card (PLAN §2). The opponent
+/// has a tactic *loaded* against the student — a discovered attack,
+/// pin, skewer, or removing-the-defender alignment that fires if the
+/// student's move doesn't address it.
+///
+/// **Names the pattern, withholds the squares** — same pedagogical rule
+/// as `tactic_card`: the student is told *what shape* the opponent has
+/// so they know to defuse it, but they find *where* it is themselves.
+/// No board annotations for that reason. Sentiment::Negative — this is
+/// a danger to the student, not an opportunity.
+fn latent_threat_card(threat: &LatentThreat) -> CoachingItem {
+    let pattern_name = latent_pattern_name(threat.pattern);
+    let heading = format!("Your opponent has {} loaded", pattern_name);
+    let summary = "address it before you do anything else".to_string();
+    let detail = format!(
+        "{} They have it set up right now — a move that doesn't disrupt it lets \
+         them fire it on their turn. Before you play, ask what your opponent has \
+         ready against you, and make sure your move takes it away (capture the \
+         piece that makes it work, block the line, or defend the target). \
+         A natural-looking move that ignores it hands the game over.",
+        latent_pattern_lesson(threat.pattern)
+    );
+    CoachingItem {
+        category: RetrospectiveCategory::Threats,
+        heading,
+        summary,
+        detail,
+        sentiment: Sentiment::Negative,
+        // No square annotations — the student locates the alignment.
+        annotations: Vec::new(),
+        demoted: false,
+    }
+}
+
+/// Human-readable pattern name for a latent (opponent-loaded) threat,
+/// with an indefinite article so it reads in the heading
+/// ("Your opponent has a discovered attack loaded").
+fn latent_pattern_name(pattern: TacticPattern) -> &'static str {
+    match pattern {
+        TacticPattern::DiscoveredAttack => "a discovered attack",
+        TacticPattern::DiscoveredCheck => "a discovered check",
+        TacticPattern::Pin => "a pin",
+        TacticPattern::RelativePin => "a relative pin",
+        TacticPattern::Skewer => "a skewer",
+        TacticPattern::RemovingDefender => "a removing-the-defender threat",
+        // The latent-threat detector only produces the alignment
+        // patterns above; anything else falls back to a neutral phrase.
+        _ => "a tactic",
+    }
+}
+
+/// One-sentence reminder of how the loaded pattern works — mirrors
+/// `coaching_pattern_lesson` but framed defensively (the opponent has
+/// it; you must take it away).
+fn latent_pattern_lesson(pattern: TacticPattern) -> &'static str {
+    match pattern {
+        TacticPattern::DiscoveredAttack => "One of their pieces is blocking an attack from a piece behind it — when they move the front piece (often with a check or capture you have to answer), the attack behind it lands.",
+        TacticPattern::DiscoveredCheck => "One of their pieces is blocking a check from a piece behind it — when they move the front piece, the check lands and that piece is free to grab something.",
+        TacticPattern::Pin => "One of your pieces can't move — your king is directly behind it — so a piece of theirs is bearing down on it for free.",
+        TacticPattern::RelativePin => "One of your pieces shouldn't move — something more valuable sits behind it — so they can pile on the pinned piece.",
+        TacticPattern::Skewer => "Two of your pieces line up; the more valuable one in front will have to move and expose what's behind it.",
+        TacticPattern::RemovingDefender => "One of your pieces is the only thing defending another — if they take or chase that defender away, the piece it was guarding falls.",
+        _ => "They have a tactic set up against you.",
+    }
+}
+
+/// Build the **opponent-check-followup** card (PLAN §2,
+/// `double-fork-after-qd8`). Their check isn't a stall: one ply past it,
+/// after the student's forced reply, they have a follow-up tactic (a
+/// two-step fork). Tell the student to look *past* the check before
+/// reacting to it.
+///
+/// **No squares** — same pre-move pedagogical rule. We name the
+/// follow-up pattern when the detector identified one. Sentiment::Negative.
+fn check_followup_card(cf: &CheckFollowup) -> CoachingItem {
+    // Name the follow-up pattern from the first reply that has one.
+    let followup_pattern = cf
+        .replies
+        .iter()
+        .find_map(|r| r.followup.as_ref())
+        .map(|hit| coaching_pattern_phrase(hit.pattern))
+        .unwrap_or("a follow-up tactic");
+    let summary = "look one ply past the check".to_string();
+    let detail = format!(
+        "Their check isn't just a stall — look one move past it. After you answer \
+         the check, they have {}. Don't react to the check on its own; work out \
+         what comes *after* your forced reply and defuse that first, because once \
+         you're committed to answering the check you may not get another chance.",
+        followup_pattern
+    );
+    CoachingItem {
+        category: RetrospectiveCategory::Threats,
+        heading: "Their check is the first half of a tactic".to_string(),
+        summary,
+        detail,
+        sentiment: Sentiment::Negative,
+        annotations: Vec::new(),
+        demoted: false,
+    }
+}
+
+/// Build the **king-hunt** card (PLAN §2, `mating-net-after-ng5`).
+/// SOFT and **mechanism-free** by design: the student's king faces a
+/// forcing check sequence that self-replenishes several moves deep.
+/// These tend to end in a mating net or a perpetual.
+///
+/// Critically this card **never names a mate, a line, or a tactic** —
+/// the whole point of the ng5 case study is that the engine sees a long
+/// forced sequence the student can't be expected to calculate, so we
+/// give a directional nudge ("look for a more defensive move") without
+/// fabricating a mechanism the student would then try to verify and
+/// fail to find. No squares, no annotations. Sentiment::Negative.
+fn king_hunt_card(depth: u8) -> CoachingItem {
+    let _ = depth; // mechanism-free: depth drives the gate, not the prose.
+    let summary = "look for a safer, more defensive move".to_string();
+    let detail =
+        "Your king faces a forcing check sequence several moves deep — each check \
+         leads into another. Sequences like this tend to end in a mating net or a \
+         perpetual, even when no single move looks losing. This is a sign to stop \
+         attacking and look for a more defensive move that gives your king some \
+         air, rather than one that walks further into the checks."
+            .to_string();
+    CoachingItem {
+        category: RetrospectiveCategory::KingSafety,
+        heading: "Your king is being hunted".to_string(),
+        summary,
+        detail,
+        sentiment: Sentiment::Negative,
+        annotations: Vec::new(),
+        demoted: false,
     }
 }
 
@@ -401,6 +593,7 @@ fn en_passant_card(moves: &[Move]) -> CoachingItem {
         detail,
         sentiment: Sentiment::Positive,
         annotations,
+        demoted: false,
     }
 }
 
@@ -448,6 +641,7 @@ fn opportunity_card(hangs: &[HangingPiece]) -> CoachingItem {
         detail: detail_lines.join("\n"),
         sentiment: Sentiment::Positive,
         annotations,
+        demoted: false,
     }
 }
 
@@ -525,6 +719,7 @@ fn overloaded_card(pos: &Position, overloaded: &[OverloadedPiece]) -> CoachingIt
         detail: detail_lines.join("\n"),
         sentiment: Sentiment::Positive,
         annotations,
+        demoted: false,
     }
 }
 
@@ -572,6 +767,7 @@ fn risk_card(hangs: &[HangingPiece]) -> CoachingItem {
         detail: detail_lines.join("\n"),
         sentiment: Sentiment::Negative,
         annotations,
+        demoted: false,
     }
 }
 
@@ -638,6 +834,7 @@ fn pawn_weakness_cards(
         detail,
         sentiment,
         annotations: Vec::new(),
+        demoted: false,
     });
     items
 }

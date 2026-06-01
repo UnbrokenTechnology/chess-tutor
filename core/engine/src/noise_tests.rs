@@ -1,9 +1,13 @@
 use super::*;
 use crate::engine::SearchLine;
+use crate::position::Position;
 use crate::types::{Move, Square, Value};
 
-/// Stub line with the given score and an empty PV — `pick` only
-/// reads `score`, so the rest is filler.
+/// Stub line with the given score and an empty PV. Used by tests that
+/// exercise branches which don't classify material (variety, wild,
+/// mate-guard suppression, determinism): with an empty PV the material
+/// delta is zero, which is fine because those tests never expect the
+/// blunder/miss branch to *fire*.
 fn line(score_cp: i32) -> SearchLine {
     SearchLine {
         pv: Vec::<Move>::new(),
@@ -14,400 +18,274 @@ fn line(score_cp: i32) -> SearchLine {
     }
 }
 
+/// Line with a real PV so the material classifier has something to walk.
+fn mat_line(score_cp: i32, pv: Vec<Move>, settled: Option<usize>) -> SearchLine {
+    SearchLine {
+        pv,
+        score: Value(score_cp),
+        depth: 8,
+        ply_traces: Vec::new(),
+        settled_ply: settled,
+    }
+}
+
 /// Distinct stub moves keyed by an index — used by the wild-branch
 /// tests where we need to tell apart "which legal move came back".
 fn stub_move(seed: u8) -> Move {
-    // Any two squares will do; the picker treats Move as an opaque
-    // value. Mapping `seed` to a unique from-square gives us a
-    // stable identity for assertion comparisons.
     let from = Square::from_index(seed % 64);
     let to = Square::from_index(seed.wrapping_add(8) % 64);
     Move::normal(from, to)
 }
 
+/// Position used by the material-classifier and miss/blunder tests.
+/// White: Ke1, Qd4, Pe3. Black: Ke8, Qd5. White to move. White's `Qxd5`
+/// wins the black queen outright (undefended); `e4` then `…Qxe4` hangs
+/// the e-pawn; `Kf1` is a quiet, material-neutral move.
+fn mat_root() -> Position {
+    Position::from_fen("4k3/8/8/3q4/3Q4/4P3/8/4K3 w - - 0 1").unwrap()
+}
+
+fn any_root() -> Position {
+    Position::startpos()
+}
+
+// Named moves on `mat_root`.
+fn qxd5() -> Move {
+    Move::normal(Square::D4, Square::D5)
+}
+fn kf1() -> Move {
+    Move::normal(Square::E1, Square::F1)
+}
+// White hangs the e-pawn: e3-e4 then Black …Qxe4.
+fn hang_pawn_pv() -> Vec<Move> {
+    vec![Move::normal(Square::E3, Square::E4), Move::normal(Square::D5, Square::E4)]
+}
+
+// ---- off / degenerate inputs -------------------------------------
+
 #[test]
 fn off_profile_always_picks_first() {
     let noise = NoiseProfile::default();
+    let root = any_root();
     let lines = vec![line(50), line(40), line(30), line(20)];
     for ply in 0..20 {
-        assert_eq!(pick(&noise, 0xCAFE, ply, &lines, &[]), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0xCAFE, ply, &root, &lines, &[]), NoisePick::Line(0));
     }
 }
 
 #[test]
-fn single_line_always_picks_zero() {
+fn single_line_blunder_has_nothing_to_pick() {
     let noise = NoiseProfile {
-        candidate_pool: 4,
-        temperature_cp: 200,
-        blunder_chance: 1.0, // even a guaranteed blunder has nothing to pick
+        avg_move_rank: 4.0,
+        blunder_chance: 1.0,
         ..Default::default()
     };
-    let lines = vec![line(10)];
-    // Wild is off → only one line and no qualifying alternative.
-    assert_eq!(pick(&noise, 0xCAFE, 1, &lines, &[]), NoisePick::Line(0));
+    let root = mat_root();
+    let lines = vec![mat_line(10, vec![kf1()], None)];
+    // Only one line → blunder pool (i >= 1) is empty → best.
+    assert_eq!(pick(&noise, 0xCAFE, 1, &root, &lines, &[]), NoisePick::Line(0));
 }
 
 #[test]
 fn empty_lines_picks_zero() {
-    // Defensive — caller checks emptiness, but pick shouldn't panic.
     let noise = NoiseProfile::default();
+    let root = any_root();
     let lines: Vec<SearchLine> = Vec::new();
-    assert_eq!(pick(&noise, 0, 0, &lines, &[]), NoisePick::Line(0));
+    assert_eq!(pick(&noise, 0, 0, &root, &lines, &[]), NoisePick::Line(0));
 }
 
 #[test]
-fn pool_one_skips_softmax_even_with_temperature() {
-    // candidate_pool=1 is the "softmax off" signal regardless of
-    // temperature. The user must opt into pool > 1 to get noise.
+fn variety_floor_always_picks_first() {
+    // avg_move_rank at the 1.0 floor → zero spread → always #1.
     let noise = NoiseProfile {
-        candidate_pool: 1,
-        temperature_cp: 1_000,
+        avg_move_rank: 1.0,
         ..Default::default()
     };
+    let root = any_root();
     let lines = vec![line(0), line(-10), line(-20)];
     for ply in 0..10 {
-        assert_eq!(pick(&noise, 0xBEEF, ply, &lines, &[]), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines, &[]), NoisePick::Line(0));
     }
 }
 
 #[test]
-fn zero_temperature_with_pool_picks_first() {
-    // Without temperature, softmax collapses to "always #1" even at
-    // wide pool. This is the "give me variety only when scores are
-    // close" knob if the user later sets temperature.
+fn variety_stays_within_available_lines() {
+    // High centre, but only 4 lines: every pick must be a valid index.
     let noise = NoiseProfile {
-        candidate_pool: 4,
-        temperature_cp: 0,
+        avg_move_rank: 8.0,
         ..Default::default()
     };
-    let lines = vec![line(100), line(99), line(98), line(97)];
-    for ply in 0..10 {
-        assert_eq!(pick(&noise, 0xFEED, ply, &lines, &[]), NoisePick::Line(0));
-    }
-}
-
-#[test]
-fn softmax_picks_within_pool_only() {
-    // High temperature + 3-deep pool: the picker must never return
-    // 3 (which sits outside the pool), even though we provided 4
-    // lines.
-    let noise = NoiseProfile {
-        candidate_pool: 3,
-        temperature_cp: 500, // very flat — all three weighted similarly
-        ..Default::default()
-    };
+    let root = any_root();
     let lines = vec![line(20), line(15), line(10), line(-200)];
     for ply in 0..200 {
-        let pick = pick(&noise, 0xABCD, ply, &lines, &[]);
-        match pick {
-            NoisePick::Line(idx) => assert!(idx < 3, "softmax leaked outside pool: {idx}"),
-            other => panic!("non-softmax pick at ply {ply}: {other:?}"),
+        match pick(&noise, 0xABCD, ply, &root, &lines, &[]) {
+            NoisePick::Line(idx) => assert!(idx < lines.len(), "variety out of range: {idx}"),
+            other => panic!("non-variety pick at ply {ply}: {other:?}"),
         }
     }
 }
 
 #[test]
-fn softmax_actually_varies_across_plies() {
+fn variety_centres_near_the_dial() {
+    // Centre 3 over 8 lines: the average played rank should sit roughly
+    // around 3 (2-based tolerance), and it must visit more than one rank.
     let noise = NoiseProfile {
-        candidate_pool: 3,
-        temperature_cp: 50,
+        avg_move_rank: 3.0,
         ..Default::default()
     };
-    let lines = vec![line(0), line(-10), line(-20)];
-    let mut seen = [0usize; 3];
-    for ply in 0..200 {
-        match pick(&noise, 0xDEAD, ply, &lines, &[]) {
-            NoisePick::Line(idx) => seen[idx] += 1,
-            other => panic!("non-softmax pick at ply {ply}: {other:?}"),
-        }
-    }
-    let distinct = seen.iter().filter(|&&c| c > 0).count();
-    assert!(distinct >= 2, "softmax never varied: {seen:?}");
-    assert!(seen[0] >= seen[1] && seen[0] >= seen[2], "modal pick wasn't #1: {seen:?}");
-}
-
-#[test]
-fn blunder_with_no_in_band_lines_picks_closest_below() {
-    // No line falls in the band [100, INF]. The fallback pool is
-    // the line(s) with the largest loss strictly below the band's
-    // lower edge — here that's idx 3 (loss=90). The bot picks
-    // there rather than playing #1, preserving the "gradual
-    // decline" property in quiet positions where no real blunder
-    // is available.
-    let noise = NoiseProfile {
-        candidate_pool: 1,
-        blunder_chance: 1.0,
-        blunder_min_loss_cp: 100,
-        blunder_max_loss_cp: i32::MAX,
-        ..Default::default()
-    };
-    let lines = vec![line(0), line(-10), line(-50), line(-90)];
-    for ply in 0..20 {
-        assert_eq!(
-            pick(&noise, 0xABCD, ply, &lines, &[]),
-            NoisePick::Blunder(3),
-            "fallback should pick the largest sub-band loss (idx 3, -90)",
-        );
-    }
-}
-
-#[test]
-fn blunder_picks_only_in_band_lines_when_some_qualify() {
-    // Band [100, INF] with losses 50, 99, 100, 300: in-band set
-    // is {idx 3 (loss=100), idx 4 (loss=300)}. The picker must
-    // never pick #1 or the sub-band lines (50, 99).
-    let noise = NoiseProfile {
-        candidate_pool: 1,
-        blunder_chance: 1.0,
-        blunder_min_loss_cp: 100,
-        blunder_max_loss_cp: i32::MAX,
-        guaranteed_mate_in: 0,
-        ..Default::default()
-    };
-    let lines = vec![line(0), line(-50), line(-99), line(-100), line(-300)];
-    for ply in 0..50 {
-        match pick(&noise, 0x1234, ply, &lines, &[]) {
-            NoisePick::Blunder(idx) => assert!(
-                idx == 3 || idx == 4,
-                "blunder picked outside in-band set: {idx}",
-            ),
-            NoisePick::Line(idx) => panic!(
-                "blunder branch should fire (chance=1.0), got Line({idx})",
-            ),
-            NoisePick::BlunderSkipped { .. } => panic!(
-                "in-band set is non-empty; should never skip",
-            ),
-            NoisePick::Wild(_) => panic!("wild fired without wild_chance > 0"),
-        }
-    }
-}
-
-#[test]
-fn blunder_band_excludes_too_catastrophic() {
-    // The whole point of the upper band: with max=400, an alt
-    // line at loss=1000 (queen-hang territory) must never be
-    // picked when a 200-cp option exists. Band = [100, 400];
-    // in-band set = {idx 2 (loss=200)}; the loss=1000 line is
-    // excluded.
-    let noise = NoiseProfile {
-        candidate_pool: 1,
-        blunder_chance: 1.0,
-        blunder_min_loss_cp: 100,
-        blunder_max_loss_cp: 400,
-        guaranteed_mate_in: 0,
-        ..Default::default()
-    };
-    let lines = vec![line(0), line(-50), line(-200), line(-1000)];
-    for ply in 0..50 {
-        assert_eq!(
-            pick(&noise, 0xCAFE, ply, &lines, &[]),
-            NoisePick::Blunder(2),
-            "should only pick the in-band move (idx 2, -200)",
-        );
-    }
-}
-
-#[test]
-fn blunder_band_fallback_pools_closest_on_each_side() {
-    // Band [50, 100] with losses 10, 30, 110, 240: in-band is
-    // empty. Closest-below (largest loss < 50) is idx 2 (loss=30).
-    // Closest-above (smallest loss > 100) is idx 3 (loss=110).
-    // The 240-cp line is excluded because 110 is closer to the
-    // band from above. Pool = {idx 2, idx 3}; pick must be one
-    // of those.
-    let noise = NoiseProfile {
-        candidate_pool: 1,
-        blunder_chance: 1.0,
-        blunder_min_loss_cp: 50,
-        blunder_max_loss_cp: 100,
-        guaranteed_mate_in: 0,
-        ..Default::default()
-    };
-    let lines = vec![line(0), line(-10), line(-30), line(-110), line(-240)];
-    let mut seen_below = 0;
-    let mut seen_above = 0;
-    for ply in 0..200 {
-        match pick(&noise, 0xBEEF, ply, &lines, &[]) {
-            NoisePick::Blunder(2) => seen_below += 1,
-            NoisePick::Blunder(3) => seen_above += 1,
-            NoisePick::Blunder(idx) => panic!(
-                "fallback picked outside the closest-on-each-side pool: {idx}",
-            ),
-            other => panic!("non-blunder pick: {other:?}"),
-        }
-    }
-    assert!(seen_below > 0, "closest-below tier never picked");
-    assert!(seen_above > 0, "closest-above tier never picked");
-}
-
-#[test]
-fn blunder_skipped_when_only_alternative_is_catastrophic() {
-    // The motivating case for BLUNDER_FALLBACK_TOLERANCE: in a
-    // forcing position the engine's #1 may be much stronger than
-    // every alternative (e.g. found a tactic, every other move
-    // loses 20+ pawns). The old code happily picked the 20-pawn
-    // drop because "the closest above-band line wins by default."
-    // The new behaviour skips the blunder entirely so the bot
-    // plays its best move and the configured rate is slightly
-    // under-delivered rather than producing absurd play.
-    let noise = NoiseProfile {
-        candidate_pool: 1,
-        blunder_chance: 1.0,
-        blunder_min_loss_cp: 50,
-        blunder_max_loss_cp: 100,
-        guaranteed_mate_in: 0,
-        ..Default::default()
-    };
-    // Tolerance 2.0× → above cap is 200 cp. All alts (2156, etc.)
-    // exceed that → no fallback admitted → skip.
-    let lines = vec![line(0), line(-2156), line(-2300), line(-3000)];
-    for ply in 0..30 {
-        match pick(&noise, 0xCAFE, ply, &lines, &[]) {
-            NoisePick::BlunderSkipped { closest_above_loss_cp } => {
-                assert_eq!(
-                    closest_above_loss_cp, 2156,
-                    "skipped pick should report the closest rejected loss",
-                );
+    let root = any_root();
+    let lines: Vec<_> = (0..8).map(|i| line(-i * 10)).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut sum_rank = 0usize;
+    let n = 400;
+    for ply in 0..n {
+        match pick(&noise, 0xDEAD, ply, &root, &lines, &[]) {
+            NoisePick::Line(idx) => {
+                seen.insert(idx);
+                sum_rank += idx + 1; // 1-based rank
             }
-            other => panic!(
-                "with no plausible alternative and no below tier the picker must \
-                 skip; got {other:?}",
-            ),
+            other => panic!("non-variety pick: {other:?}"),
         }
     }
+    assert!(seen.len() >= 3, "variety barely moved: {seen:?}");
+    let avg = sum_rank as f32 / n as f32;
+    assert!((2.0..=4.0).contains(&avg), "average rank {avg} off-centre from 3.0");
+}
+
+// ---- material classifier (pure) ----------------------------------
+
+#[test]
+fn standard_piece_values_are_the_chart() {
+    use crate::types::PieceType::*;
+    assert_eq!(standard_piece_value_cp(Pawn), 100);
+    assert_eq!(standard_piece_value_cp(Knight), 300);
+    assert_eq!(standard_piece_value_cp(Bishop), 300);
+    assert_eq!(standard_piece_value_cp(Rook), 500);
+    assert_eq!(standard_piece_value_cp(Queen), 900);
+    assert_eq!(standard_piece_value_cp(King), 0);
 }
 
 #[test]
-fn blunder_fallback_admits_above_within_tolerance() {
-    // Above-tier loss 180 cp; cap = 2.0 × 100 = 200. Admitted.
-    let noise = NoiseProfile {
-        candidate_pool: 1,
-        blunder_chance: 1.0,
-        blunder_min_loss_cp: 50,
-        blunder_max_loss_cp: 100,
-        guaranteed_mate_in: 0,
-        ..Default::default()
-    };
-    let lines = vec![line(0), line(-180), line(-500)];
-    for ply in 0..30 {
-        match pick(&noise, 0xCAFE, ply, &lines, &[]) {
-            NoisePick::Blunder(1) => {} // expected
-            other => panic!("admitted above tier should be picked: {other:?}"),
-        }
-    }
+fn line_material_delta_reads_pv_outcome() {
+    let root = mat_root();
+    let stm = root.side_to_move();
+    // Winning a queen.
+    let win = mat_line(900, vec![qxd5()], None);
+    assert_eq!(line_material_delta_cp(&root, &win, stm), 900);
+    // Quiet move, no captures.
+    let quiet = mat_line(0, vec![kf1()], None);
+    assert_eq!(line_material_delta_cp(&root, &quiet, stm), 0);
+    // Hang a pawn: e4 then …Qxe4.
+    let hang = mat_line(-150, hang_pawn_pv(), Some(1));
+    assert_eq!(line_material_delta_cp(&root, &hang, stm), -100);
+    // Empty PV is materially neutral.
+    let empty = mat_line(0, vec![], None);
+    assert_eq!(line_material_delta_cp(&root, &empty, stm), 0);
 }
 
 #[test]
-fn blunder_fallback_below_works_even_when_above_capped() {
-    // Tight band [50, 100]. Alts: 30 (below), 1500 (above, way
-    // over cap). Cap rejects 1500; pool = {idx 1 (loss=30)}.
-    // Subtle decline path still works.
-    let noise = NoiseProfile {
-        candidate_pool: 1,
-        blunder_chance: 1.0,
-        blunder_min_loss_cp: 50,
-        blunder_max_loss_cp: 100,
-        guaranteed_mate_in: 0,
-        ..Default::default()
-    };
-    let lines = vec![line(0), line(-30), line(-1500)];
-    for ply in 0..30 {
-        match pick(&noise, 0xCAFE, ply, &lines, &[]) {
-            NoisePick::Blunder(1) => {} // expected
-            other => panic!(
-                "below-tier should still be admitted even when above is capped: \
-                 {other:?}",
-            ),
-        }
-    }
+fn material_blunder_pool_selects_in_band_only() {
+    // deltas[0] is best (never a blunder). Losses: -, 0, 100, 300, 900.
+    // In band [100,400]: indices 2 (100) and 3 (300); 900 is too big.
+    let deltas = [0, 0, -100, -300, -900];
+    assert_eq!(material_blunder_pool(&deltas, 100, 400), vec![2, 3]);
 }
 
 #[test]
-fn blunder_band_fallback_with_only_above_band_lines() {
-    // No in-band, no below-band — every line is catastrophic
-    // (e.g. forced position where any deviation loses heavily).
-    // The pool collapses to the smallest above-band loss; the bot
-    // takes the least-bad of the bad options.
+fn material_blunder_pool_empty_when_no_in_band_loss() {
+    // Only a queen-hang available, band tops out at a minor → empty.
+    assert!(material_blunder_pool(&[0, -900], 100, 300).is_empty());
+    // Winning / neutral lines are never blunder candidates.
+    assert!(material_blunder_pool(&[0, 200, 0], 100, 400).is_empty());
+}
+
+// ---- blunder branch (material) -----------------------------------
+
+#[test]
+fn blunder_picks_an_in_band_material_loss() {
     let noise = NoiseProfile {
-        candidate_pool: 1,
         blunder_chance: 1.0,
-        blunder_min_loss_cp: 100,
-        blunder_max_loss_cp: 300,
+        blunder_min_material_cp: 100,
+        blunder_max_material_cp: 400,
         guaranteed_mate_in: 0,
         ..Default::default()
     };
-    // Losses: 500, 800, 1200 — all > max=300.
-    let lines = vec![line(0), line(-500), line(-800), line(-1200)];
+    let root = mat_root();
+    // #1 best quiet (neutral), #2 hangs a pawn (-100, in band).
+    let lines = vec![mat_line(0, vec![kf1()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
     for ply in 0..30 {
         assert_eq!(
-            pick(&noise, 0xFACE, ply, &lines, &[]),
+            pick(&noise, 0xABCD, ply, &root, &lines, &[]),
             NoisePick::Blunder(1),
-            "should pick the least-catastrophic above-band line (idx 1, -500)",
+            "should hang the in-band pawn",
         );
     }
 }
 
 #[test]
-fn blunder_band_fallback_includes_tied_losses() {
-    // Two lines at the same closest-below loss should both be
-    // in the fallback pool — ties are kept rather than the picker
-    // arbitrarily favouring one.
+fn blunder_does_not_fire_when_only_hang_is_out_of_band() {
     let noise = NoiseProfile {
-        candidate_pool: 1,
         blunder_chance: 1.0,
-        blunder_min_loss_cp: 200,
-        blunder_max_loss_cp: 400,
+        blunder_min_material_cp: 100,
+        blunder_max_material_cp: 300, // a pawn-hang would be in band, but…
         guaranteed_mate_in: 0,
         ..Default::default()
     };
-    // Losses: 50, 100, 100 — in-band empty; closest-below = 100
-    // (tied at idx 2 and idx 3). Pool = {2, 3}.
-    let lines = vec![line(0), line(-50), line(-100), line(-100)];
-    let mut seen = [0usize; 4];
-    for ply in 0..200 {
-        match pick(&noise, 0xDEAD, ply, &lines, &[]) {
-            NoisePick::Blunder(idx) => {
-                assert!(idx == 2 || idx == 3, "out-of-pool pick: {idx}");
-                seen[idx] += 1;
-            }
-            other => panic!("non-blunder pick: {other:?}"),
-        }
+    let root = mat_root();
+    // #1 quiet (Kd1); #2 walks the king to f1 and lets …Qxd4 take the
+    // whole queen (-900, above the 300 cap) — the only non-best line.
+    // Gated-on-existence: no in-band hang → no blunder → plays best.
+    let lines = vec![
+        mat_line(0, vec![Move::normal(Square::E1, Square::D1)], None),
+        mat_line(
+            -800,
+            vec![Move::normal(Square::E1, Square::F1), Move::normal(Square::D5, Square::D4)],
+            Some(1),
+        ),
+    ];
+    for ply in 0..10 {
+        assert_eq!(pick(&noise, 0xCAFE, ply, &root, &lines, &[]), NoisePick::Line(0));
     }
-    assert!(seen[2] > 0 && seen[3] > 0, "tied losses must both be reachable: {seen:?}");
 }
 
 #[test]
 fn blunder_suppressed_when_mate_guarded() {
     let noise = NoiseProfile {
-        candidate_pool: 1,
         blunder_chance: 1.0,
-        blunder_min_loss_cp: 100,
-        blunder_max_loss_cp: i32::MAX,
+        blunder_min_material_cp: 100,
+        blunder_max_material_cp: 900,
         guaranteed_mate_in: 3,
         ..Default::default()
     };
+    let root = mat_root();
     let mate_in_2 = Value::MATE.0 - 3;
-    let lines = vec![line(mate_in_2), line(0), line(-100)];
+    let lines = vec![
+        mat_line(mate_in_2, vec![kf1()], None),
+        mat_line(-150, hang_pawn_pv(), Some(1)),
+    ];
     for ply in 0..20 {
-        assert_eq!(pick(&noise, 0xFACE, ply, &lines, &[]), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0xFACE, ply, &root, &lines, &[]), NoisePick::Line(0));
     }
 }
 
 #[test]
 fn blunder_allowed_for_mate_beyond_guarantee() {
     let noise = NoiseProfile {
-        candidate_pool: 1,
         blunder_chance: 1.0,
-        blunder_min_loss_cp: 100,
-        blunder_max_loss_cp: i32::MAX,
+        blunder_min_material_cp: 100,
+        blunder_max_material_cp: 900,
         guaranteed_mate_in: 3,
         ..Default::default()
     };
+    let root = mat_root();
     let mate_in_5 = Value::MATE.0 - 9;
-    let lines = vec![line(mate_in_5), line(0), line(-100)];
+    let lines = vec![
+        mat_line(mate_in_5, vec![kf1()], None),
+        mat_line(-150, hang_pawn_pv(), Some(1)),
+    ];
     let mut saw_blunder = false;
     for ply in 0..20 {
-        if matches!(pick(&noise, 0xFACE, ply, &lines, &[]), NoisePick::Blunder(_)) {
+        if matches!(pick(&noise, 0xFACE, ply, &root, &lines, &[]), NoisePick::Blunder(_)) {
             saw_blunder = true;
             break;
         }
@@ -415,73 +293,113 @@ fn blunder_allowed_for_mate_beyond_guarantee() {
     assert!(saw_blunder, "blunder branch never fired against mate-in-5");
 }
 
+// ---- miss branch -------------------------------------------------
+
 #[test]
-fn guaranteed_mate_zero_disables_protection() {
+fn miss_declines_a_material_winning_best_move() {
     let noise = NoiseProfile {
-        candidate_pool: 1,
-        blunder_chance: 1.0,
-        blunder_min_loss_cp: 100,
-        blunder_max_loss_cp: i32::MAX,
+        miss_chance: 1.0,
         guaranteed_mate_in: 0,
         ..Default::default()
     };
-    let mate_in_1 = Value::MATE.0 - 1;
-    let lines = vec![line(mate_in_1), line(0), line(-100)];
-    let mut saw_blunder = false;
-    for ply in 0..20 {
-        if matches!(pick(&noise, 0xFACE, ply, &lines, &[]), NoisePick::Blunder(_)) {
-            saw_blunder = true;
-            break;
-        }
+    let root = mat_root();
+    // #1 wins the queen (+900); #2 is a quiet, non-winning move.
+    let lines = vec![mat_line(900, vec![qxd5()], None), mat_line(0, vec![kf1()], None)];
+    for ply in 0..30 {
+        assert_eq!(
+            pick(&noise, 0x1234, ply, &root, &lines, &[]),
+            NoisePick::Miss(1),
+            "miss must decline the queen-win and play the best non-winning line",
+        );
     }
-    assert!(saw_blunder, "guaranteed_mate_in=0 should not protect mate-in-1");
 }
 
 #[test]
-fn mate_guard_does_not_protect_being_mated() {
+fn miss_inert_when_best_move_wins_no_material() {
     let noise = NoiseProfile {
-        candidate_pool: 1,
-        blunder_chance: 1.0,
-        blunder_min_loss_cp: 100,
-        blunder_max_loss_cp: i32::MAX,
-        guaranteed_mate_in: 5,
+        miss_chance: 1.0,
+        guaranteed_mate_in: 0,
         ..Default::default()
     };
-    let getting_mated_in_2 = -(Value::MATE.0 - 3);
-    let lines = vec![line(getting_mated_in_2), line(-200), line(-1000)];
+    let root = mat_root();
+    // Best move is quiet (no material on offer) → nothing to miss.
+    let lines = vec![mat_line(0, vec![kf1()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
     for ply in 0..20 {
-        // No assertion on exact pick — just that the function
-        // doesn't panic and returns a valid line index. Either
-        // Line(idx) or Blunder(idx) is fine here.
-        match pick(&noise, 0xBABE, ply, &lines, &[]) {
-            NoisePick::Line(idx) | NoisePick::Blunder(idx) => {
-                assert!(idx < lines.len())
-            }
-            NoisePick::BlunderSkipped { .. } => {
-                // Valid outcome: mate-zone above tier got capped
-                // out by the fallback tolerance.
-            }
-            NoisePick::Wild(_) => panic!("wild fired without wild_chance > 0"),
-        }
+        assert_eq!(pick(&noise, 0x1234, ply, &root, &lines, &[]), NoisePick::Line(0));
+    }
+}
+
+#[test]
+fn miss_suppressed_when_mate_guarded() {
+    let noise = NoiseProfile {
+        miss_chance: 1.0,
+        guaranteed_mate_in: 3,
+        ..Default::default()
+    };
+    let root = mat_root();
+    let mate_in_2 = Value::MATE.0 - 3;
+    let lines = vec![mat_line(mate_in_2, vec![qxd5()], None), mat_line(0, vec![kf1()], None)];
+    for ply in 0..20 {
+        assert_eq!(pick(&noise, 0xFACE, ply, &root, &lines, &[]), NoisePick::Line(0));
+    }
+}
+
+// ---- precedence + determinism ------------------------------------
+
+#[test]
+fn miss_takes_precedence_over_blunder() {
+    // Both rolls would fire; miss is evaluated first.
+    let noise = NoiseProfile {
+        miss_chance: 1.0,
+        blunder_chance: 1.0,
+        blunder_min_material_cp: 100,
+        blunder_max_material_cp: 900,
+        guaranteed_mate_in: 0,
+        ..Default::default()
+    };
+    let root = mat_root();
+    // #1 wins the queen, #2 hangs a pawn (in blunder band).
+    let lines = vec![mat_line(900, vec![qxd5()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
+    for ply in 0..20 {
+        assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines, &[]), NoisePick::Miss(1));
+    }
+}
+
+#[test]
+fn blunder_takes_precedence_over_wild() {
+    let noise = NoiseProfile {
+        blunder_chance: 1.0,
+        blunder_min_material_cp: 100,
+        blunder_max_material_cp: 400,
+        wild_chance: 1.0,
+        guaranteed_mate_in: 0,
+        ..Default::default()
+    };
+    let root = mat_root();
+    let lines = vec![mat_line(0, vec![kf1()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
+    let legal: Vec<Move> = (0..6).map(stub_move).collect();
+    for ply in 0..30 {
+        assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines, &legal), NoisePick::Blunder(1));
     }
 }
 
 #[test]
 fn pick_is_deterministic_for_same_inputs() {
     let noise = NoiseProfile {
-        candidate_pool: 4,
-        temperature_cp: 200,
+        avg_move_rank: 4.0,
         blunder_chance: 0.3,
-        blunder_min_loss_cp: 80,
-        blunder_max_loss_cp: i32::MAX,
+        miss_chance: 0.3,
+        blunder_min_material_cp: 80,
+        blunder_max_material_cp: 900,
         guaranteed_mate_in: 1,
         wild_chance: 0.1,
     };
-    let lines = vec![line(0), line(-20), line(-50), line(-150), line(-400)];
+    let root = mat_root();
+    let lines = vec![mat_line(900, vec![qxd5()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
     let legal = vec![stub_move(0), stub_move(1), stub_move(2), stub_move(3)];
     for ply in 0..20 {
-        let a = pick(&noise, 0xABCD, ply, &lines, &legal);
-        let b = pick(&noise, 0xABCD, ply, &lines, &legal);
+        let a = pick(&noise, 0xABCD, ply, &root, &lines, &legal);
+        let b = pick(&noise, 0xABCD, ply, &root, &lines, &legal);
         assert_eq!(a, b, "same inputs gave different picks at ply {ply}");
     }
 }
@@ -489,13 +407,13 @@ fn pick_is_deterministic_for_same_inputs() {
 #[test]
 fn pick_varies_with_seed() {
     let noise = NoiseProfile {
-        candidate_pool: 4,
-        temperature_cp: 200,
+        avg_move_rank: 4.0,
         ..Default::default()
     };
+    let root = any_root();
     let lines = vec![line(0), line(-20), line(-40), line(-80)];
-    let seq_a: Vec<_> = (0..50).map(|p| pick(&noise, 0x1111_2222, p, &lines, &[])).collect();
-    let seq_b: Vec<_> = (0..50).map(|p| pick(&noise, 0xAAAA_BBBB, p, &lines, &[])).collect();
+    let seq_a: Vec<_> = (0..50).map(|p| pick(&noise, 0x1111_2222, p, &root, &lines, &[])).collect();
+    let seq_b: Vec<_> = (0..50).map(|p| pick(&noise, 0xAAAA_BBBB, p, &root, &lines, &[])).collect();
     assert_ne!(seq_a, seq_b, "seed didn't affect the pick sequence");
 }
 
@@ -503,40 +421,37 @@ fn pick_varies_with_seed() {
 
 #[test]
 fn wild_fires_only_when_chance_set() {
-    // Default profile → no wild even with legal moves provided.
     let noise = NoiseProfile::default();
+    let root = any_root();
     let legal = vec![stub_move(0), stub_move(1)];
     for ply in 0..20 {
-        assert_eq!(pick(&noise, 0x9999, ply, &[], &legal), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0x9999, ply, &root, &[], &legal), NoisePick::Line(0));
     }
 }
 
 #[test]
 fn wild_with_no_legal_moves_falls_through() {
-    // Wild can't fire without a legal-move list; should fall back
-    // to the engine-result branches (which also have nothing here).
     let noise = NoiseProfile {
         wild_chance: 1.0,
         ..Default::default()
     };
-    assert_eq!(pick(&noise, 0x9999, 0, &[line(0)], &[]), NoisePick::Line(0));
+    let root = any_root();
+    assert_eq!(pick(&noise, 0x9999, 0, &root, &[line(0)], &[]), NoisePick::Line(0));
 }
 
 #[test]
 fn wild_picks_from_full_legal_list_not_just_top_k() {
-    // 8 legal moves, only 3 "search lines". With wild_chance=1.0
-    // every pick should be a Wild that comes from the legal list —
-    // including moves the search never surfaced.
     let noise = NoiseProfile {
         wild_chance: 1.0,
-        guaranteed_mate_in: 0, // disable mate-guard
+        guaranteed_mate_in: 0,
         ..Default::default()
     };
+    let root = any_root();
     let lines = vec![line(0), line(-10), line(-20)];
     let legal: Vec<Move> = (0..8).map(stub_move).collect();
     let mut seen_indices = [false; 8];
     for ply in 0..200 {
-        match pick(&noise, 0xC0DE, ply, &lines, &legal) {
+        match pick(&noise, 0xC0DE, ply, &root, &lines, &legal) {
             NoisePick::Wild(mv) => {
                 let idx = legal.iter().position(|m| *m == mv).expect("wild move not in legal list");
                 seen_indices[idx] = true;
@@ -550,48 +465,16 @@ fn wild_picks_from_full_legal_list_not_just_top_k() {
 
 #[test]
 fn wild_suppressed_when_mate_guarded() {
-    // Bot has mate-in-1, guaranteed_mate_in=1 — wild must not fire
-    // (would throw away the forced mate).
     let noise = NoiseProfile {
         wild_chance: 1.0,
         guaranteed_mate_in: 1,
         ..Default::default()
     };
+    let root = any_root();
     let mate_in_1 = Value::MATE.0 - 1;
     let lines = vec![line(mate_in_1)];
     let legal: Vec<Move> = (0..4).map(stub_move).collect();
     for ply in 0..20 {
-        assert_eq!(pick(&noise, 0xFACE, ply, &lines, &legal), NoisePick::Line(0));
-    }
-}
-
-#[test]
-fn blunder_takes_precedence_over_wild_and_softmax() {
-    // With blunder_chance=1.0 the blunder branch should always
-    // win, regardless of how the other knobs are set. Pins the
-    // branch ordering documented at the module level: blunder is
-    // the calibrated mistake signal and gets first crack, then
-    // wild, then softmax.
-    let noise = NoiseProfile {
-        candidate_pool: 4,
-        temperature_cp: 200,
-        blunder_chance: 1.0,
-        wild_chance: 1.0,
-        guaranteed_mate_in: 0,
-        ..Default::default()
-    };
-    let lines = vec![line(0), line(-50), line(-200), line(-400)];
-    let legal: Vec<Move> = (0..6).map(stub_move).collect();
-    for ply in 0..30 {
-        match pick(&noise, 0xBEEF, ply, &lines, &legal) {
-            NoisePick::Blunder(idx) => assert!(
-                idx >= 1,
-                "blunder must never pick #1 (got Blunder({idx}))",
-            ),
-            other => panic!(
-                "non-blunder pick at ply {ply}: {other:?} (blunder rolls first \
-                 at chance=1.0 — must always win)",
-            ),
-        }
+        assert_eq!(pick(&noise, 0xFACE, ply, &root, &lines, &legal), NoisePick::Line(0));
     }
 }

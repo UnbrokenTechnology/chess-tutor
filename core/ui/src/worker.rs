@@ -119,26 +119,26 @@ pub(crate) enum WorkerResult {
 
 #[derive(Clone, Debug)]
 pub enum NoisePickInfo {
-    /// Softmax branch fired — sampled `pick_idx` from the top-K.
-    Softmax {
+    /// Variety branch fired — sampled `pick_idx` from the ranked lines
+    /// per the `avg_move_rank` dial.
+    Variety {
         pick_idx: usize,
         num_lines: usize,
-        delta_from_top_cp: i32,
     },
-    /// Blunder branch fired — picked a deliberately worse line.
-    /// `pick_idx` is always `>= 1`; either an in-band line or one
-    /// from the closest-on-each-side fallback pool.
+    /// Blunder branch fired — picked a line that loses material inside
+    /// the configured band. `pick_idx` is always `>= 1`.
     Blunder {
         pick_idx: usize,
         num_lines: usize,
         delta_from_top_cp: i32,
     },
-    /// Blunder roll fired but no plausible alternative was available
-    /// within the tolerance cap — bot played best instead. Logged so
-    /// the user can see when the configured rate is being
-    /// under-delivered.
-    BlunderSkipped {
-        closest_above_loss_cp: i32,
+    /// Miss branch fired — a material-winning move was available and
+    /// the bot deliberately declined it, playing the best non-winning
+    /// line. `engine_top` is the winning move that was passed up.
+    Miss {
+        pick_idx: usize,
+        num_lines: usize,
+        engine_top: Move,
     },
     /// Wild branch fired — bot played `mv`; the engine's preferred
     /// move was `engine_top`. The two may coincidentally match.
@@ -181,7 +181,7 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                 let started = Instant::now();
                 let lines = engine.search(&mut pos, params);
                 let elapsed = started.elapsed();
-                let pick = noise::pick(&noise, seed, ply, &lines, &legal);
+                let pick = noise::pick(&noise, seed, ply, &pos, &lines, &legal);
                 let (mv, line, noise_pick) = match pick {
                     NoisePick::Line(idx) => {
                         let line = lines.get(idx).cloned();
@@ -189,10 +189,9 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                         let info = if idx == 0 || lines.is_empty() {
                             None
                         } else {
-                            Some(NoisePickInfo::Softmax {
+                            Some(NoisePickInfo::Variety {
                                 pick_idx: idx,
                                 num_lines: lines.len(),
-                                delta_from_top_cp: lines[idx].score.0 - lines[0].score.0,
                             })
                         };
                         (mv, line, info)
@@ -207,16 +206,19 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                         });
                         (mv, line, info)
                     }
-                    NoisePick::BlunderSkipped { closest_above_loss_cp } => {
-                        // Roll fired but no plausible alternative
-                        // was available. Play #1, report the skip
-                        // so the user sees their configured rate is
-                        // being slightly under-delivered.
-                        let line = lines.first().cloned();
+                    NoisePick::Miss(idx) => {
+                        // Declined a material-winning move (#1) and
+                        // played the best non-winning line at `idx`.
+                        let line = lines.get(idx).cloned();
                         let mv = line.as_ref().and_then(|l| l.pv.first().copied());
-                        let info = Some(NoisePickInfo::BlunderSkipped {
-                            closest_above_loss_cp,
-                        });
+                        let info = lines
+                            .first()
+                            .and_then(|top| top.pv.first().copied())
+                            .map(|engine_top| NoisePickInfo::Miss {
+                                pick_idx: idx,
+                                num_lines: lines.len(),
+                                engine_top,
+                            });
                         (mv, line, info)
                     }
                     NoisePick::Wild(wild_mv) => {

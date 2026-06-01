@@ -162,6 +162,7 @@ pub(super) fn verdict_label(v: MoveVerdict) -> &'static str {
         MoveVerdict::Inaccuracy => "Inaccuracy",
         MoveVerdict::Mistake => "Mistake",
         MoveVerdict::Blunder => "Blunder",
+        MoveVerdict::Miss => "Miss",
         MoveVerdict::BestAvailable => "Best available",
     }
 }
@@ -170,7 +171,7 @@ pub(super) fn verdict_sentiment(v: MoveVerdict) -> Sentiment {
     match v {
         MoveVerdict::Best | MoveVerdict::Good => Sentiment::Positive,
         MoveVerdict::Inaccuracy => Sentiment::Mixed,
-        MoveVerdict::Mistake | MoveVerdict::Blunder => Sentiment::Negative,
+        MoveVerdict::Mistake | MoveVerdict::Blunder | MoveVerdict::Miss => Sentiment::Negative,
         MoveVerdict::BestAvailable => Sentiment::Neutral,
     }
 }
@@ -198,18 +199,29 @@ pub(super) fn format_score_pawns(score: Value) -> String {
             format!("-#{}", moves)
         }
     } else {
-        format!("{:+.2}", score.0 as f32 / 100.0)
+        // Engine score → chess.com-aligned pawns. The score is raw
+        // engine-cp (tapered pawn 128→213); divide by PAWN_EG to match
+        // the CLI (`units.rs`), `win_chances`, and the tactic card.
+        format!("{:+.2}", score.0 as f32 / Value::PAWN_EG.0 as f32)
     }
 }
 
 pub(super) fn format_delta_pawns(delta_cp: i32) -> String {
-    format!("{:+.2}", delta_cp as f32 / 100.0)
+    // Delta of two engine-cp eval scores → pawns on the same PAWN_EG
+    // scale as `format_score_pawns`.
+    format!("{:+.2}", delta_cp as f32 / Value::PAWN_EG.0 as f32)
 }
 
 pub(super) fn surprise_note(verdict: MoveVerdict, surprise: Option<SurpriseKind>) -> Option<String> {
     match (verdict, surprise) {
         (MoveVerdict::Mistake | MoveVerdict::Blunder, Some(SurpriseKind::LooksGoodButBad)) => {
-            Some("This looked natural but the deeper line gives back material.".to_string())
+            // Deliberately does NOT claim "gives back material" — a
+            // static-vs-search surprise is often an initiative/positional
+            // loss with material unchanged (e.g. a pawn lunge that invites
+            // a freeing reply). The specific mechanism (material vs
+            // initiative vs no-shorter-lesson) is carried by the dedicated
+            // body card (`build_initiative_item` / `build_depth_honesty_item`).
+            Some("This looked natural, but the deeper line doesn't hold up.".to_string())
         }
         (MoveVerdict::Best | MoveVerdict::Good, Some(SurpriseKind::LooksBadButGood)) => {
             Some("This looked risky on the surface — the longer line pays off.".to_string())

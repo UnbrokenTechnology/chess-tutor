@@ -225,15 +225,23 @@ impl Session {
     fn coaching_tactic_hint_static_scan(
         &self,
     ) -> Option<chess_tutor_engine::analysis::TacticHit> {
-        use chess_tutor_engine::analysis::{find_best_tactic_in_position, PriorMove};
-        let prior = if let Some(last_entry) = self.history.last() {
-            let last_idx = self.history.len() - 1;
-            let pre = self.pre_move_position(last_idx);
-            Some(PriorMove::new(&pre, last_entry.mv))
-        } else {
-            None
-        };
-        find_best_tactic_in_position(&self.position, self.user_color(), prior)
+        use chess_tutor_engine::analysis::find_best_tactic_in_position;
+        find_best_tactic_in_position(&self.position, self.user_color(), self.coaching_prior_move())
+    }
+
+    /// The opponent's last move *into* the live position, paired with
+    /// the piece it captured, for the recapture guard. Feeds both the
+    /// static tactic-hint scan and the tactical-mode gate
+    /// ([`crate::coaching_view::build_coaching_view`]). `None` at the
+    /// start of the game where no prior move exists.
+    pub(crate) fn coaching_prior_move(
+        &self,
+    ) -> Option<chess_tutor_engine::analysis::PriorMove> {
+        use chess_tutor_engine::analysis::PriorMove;
+        let last_entry = self.history.last()?;
+        let last_idx = self.history.len() - 1;
+        let pre = self.pre_move_position(last_idx);
+        Some(PriorMove::new(&pre, last_entry.mv))
     }
 
     pub(crate) fn is_user_move(&self, entry: &HistoryEntry) -> bool {

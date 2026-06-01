@@ -35,6 +35,15 @@ pub(crate) fn review_headline_for(
             None => format!("Material at risk: {:.1} pawns", pawns),
         };
     }
+    if let Some(a) = assessment.allowed.as_ref() {
+        // ALLOWED-not-MISSED: the row leads with what the move allowed,
+        // not a missed point. Pattern name + swing, no squares.
+        return format!(
+            "You allowed {} ({:.1} pawns swing)",
+            crate::learning_mode::allowed_pattern_phrase_pub(a.walked_into.pattern),
+            (a.conceded_cp as f32) / 100.0,
+        );
+    }
     if let Some(t) = assessment.teaching {
         let (area_a, _) = crate::learning_mode::term_prompt_copy(t.dominant.term);
         return match t.secondary {
@@ -73,7 +82,7 @@ pub(crate) fn format_score_root_pov(score: Value, _root_stm: Color) -> String {
             format!("-M{}", (Value::MATE.0 + score.0).max(1))
         }
     } else {
-        let pawns = score.0 as f32 / Value::PAWN_MG.0 as f32;
+        let pawns = score.0 as f32 / Value::PAWN_EG.0 as f32;
         format!("{:+.2}", pawns)
     }
 }
@@ -121,17 +130,23 @@ impl Session {
                 continue;
             };
             let pre = self.pre_move_position(idx);
+            let prior_move = self.prior_move_for(idx);
             let assessment = chess_tutor_engine::analysis::classify_user_move(
                 &pre,
                 &retro.analyses,
                 retro.user_move,
                 &config,
+                prior_move,
             );
-            let kind = match (&assessment.blunder, &assessment.teaching) {
-                (Some(_), Some(_)) => ReviewMomentKind::BlunderWithLesson,
-                (Some(_), None) => ReviewMomentKind::Blunder,
-                (None, Some(_)) => ReviewMomentKind::TeachingMoment,
-                (None, None) => continue,
+            // ALLOWED collapses into the same review row as a teaching
+            // moment (both are "your move had a teachable cost"); the
+            // headline below distinguishes them.
+            let teaching_like = assessment.teaching.is_some() || assessment.allowed.is_some();
+            let kind = match (assessment.blunder.is_some(), teaching_like) {
+                (true, true) => ReviewMomentKind::BlunderWithLesson,
+                (true, false) => ReviewMomentKind::Blunder,
+                (false, true) => ReviewMomentKind::TeachingMoment,
+                (false, false) => continue,
             };
             let headline = review_headline_for(&assessment);
             let move_pair_number = idx / 2 + 1;
@@ -200,7 +215,7 @@ impl Session {
             }
             Some(v) => {
                 let ratio = (v.0 as f32 / EVAL_BAR_SATURATION_CP).clamp(-1.0, 1.0);
-                let pawns = v.0 as f32 / Value::PAWN_MG.0 as f32;
+                let pawns = v.0 as f32 / Value::PAWN_EG.0 as f32;
                 (0.5 + 0.5 * ratio, format!("{:+.2}", pawns))
             }
             None => (0.5, String::from("—")),
@@ -397,7 +412,7 @@ impl Session {
         } else if let Some(info) = &entry.engine_info {
             RetrospectiveKind::EngineMove {
                 san: entry.san.clone(),
-                eval_pawns: info.score_white_pov.0 as f32 / Value::PAWN_MG.0 as f32,
+                eval_pawns: info.score_white_pov.0 as f32 / Value::PAWN_EG.0 as f32,
                 depth: info.depth,
                 elapsed_ms: info.elapsed.as_millis(),
             }
@@ -438,6 +453,7 @@ impl Session {
             &self.position,
             self.user_color(),
             tactic_hint.as_ref(),
+            self.coaching_prior_move(),
         );
         CoachingPanelView { view_model }
     }

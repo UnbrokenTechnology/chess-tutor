@@ -102,6 +102,9 @@ pub mod blocked_center_outcome;
 pub mod castling_outcome;
 pub mod check_followups;
 pub mod defusals;
+pub mod desperado;
+pub mod forcing_check_chain;
+pub mod initiative_loss;
 pub mod initiative_outcome;
 pub mod king_safety_outcome;
 pub mod latent_threats;
@@ -114,8 +117,10 @@ pub mod overloading;
 pub mod passed_pawns_outcome;
 pub mod pawn_structure_outcome;
 pub mod pieces_positional_outcome;
+pub mod silent_sequencing;
 pub mod space_outcome;
 pub mod surprise;
+pub mod tactical_mode;
 pub mod tactic_escape;
 pub mod tactic_outcome;
 pub mod tactic_util;
@@ -153,14 +158,17 @@ pub use check_followups::{find_check_followups, CheckFollowup, ReplyFollowup};
 pub use defusals::{
     find_threat_defusals, DefusalMechanism, DefusalReport, DefusedThreat, ThreatDefusal,
 };
+pub use desperado::{find_desperado, Desperado};
+pub use forcing_check_chain::{forcing_check_chain, ForcingCheckChain, MAX_CHAIN_DEPTH};
+pub use initiative_loss::{detect_initiative_loss, InitiativeLoss, TempoHit, MAX_PV_PAIRS};
 pub use initiative_outcome::{compute_initiative_outcome, InitiativeOutcome};
 pub use king_safety_outcome::{compute_king_safety_outcome, KingSafetyOutcome, KingSafetySnapshot};
 pub use material_outcome::{compute_material_outcome, CaptureEvent, MaterialOutcome};
 pub use mobility_outcome::{compute_mobility_outcome, MobilityOutcome, PieceMobility};
 pub use move_analysis::{analyze_position, MoveAnalysis};
 pub use move_assessment::{
-    classify_user_move, BlunderInfo, GatingConfig, MoveAssessment, TeachingInfo, TermContribution,
-    TermFamily,
+    classify_user_move, AllowedInfo, BlunderInfo, GatingConfig, MoveAssessment, TeachingInfo,
+    TermContribution, TermFamily,
 };
 pub use latent_threats::{
     describe_discovery_firing, find_latent_threats, pin_forcing_escape, DiscoveryFiring,
@@ -171,8 +179,14 @@ pub use overloading::{find_overloaded, OverloadedPiece};
 pub use passed_pawns_outcome::{compute_passed_pawns_outcome, PassedPawnsOutcome};
 pub use pawn_structure_outcome::{compute_pawn_structure_outcome, PawnStructureOutcome};
 pub use pieces_positional_outcome::{compute_pieces_positional_outcome, PiecesPositionalOutcome};
+pub use silent_sequencing::{
+    is_silent_sequencing, DEEP_GAP_MIN_CP, SHALLOW_DEPTH, SHALLOW_GAP_MAX_CP,
+};
 pub use space_outcome::{compute_space_outcome, SpaceOutcome};
 pub use surprise::{detect_surprise, SurpriseKind};
+pub use tactical_mode::{
+    classify_tactical_mode, TacticalReason, TacticalState, FORCING_CHECK_CHAIN_MIN_DEPTH,
+};
 pub use tactic_escape::{find_tactic_escape, EscapeKind, TacticEscape};
 pub use tactic_outcome::{
     compute_tactic_outcome, find_best_tactic_in_position, find_tactic_in_line, Confidence,
@@ -184,5 +198,7 @@ pub use threats_outcome::{
     compute_threats_outcome, filter_guaranteed_targets, list_hanging, list_see_losing,
     HangingPiece, PieceLocation, PressureKind, PressuredPiece, ThreatsOutcome,
 };
-pub use verdict::{classify_move, MoveVerdict};
+pub use verdict::{
+    classify_move, classify_move_with_material, gave_away_advantage, MoveVerdict,
+};
 pub use win_chances::win_chances;

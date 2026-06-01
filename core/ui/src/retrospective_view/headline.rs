@@ -67,6 +67,9 @@ pub(super) fn build_headline(
             "Position was already lost ({}).",
             format_score_pawns(best.score)
         )),
+        MoveVerdict::Miss => Some(
+            "A stronger move won material here — this one let it slip.".to_string(),
+        ),
         _ if user_is_sharp => Some(
             "Well spotted — this looks risky at first glance, but the longer line pays off."
                 .to_string(),

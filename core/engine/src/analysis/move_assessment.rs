@@ -29,10 +29,35 @@
 //!   missed / Continue" prompt that names the concept without ever
 //!   naming the engine's preferred move.
 //!
-//! The two gates are independent: a move can be Fine, just-Blunder,
-//! just-TeachingMoment, or both. The UI layer decides priority
-//! (blunder safety typically wins on the live prompt; both surface
-//! independently in the game review).
+//! - **ALLOWED-not-MISSED** (PLAN-teaching-gui §3): the move swung a
+//!   winning/equal position into the opponent's favour
+//!   ([`gave_away_advantage`]) *and* a named detector explains it — a
+//!   `user_walked_into` tactic from [`compute_tactic_outcome`] (which
+//!   already folds in the surviving-latent-alignment fallback). The
+//!   prompt reframes from "you missed a better move" to "your move *let
+//!   your opponent do* something — what did you let them do?" This is
+//!   the discovered-attack `Qc5+` / positional-punish `O-O` shape: the
+//!   damage is something the opponent now gets to play, not a quiet
+//!   downgrade. ALLOWED is a *teaching* dimension (it shares the
+//!   `MistakeHandling` gate, not the blunder-safety gate); when it fires
+//!   the UI leads with the reframe instead of the term-based prompt.
+//!
+//! The gates are independent: a move can be Fine, just-Blunder,
+//! just-TeachingMoment, ALLOWED, or some combination. The UI layer
+//! decides priority (blunder safety typically wins on the live prompt;
+//! all surface independently in the game review).
+//!
+//! ## The silent-sequencing suppressor (PLAN-teaching-gui §3)
+//!
+//! There is a fourth, *negative* gate: when the bad eval only emerges
+//! below human calculation depth **and no named detector fires**
+//! ([`is_silent_sequencing`]), we suppress the pause entirely. Pausing
+//! with a verdict the student could never have found — and can't act on
+//! — is worse than not pausing (the `…Qc8` case). Detectors-only
+//! already keeps the *coaching* surface quiet there; this makes the
+//! *pause* quiet too. The suppressor runs last and, when it fires,
+//! clears the teaching/allowed dimensions so [`MoveAssessment::is_fine`]
+//! holds for the in-game pause.
 //!
 //! ## Why not reuse [`super::MoveVerdict`]?
 //!
@@ -43,7 +68,10 @@
 //! A 60 cp drop that's all king safety is Good by verdict but a
 //! Teaching Moment here — concrete, teachable, in the student's ZPD.
 
-use super::{compute_material_outcome, MoveAnalysis, TermId};
+use super::{
+    compute_material_outcome, compute_tactic_outcome, gave_away_advantage, is_silent_sequencing,
+    MoveAnalysis, MoveVerdict, PriorMove, TacticHit, TermId,
+};
 use crate::position::Position;
 use crate::types::{Color, Move, Square};
 
@@ -112,14 +140,19 @@ impl Default for GatingConfig {
 pub struct MoveAssessment {
     pub blunder: Option<BlunderInfo>,
     pub teaching: Option<TeachingInfo>,
+    /// `Some` when the move gave away a winning/equal position *and* a
+    /// named detector explains what the opponent now gets to do — the
+    /// ALLOWED-not-MISSED case. Drives the reframed prompt. Shares the
+    /// `MistakeHandling` (teaching) gate, not the blunder-safety gate.
+    pub allowed: Option<AllowedInfo>,
 }
 
 impl MoveAssessment {
-    /// `true` when neither gate fired — the game should continue
-    /// without any live intervention. The retrospective still renders
-    /// (it always does); this only controls the in-game pause.
+    /// `true` when no gate fired — the game should continue without any
+    /// live intervention. The retrospective still renders (it always
+    /// does); this only controls the in-game pause.
     pub fn is_fine(&self) -> bool {
-        self.blunder.is_none() && self.teaching.is_none()
+        self.blunder.is_none() && self.teaching.is_none() && self.allowed.is_none()
     }
 
     /// Convenience constructor for tests / no-op assessments.
@@ -127,8 +160,31 @@ impl MoveAssessment {
         Self {
             blunder: None,
             teaching: None,
+            allowed: None,
         }
     }
+}
+
+/// The ALLOWED-not-MISSED dimension. Populated when the user's move
+/// conceded a winning/equal position ([`gave_away_advantage`]) and a
+/// named detector explains the swing — so the prompt can say "your move
+/// let your opponent do *this*" instead of "you missed a better move."
+///
+/// Carries the punishing tactic (the `user_walked_into` hit) so the UI
+/// can name the *pattern* (pre-move coaching names no squares; the
+/// retrospective may). The cp swing is the conceded amount in root-STM
+/// POV engine-cp.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AllowedInfo {
+    /// The tactic the user walked into — the opponent's punishing
+    /// resource that the move failed to address. From
+    /// [`compute_tactic_outcome`]'s `user_walked_into` slot, which folds
+    /// in both the PV-realized tactic and the surviving-latent-alignment
+    /// fallback (the `Qc5+` discovered-attack shape).
+    pub walked_into: TacticHit,
+    /// How much the move conceded, in root-STM POV engine-cp
+    /// (`best_score − played_score`, always positive when this fires).
+    pub conceded_cp: i32,
 }
 
 /// Realized material loss after the user's move. Drives the blunder
@@ -286,6 +342,11 @@ impl TermFamily {
 ///   slice (typically via `SearchParams::force_include`).
 /// - `user_move`: the move the user actually played.
 /// - `config`: gating thresholds; see [`GatingConfig`].
+/// - `prior_move`: the opponent's move *into* `pre_pos` (the move that
+///   produced the position the user faced). Feeds the recapture guard in
+///   the ALLOWED-detector's [`compute_tactic_outcome`] call and the
+///   silent-sequencing suppressor's detector chain. Pass `None` at the
+///   start of a game where no prior move exists.
 ///
 /// Returns [`MoveAssessment::fine`] when the user's move can't be
 /// found in `analyses` or the analyses slice is empty — the move
@@ -296,6 +357,7 @@ pub fn classify_user_move(
     analyses: &[MoveAnalysis],
     user_move: Move,
     config: &GatingConfig,
+    prior_move: Option<PriorMove>,
 ) -> MoveAssessment {
     let Some(best) = analyses.first() else {
         return MoveAssessment::fine();
@@ -305,10 +367,95 @@ pub fn classify_user_move(
     };
     let root_stm = pre_pos.side_to_move();
 
-    let blunder = assess_blunder(pre_pos, user, root_stm, config);
+    // You cannot "blunder" by playing the engine's own best move. When the
+    // played move is Best (top choice) or BestAvailable (a hopeless
+    // position where this is as good as anything — the Qxh8+ desperado that
+    // trades an already-trapped queen for a rook), any material it sheds was
+    // unavoidable: a takeback prompt is misleading because there's nothing
+    // better to take it back to. This also avoids flagging a sound sacrifice
+    // the engine endorses as best. A genuine blunder — a move meaningfully
+    // worse than an available alternative — still has user ≠ best and fires.
+    let move_is_best = matches!(
+        user.classify(best.score),
+        MoveVerdict::Best | MoveVerdict::BestAvailable
+    );
+    let blunder = if move_is_best {
+        None
+    } else {
+        assess_blunder(pre_pos, user, root_stm, config)
+    };
     let teaching = assess_teaching(best, user, root_stm, config);
+    let allowed = assess_allowed(best, user, pre_pos, root_stm, prior_move);
 
-    MoveAssessment { blunder, teaching }
+    let mut assessment = MoveAssessment {
+        blunder,
+        teaching,
+        allowed,
+    };
+
+    // Silent-sequencing suppressor (PLAN §3, the fourth gate). When the
+    // bad eval only emerges below human calculation depth AND no *named*
+    // detector fires, the verdict is unactionable — pausing on it is
+    // worse than not pausing (the `…Qc8` case).
+    //
+    // It must override the *teaching* and *allowed* dimensions both. The
+    // ALLOWED detector keys on `user_walked_into`, which surfaces even a
+    // bare structural pin that "always lights" geometrically and survives
+    // a defending move (`…Qc8` defends its pinned bishop 2:2). That pin
+    // is exactly the pattern [`is_silent_sequencing`]'s detector chain
+    // deliberately filters out (it counts only material-winning surviving
+    // alignments — DiscoveredAttack / RemovingDefender / Skewer), so the
+    // suppressor fires on `…Qc8` and clears the spurious ALLOWED there,
+    // while leaving the genuine `Qc5+` discovered-attack ALLOWED intact
+    // (that pattern IS material-winning, so the suppressor never fires).
+    //
+    // A realized-material blunder is always concrete and is never
+    // suppressed — only the depth-hidden teaching/allowed pause is.
+    let has_pause = assessment.teaching.is_some() || assessment.allowed.is_some();
+    if has_pause && best.mv != user.mv {
+        let deep_gap_cp = best.score.0 - user.score.0;
+        if is_silent_sequencing(pre_pos, user.mv, best.mv, deep_gap_cp, prior_move) {
+            assessment.teaching = None;
+            assessment.allowed = None;
+        }
+    }
+
+    assessment
+}
+
+/// Detect the ALLOWED-not-MISSED dimension: the move gave away a
+/// winning/equal position ([`gave_away_advantage`]) AND a named
+/// `user_walked_into` tactic explains what the opponent now gets to do.
+///
+/// `best` / `user` scores are root-STM POV engine-cp from the same root.
+/// Returns `None` when the swing isn't a giveaway, or when no detector
+/// explains it (in which case it's either a missed-move teaching moment
+/// or — if the eval needs depth — silent sequencing, both handled
+/// elsewhere).
+fn assess_allowed(
+    best: &MoveAnalysis,
+    user: &MoveAnalysis,
+    pre_pos: &Position,
+    root_stm: Color,
+    prior_move: Option<PriorMove>,
+) -> Option<AllowedInfo> {
+    if user.mv == best.mv {
+        return None;
+    }
+    if !gave_away_advantage(best.score, user.score) {
+        return None;
+    }
+    // A detector must explain the swing. `user_walked_into` already
+    // folds in both the PV-realized opponent tactic and the
+    // surviving-latent-alignment fallback (the `Qc5+` discovered-attack
+    // shape PLAN §4.1 wired in), so a single call covers both the
+    // "they actually play it" and "they have it loaded" cases.
+    let outcome = compute_tactic_outcome(best, user, pre_pos, root_stm, prior_move);
+    let walked_into = outcome.user_walked_into?;
+    Some(AllowedInfo {
+        walked_into,
+        conceded_cp: best.score.0 - user.score.0,
+    })
 }
 
 /// Compute the realized material loss from the user's move and the

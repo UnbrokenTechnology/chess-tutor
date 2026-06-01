@@ -19,6 +19,10 @@
 mod terms;
 pub(crate) use terms::term_prompt_copy;
 
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
+
 
 /// Live overlays / cues shown during the user's turn, *before* they
 /// commit a move.
@@ -175,10 +179,35 @@ pub fn build_intervention_panel(
             actions: vec![InterventionAction::TakeBack, InterventionAction::Continue],
         };
     }
+    // ALLOWED-not-MISSED (PLAN §3) takes priority over a plain
+    // missed-point teaching prompt: it is the more specific, more
+    // actionable framing — "your move let your opponent do something."
+    // The concept reveal names the *pattern* (a discovered attack, a
+    // fork) but never the engine's preferred move, preserving the
+    // find-it-yourself principle.
+    if let Some(allowed) = pending.assessment.allowed.as_ref() {
+        let (headline, summary, concept) = allowed_prompt(allowed);
+        let mut actions = vec![InterventionAction::TakeBack];
+        if !pending.concept_revealed {
+            actions.push(InterventionAction::RevealConcept);
+        }
+        actions.push(InterventionAction::Continue);
+        return InterventionPanelView {
+            kind: InterventionPanelKind::TeachingMoment,
+            headline,
+            summary,
+            concept: if pending.concept_revealed {
+                Some(concept)
+            } else {
+                None
+            },
+            actions,
+        };
+    }
     let teaching = pending
         .assessment
         .teaching
-        .expect("intervention requires either blunder or teaching");
+        .expect("intervention requires a blunder, allowed, or teaching dimension");
     let (headline, summary, concept) = teaching_prompt(teaching);
     let mut actions = vec![InterventionAction::TakeBack];
     if !pending.concept_revealed {
@@ -196,6 +225,63 @@ pub fn build_intervention_panel(
         },
         actions,
     }
+}
+
+/// Build the (headline, summary, concept_reveal) triple for an
+/// ALLOWED-not-MISSED prompt. The framing mirrors the retrospective's
+/// ALLOWED reframe (PLAN §4.1) and the CLI's `print_allowed_banner`,
+/// kept question-shaped so the student is asked *"what did I let my
+/// opponent do?"* rather than told a move. The headline / summary stay
+/// pattern-and-swing only; the concept reveal names the pattern (a
+/// discovered attack, a fork) — never the engine's preferred move.
+fn allowed_prompt(
+    allowed: &chess_tutor_engine::analysis::AllowedInfo,
+) -> (String, String, String) {
+    let pattern = allowed.walked_into.pattern;
+    let headline = "Your move let your opponent do something — what did you let them do?".to_string();
+    let summary = format!(
+        "You were doing well, but this move swings about {:.1} pawns the other way. \
+         The question isn't \"what better move did I have?\" — it's \"what reply did I just allow?\"",
+        (allowed.conceded_cp as f32) / 100.0,
+    );
+    // Concept reveal: name the pattern using the engine's own phrasing,
+    // framed as the thing the move allowed. No squares, no engine move.
+    let concept = format!(
+        "Your move allowed {}. Look for the opponent's reply that fires it, \
+         and ask whether a move that addressed it first was available.",
+        allowed_pattern_phrase_pub(pattern),
+    );
+    (headline, summary, concept)
+}
+
+/// Lower-cased noun phrase for a tactic pattern, for the ALLOWED
+/// prompt's "you allowed {…}" sentence. Mirrors the retrospective's
+/// `pattern_phrase`; kept local so `learning_mode` has no dependency on
+/// the retrospective renderer. Falls back to the engine's own
+/// [`chess_tutor_engine::analysis::TacticPattern::heading`] for any
+/// pattern without a bespoke phrase. `pub(crate)` so the game-review
+/// headline builder can share the same wording.
+pub(crate) fn allowed_pattern_phrase_pub(
+    pattern: chess_tutor_engine::analysis::TacticPattern,
+) -> String {
+    use chess_tutor_engine::analysis::TacticPattern as P;
+    let phrase = match pattern {
+        P::Fork => "a fork",
+        P::HangingCapture => "a free capture",
+        P::RemovingDefender => "removing one of your defenders",
+        P::TrappedPiece => "a trap on one of your pieces",
+        P::Pin => "a pin",
+        P::RelativePin => "a relative pin",
+        P::Skewer => "a skewer",
+        P::DiscoveredAttack => "a discovered attack",
+        P::DiscoveredCheck => "a discovered check",
+        P::DoubleCheck => "a double check",
+        P::Deflection => "a deflection",
+        P::Attraction => "an attraction",
+        P::Interference => "interference",
+        _ => return pattern.heading().to_string(),
+    };
+    phrase.to_string()
 }
 
 /// Build the (headline, summary, concept_reveal) triple for a
@@ -254,18 +340,28 @@ fn capitalize_first(s: &str) -> String {
 }
 
 /// Decide whether `assessment` should pause the game given the
-/// user's `prefs`. Returns `true` if either gate fires under the
+/// user's `prefs`. Returns `true` if any active gate fires under the
 /// preferences they've set.
+///
+/// The ALLOWED-not-MISSED dimension shares the `MistakeHandling` gate
+/// with the teaching dimension (both are "your move had a teachable
+/// cost", just framed differently — see [`build_intervention_panel`]).
+/// The silent-sequencing suppressor has already been applied inside
+/// [`chess_tutor_engine::analysis::classify_user_move`], so an
+/// `assessment` with a depth-only, detector-less verdict arrives here
+/// already cleared and will not pause.
 pub fn intervention_required(
     assessment: &chess_tutor_engine::analysis::MoveAssessment,
     prefs: &LearningPreferences,
 ) -> bool {
     let blunder_active = matches!(prefs.blunder_safety, BlunderSafety::OfferTakeback)
         && assessment.blunder.is_some();
-    let teaching_active = matches!(
+    let teaching_gate = matches!(
         prefs.mistake_handling,
         MistakeHandling::TeachingMoments | MistakeHandling::AllMistakes
-    ) && assessment.teaching.is_some();
+    );
+    let teaching_active =
+        teaching_gate && (assessment.teaching.is_some() || assessment.allowed.is_some());
     blunder_active || teaching_active
 }
 

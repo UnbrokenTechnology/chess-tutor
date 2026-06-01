@@ -2,7 +2,7 @@ use super::*;
 use crate::eval::EvalTrace;
 use crate::types::{Square, Value};
 
-use super::super::TermDelta;
+use super::super::{PriorMove, TermDelta};
 
 fn make_delta(term: TermId, white_pov_tapered: i32) -> TermDelta {
     TermDelta {
@@ -350,6 +350,7 @@ fn classify_returns_fine_when_user_move_not_in_analyses() {
         &analyses,
         quiet_move(),
         &GatingConfig::default(),
+        None,
     );
     assert!(assessment.is_fine());
 }
@@ -382,7 +383,7 @@ fn classify_flags_hung_queen_as_blunder() {
         },
     );
     let pre = Position::from_fen("3qk3/8/8/8/8/5N2/8/4K3 b - - 0 1").unwrap();
-    let assessment = classify_user_move(&pre, &analyses, hang, &GatingConfig::default());
+    let assessment = classify_user_move(&pre, &analyses, hang, &GatingConfig::default(), None);
     let blunder = assessment.blunder.expect("Qd4 should trip blunder gate");
     // Queen midgame value is well above 300 cp.
     assert!(
@@ -392,4 +393,130 @@ fn classify_flags_hung_queen_as_blunder() {
     );
     // The hanging piece lands on d4 after Nxd4.
     assert_eq!(blunder.lost_piece_square, Some(Square::D4));
+}
+
+// ---- ALLOWED-not-MISSED pause (PLAN §3) ------------------------
+
+/// Run a full multi-PV analysis on `fen`, force-including `user`, and
+/// classify it. Shared by the case-study pause tests below — they need
+/// real search scores (the ALLOWED gate keys on the cp swing) and a
+/// real PV (the detector chain walks it).
+///
+/// `depth = 12`, `multi_pv = 3`, single-thread — matches the production
+/// retrospective worker (`RETROSPECTIVE_MULTI_PV = 3`, single-threaded
+/// for determinism). The classifier runs against exactly this analysis
+/// in the GUI, so the tests must use the same configuration: the
+/// MultiPV setting materially moves the scores the ALLOWED giveaway gate
+/// keys on (memory `project_multipv_mate_pathology`), so a depth/MultiPV
+/// that doesn't match production would test a configuration that never
+/// runs.
+fn classify_on_fen(fen: &str, user: Move, prior: Option<PriorMove>) -> MoveAssessment {
+    use crate::engine::{Engine, SearchParams};
+    let mut pre = Position::from_fen(fen).expect("valid FEN");
+    let mut engine = Engine::default();
+    let analyses = super::super::analyze_position(
+        &mut engine,
+        &mut pre,
+        SearchParams {
+            max_depth: 12,
+            multi_pv: 3,
+            force_include: vec![user],
+            threads: 1,
+            ..SearchParams::default()
+        },
+    );
+    let pre = Position::from_fen(fen).unwrap();
+    classify_user_move(&pre, &analyses, user, &GatingConfig::default(), prior)
+}
+
+#[test]
+fn allowed_pause_fires_on_discovered_attack_qc5() {
+    use super::super::TacticPattern;
+    // discovered-attack-after-qxe6: White (the user) plays the natural
+    // Qc5+ (c4c5) instead of the defusing Qxe6+. Qc5+ leaves Black's
+    // qe6/be5/Re1 e-file alignment loaded; the eval collapses from
+    // winning to losing for White. The pause must use the ALLOWED
+    // framing (a detector explains the swing) rather than a bare
+    // missed-move teaching prompt.
+    //
+    // The *named* pattern is the alignment-collapse the search realizes
+    // on Black's best reply line. At the production config that line
+    // cashes the e-file via a Clearance (…Bxe5 then …Rxc2), so the slot
+    // reports Clearance rather than the bare standing DiscoveredAttack
+    // the static `danger:` scan names — both describe the same loaded
+    // e-file, and either is a legitimate "what you allowed." We assert
+    // ALLOWED fires with a real material pattern and a positive
+    // concession, not a specific pattern id (search-config-dependent).
+    const FEN: &str = "1r4nr/p3k3/4qpp1/4b2p/2Q5/8/PPPP1PPP/R1B1R1K1 w - - 0 1";
+    let qc5 = Move::normal(Square::C4, Square::C5);
+    let assessment = classify_on_fen(FEN, qc5, None);
+    let allowed = assessment
+        .allowed
+        .expect("Qc5+ gave away the win to a standing e-file tactic — ALLOWED must fire");
+    assert!(
+        matches!(
+            allowed.walked_into.pattern,
+            TacticPattern::DiscoveredAttack
+                | TacticPattern::Clearance
+                | TacticPattern::RemovingDefender
+                | TacticPattern::Skewer
+                | TacticPattern::Fork
+                | TacticPattern::HangingCapture
+        ),
+        "expected a material-winning pattern naming what Qc5+ allowed, got {:?}",
+        allowed.walked_into.pattern,
+    );
+    assert!(
+        allowed.conceded_cp > 0,
+        "conceded a positive amount, got {}",
+        allowed.conceded_cp
+    );
+}
+
+#[test]
+fn allowed_pause_fires_on_positional_punish_oo() {
+    use super::super::TacticPattern;
+    // positional-punish-after-qe6: White (the user) plays O-O (e1g1)
+    // instead of Ne3, allowing the standing RemovingDefender against Nf5
+    // (…Nxe4 removes the e4-pawn that guards it). At the production
+    // retrospective config (depth 12, MultiPV 3) the best line is ~+1.8
+    // and O-O drops to ~+0.2 — conceded ~1.6 pawns, no longer winning —
+    // so the shared `gave_away_advantage` predicate fires and a detector
+    // (the surviving alignment) explains it: ALLOWED, not MISSED.
+    //
+    // PLAN §5's matrix lists this row as "pause on O-O (allowed …Nxe4)".
+    // (NOTE: a single-PV `critique` reports O-O at +0.99 — above the
+    // giveaway floor — because MultiPV shifts the scores; the GUI runs
+    // MultiPV 3, which is what this test reproduces.)
+    const FEN: &str = "r1b1kb1r/1p3ppp/p2pqn2/4pNB1/4P3/2N5/PPP2PPP/R2QK2R w KQkq - 0 1";
+    let castle = Move::castling(Square::E1, Square::G1);
+    let assessment = classify_on_fen(FEN, castle, None);
+    let allowed = assessment
+        .allowed
+        .expect("O-O concedes the bind and allows the standing tactic — ALLOWED must fire");
+    assert_eq!(
+        allowed.walked_into.pattern,
+        TacticPattern::RemovingDefender,
+        "the reframe must name the remove-the-defender motif (…Nxe4 unguards Nf5)",
+    );
+    assert!(allowed.conceded_cp > 0);
+}
+
+#[test]
+fn no_pause_on_silent_sequencing_qc8() {
+    // silent-sequencing-after-qc8: Black (the user) plays …Qc8. The
+    // engine hates it, but the verdict only emerges past human
+    // calculation depth and NO named detector fires. The suppressor must
+    // keep the pause silent — neither teaching nor allowed survives.
+    const FEN: &str = "1r1q2nr/p3k3/2Bbbpp1/7p/2Q5/8/PPPP1PPP/R1B1R1K1 b - - 0 1";
+    let qc8 = Move::normal(Square::D8, Square::C8);
+    let assessment = classify_on_fen(FEN, qc8, None);
+    assert!(
+        assessment.allowed.is_none(),
+        "no detector explains …Qc8 — ALLOWED must not fire",
+    );
+    assert!(
+        assessment.teaching.is_none(),
+        "the silent-sequencing suppressor must clear the teaching pause for …Qc8",
+    );
 }

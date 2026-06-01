@@ -14,12 +14,16 @@
 //! categories that didn't move materially emit `None` so the panel
 //! stays scannable.
 
+mod depth_honesty;
+mod desperado;
 mod forced_consequences;
 mod headline;
 mod helpers;
+mod initiative;
 mod king_safety;
 mod material;
 mod mobility;
+mod override_note;
 mod passed_pawns;
 mod pawn_structure;
 mod pieces;
@@ -46,8 +50,12 @@ use crate::view::{
     RetrospectiveItem, RetrospectiveViewModel,
 };
 
+use depth_honesty::*;
+use desperado::*;
 use forced_consequences::*;
 use headline::*;
+use initiative::*;
+use override_note::*;
 use king_safety::*;
 use material::*;
 use mobility::*;
@@ -100,7 +108,14 @@ pub fn build_retrospective_view(
         return RetrospectiveViewModel::default();
     };
     let root_stm = pre_move_pos.side_to_move();
-    let verdict = user.classify(best.score);
+    // Material outcomes of both lines, mover-POV engine-mg-cp. The
+    // user's is reused below for the material / threats cards; the
+    // best line's is needed only for the material-aware verdict
+    // (Miss = best wins material, user declined without hanging).
+    let material_outcome = compute_material_outcome(user, pre_move_pos, root_stm);
+    let best_material = compute_material_outcome(best, pre_move_pos, root_stm);
+    let verdict =
+        user.classify_with_material(best.score, material_outcome.net_mg_cp, best_material.net_mg_cp);
 
     let headline = build_headline(pre_move_pos, best, user, verdict, root_stm, reveal_best_moves);
 
@@ -134,7 +149,6 @@ pub fn build_retrospective_view(
     // the student sees *why* the move was best — same intent as
     // narration's `explain_best = true` default.
 
-    let material_outcome = compute_material_outcome(user, pre_move_pos, root_stm);
     if let Some(it) = build_material_item(pre_move_pos, &material_outcome, root_stm) {
         items.push(it);
     }
@@ -215,6 +229,45 @@ pub fn build_retrospective_view(
         items.push(it);
     }
 
+    // Desperado-aware material narration (PLAN §4): when a doomed piece
+    // cashes a pawn with check before it falls, narrate "−X becomes
+    // −X+pawn", not "you're fine".
+    if let Some(it) = build_desperado_item(pre_move_pos, user, root_stm) {
+        items.push(it);
+    }
+
+    // Static-vs-search override note (PLAN §4.2): when the term ledger and
+    // the search rank the user's move and the engine's pick in opposite
+    // directions, say so — never invent a positional justification.
+    if let Some(it) = build_override_note_item(best, user, root_stm) {
+        items.push(it);
+    }
+
+    // Loss-of-initiative note: a static-vs-search surprise-mistake whose
+    // mechanism is a forcing run (no named tactic). This is the *why* the
+    // static eval and the search disagree — when it fires we have the
+    // human-findable lesson, so the depth-honesty fallback below stays
+    // quiet (the two are mutually exclusive: one says "here's the
+    // mechanism", the other says "there's no shorter lesson").
+    let had_initiative_note =
+        if let Some(it) = build_initiative_item(pre_move_pos, best, user, root_stm, prior_move) {
+            items.push(it);
+            true
+        } else {
+            false
+        };
+
+    // Silent-sequencing depth-honesty note (PLAN §4.3): when the move is
+    // worse only beyond practical calculation depth and no detector fires,
+    // be honest that there's no shorter lesson. Bounded two-depth search
+    // inside the detector; only runs on a non-best move with a real gap.
+    // Suppressed when the initiative note already supplied the mechanism.
+    if !had_initiative_note {
+        if let Some(it) = build_depth_honesty_item(pre_move_pos, best, user, prior_move) {
+            items.push(it);
+        }
+    }
+
     let mobility_outcome = compute_mobility_outcome(user, pre_move_pos, root_stm);
     for it in build_mobility_items(&mobility_outcome, &post_pos, root_stm, show_all) {
         items.push(it);
@@ -242,7 +295,7 @@ pub fn build_retrospective_view(
     // the realized captures so the per-sub-term loop in
     // build_pieces_positional_items can drop misleading KP cards
     // without re-walking events.
-    let kp_supp = king_protector_suppression(&material_outcome, root_stm);
+    let kp_supp = capture_suppression(&material_outcome, root_stm);
     for it in build_pieces_positional_items(&pieces_outcome, root_stm, kp_supp) {
         items.push(it);
     }

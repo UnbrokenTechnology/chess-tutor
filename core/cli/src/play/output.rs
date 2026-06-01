@@ -68,16 +68,10 @@ pub(super) fn print_engine_move(out: &mut io::StdoutLock<'_>, entry: &HistoryEnt
 
 fn format_noise_tag(info: &NoisePickInfo) -> String {
     match info {
-        NoisePickInfo::Softmax {
+        NoisePickInfo::Variety {
             pick_idx,
             num_lines,
-            delta_from_top_cp,
-        } => format!(
-            "[noise: softmax #{} of {} ({:+} cp)]",
-            pick_idx + 1,
-            num_lines,
-            delta_from_top_cp,
-        ),
+        } => format!("[noise: variety #{} of {}]", pick_idx + 1, num_lines),
         NoisePickInfo::Blunder {
             pick_idx,
             num_lines,
@@ -88,9 +82,15 @@ fn format_noise_tag(info: &NoisePickInfo) -> String {
             num_lines,
             delta_from_top_cp,
         ),
-        NoisePickInfo::BlunderSkipped { closest_above_loss_cp } => format!(
-            "[noise: blunder roll skipped — closest above-band line was -{} cp]",
-            closest_above_loss_cp,
+        NoisePickInfo::Miss {
+            pick_idx,
+            num_lines,
+            engine_top,
+        } => format!(
+            "[noise: miss — declined material-winning {:?}, played #{} of {}]",
+            engine_top,
+            pick_idx + 1,
+            num_lines,
         ),
         NoisePickInfo::Wild { engine_top, engine_top_score } => format!(
             "[noise: wild — engine preferred {:?} ({:+})]",
@@ -332,18 +332,11 @@ pub(super) fn announce_trap_event(out: &mut io::StdoutLock<'_>, event: &TrapEven
 }
 
 pub(super) fn format_score(v: Value) -> String {
-    let mate = Value::MATE.0;
-    let abs = v.0.abs();
-    if abs >= mate - Value::MAX_PLY {
-        let plies_to_mate = mate - abs;
-        let moves = (plies_to_mate + 1) / 2;
-        return if v.0 > 0 {
-            format!("#{moves}")
-        } else {
-            format!("-#{moves}")
-        };
-    }
-    format!("{:+.2}", v.0 as f32 / 100.0)
+    // Delegate to the shared units helper so the play REPL speaks the
+    // same conventional-pawn scale (pawn = PAWN_EG = 213 engine-cp) as
+    // every other CLI surface. Dividing by 100 here used to inflate
+    // every score ~2.13×.
+    crate::units::format_pawns(v)
 }
 
 pub(super) fn print_help(out: &mut io::StdoutLock<'_>) -> io::Result<()> {

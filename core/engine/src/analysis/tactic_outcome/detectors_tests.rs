@@ -185,18 +185,30 @@ fn intermezzo_true_and_guard_cases() {
 #[test]
 fn attacking_f2_f7_cases() {
     use crate::types::Color;
-    // Bxf7+ with Black's king still home on e8 — the motif.
-    let pre = Position::from_fen("4k3/5p2/8/8/2B5/8/8/4K3 w - - 0 1").unwrap();
+    // SOUND Bxf7+ — the bishop is backed by a knight on g5 (fried-liver
+    // shape), so the king can't recapture (Kxf7 walks into the knight) and
+    // the capturer isn't just hanging. This is the real motif the pattern
+    // should surface.
+    let pre =
+        Position::from_fen("4k3/5p2/8/6N1/2B5/8/8/6K1 w - - 0 1").unwrap();
     let key = Move::normal(Square::C4, Square::F7);
     let mut post = pre.clone();
     post.do_move(key);
     assert!(detect_attacking_f2_f7(&pre, &post, key, Color::White, 0, None).is_some());
 
     // Same capture, but the king isn't on e8 → not the motif.
-    let pre2 = Position::from_fen("3k4/5p2/8/8/2B5/8/8/4K3 w - - 0 1").unwrap();
+    let pre2 = Position::from_fen("3k4/5p2/8/6N1/2B5/8/8/6K1 w - - 0 1").unwrap();
     let mut post2 = pre2.clone();
     post2.do_move(key);
     assert!(detect_attacking_f2_f7(&pre2, &post2, key, Color::White, 0, None).is_none());
+
+    // BARE Bxf7+ with no backing — the king just recaptures and White
+    // drops the bishop for a pawn. The soundness guard must suppress it:
+    // a hanging capturer is a blunder, not an "attack on f7" tactic.
+    let bare = Position::from_fen("4k3/5p2/8/8/2B5/8/8/4K3 w - - 0 1").unwrap();
+    let mut bare_post = bare.clone();
+    bare_post.do_move(key);
+    assert!(detect_attacking_f2_f7(&bare, &bare_post, key, Color::White, 0, None).is_none());
 }
 
 // ---- under-promotion (wave 6) ---------------------------------------

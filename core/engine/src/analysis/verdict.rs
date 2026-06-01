@@ -30,9 +30,53 @@
 //! Best / Good / Inaccuracy bands still use only `relative_loss`; the
 //! guard only kicks in when the band would otherwise land at Mistake
 //! or Blunder.
+//!
+//! ## The material axis (Miss vs Blunder)
+//!
+//! [`classify_move_with_material`] adds a third measurement, mirroring
+//! the chess.com distinction (and our own opponent bot's
+//! `miss_chance` / `blunder_chance` knobs in `noise.rs`):
+//!
+//! - **Blunder** — the move loses *your own* material.
+//! - **Miss** — the move fails to *win* material that was on offer:
+//!   the engine's best line wins material by force and your move
+//!   neither grabs it nor hangs your own.
+//!
+//! The material axis is consulted only inside the Mistake/Blunder band
+//! (where there's already a real eval gap). A **Miss** fires even when
+//! the swing guard would otherwise quiet the move — declining a forced
+//! material win while merely *holding* the eval is still the salient
+//! lesson — but **not** when the move actively *improved* the position
+//! (`absolute_swing > 0`), since a move that made things better isn't a
+//! "Miss" no matter how much more was on offer. Material is measured in
+//! engine midgame-cp (a pawn is [`Value::PAWN_MG`] = 128), the scale
+//! [`super::compute_material_outcome`] already reports `net_mg_cp` on.
+//! The plain [`classify_move`] keeps its score-only behaviour by
+//! delegating with zero material on both sides.
 
 use super::MoveAnalysis;
 use crate::types::Value;
+
+/// Did the user's move give away the advantage, from the mover's own POV?
+/// Both scores are side-to-move (mover) POV in raw engine-cp:
+/// `best` is the engine's top line's score from the position *before* the
+/// move; `played` is the score of the move the user actually played.
+///
+/// Two conditions, both required (the `critique` CLI predicate, ported
+/// here so the GUI's retrospective and Supported-mode pause share one
+/// definition — PLAN §3 / §4.1):
+/// - **conceded more than a pawn** (`best − played > PAWN_EG`), and
+/// - **no longer clearly winning** (`played < +PAWN_EG`).
+///
+/// Broader than "crossed into a negative eval": it catches "gave up a win
+/// without crossing zero" (`+2.0 → +0.2`) and "gave away the game from a
+/// neutral start" (`+0.2 → −3.0`), while the `played < +1.0` floor keeps
+/// "still clearly winning" slips quiet (`+5.0 → +3.0` stays silent).
+pub fn gave_away_advantage(best: Value, played: Value) -> bool {
+    let one_pawn = Value::PAWN_EG.0;
+    let conceded = best.0 - played.0;
+    conceded > one_pawn && played.0 < one_pawn
+}
 
 /// Qualitative judgement of a move, from the perspective of
 /// retrospective teaching feedback. Mirrors the Lichess / chess.com
@@ -55,6 +99,13 @@ pub enum MoveVerdict {
     /// Major swing — likely losing material, an attack, or the game
     /// — *and* the move actively worsened the position.
     Blunder,
+    /// A forced material win was on offer (the engine's best line wins
+    /// material) and this move let it slip without hanging the user's
+    /// own material. The salient feature is the *un-grabbed win*, not a
+    /// hang — so it's reported distinctly from Blunder. Only produced
+    /// by [`classify_move_with_material`]; the score-only
+    /// [`classify_move`] never returns it. See module docs.
+    Miss,
     /// The position was already hopeless before this move, and the
     /// chosen move is as good as any. We flag this separately so the
     /// renderer can say *"nothing you could have done"* rather than
@@ -95,6 +146,37 @@ const HOPELESS_SCORE_MAX: i32 = -500;
 ///   not actively worsen the position; calling that a "Mistake" is
 ///   misleading.
 pub fn classify_move(user_score: Value, best_score: Value, pre_score: Value) -> MoveVerdict {
+    // Material-free: zero on both sides means the material branch can
+    // never fire (no Miss, no material-driven Blunder), so this keeps
+    // the original score-only ladder exactly.
+    classify_move_with_material(user_score, best_score, pre_score, 0, 0)
+}
+
+/// Material-aware [`classify_move`]. Adds the Miss vs Blunder axis on
+/// top of the score ladder; see module docs for the full design.
+///
+/// `user_net_mg` / `best_net_mg` are the net material outcomes of the
+/// user's line and the engine's best line through the settled ply,
+/// from the **mover's own POV**, in engine midgame-cp (pawn = 128) —
+/// exactly what [`super::compute_material_outcome`] returns as
+/// `net_mg_cp` when called with `root_stm = pre_move_pos.side_to_move()`.
+/// Positive = that line wins material for the user.
+///
+/// The Best / Good / Inaccuracy bands and the swing guard are
+/// unchanged. Inside the Mistake/Blunder band, before the swing guard:
+/// - if the best line wins ≥ 1 pawn of material, the user's move
+///   doesn't hang ≥ 1 pawn of their own, and the user's move did not
+///   improve the position (`absolute_swing <= 0`) → [`MoveVerdict::Miss`].
+/// - otherwise fall through to the existing band + swing-guard logic
+///   (a hang with a negative swing stays Mistake/Blunder; a sound
+///   sacrifice that improved the eval is still capped at Inaccuracy).
+pub fn classify_move_with_material(
+    user_score: Value,
+    best_score: Value,
+    pre_score: Value,
+    user_net_mg: i32,
+    best_net_mg: i32,
+) -> MoveVerdict {
     let relative_loss = (best_score.0 - user_score.0).max(0);
     let absolute_swing = user_score.0 - pre_score.0;
     let hopeless = best_score.0 <= HOPELESS_SCORE_MAX;
@@ -113,8 +195,22 @@ pub fn classify_move(user_score: Value, best_score: Value, pre_score: Value) -> 
         return MoveVerdict::Inaccuracy;
     }
 
-    // Below: the band would land at Mistake or Blunder. Apply the
-    // swing guard before committing.
+    // Below: the band would land at Mistake or Blunder.
+    let one_pawn = Value::PAWN_MG.0;
+    let user_lost_material = user_net_mg <= -one_pawn;
+    let best_wins_material = best_net_mg >= one_pawn;
+
+    // Miss: a forced material win was declined without hanging our own,
+    // and the move didn't actively improve the position. Fires even
+    // when the swing guard would otherwise quiet the move (a held eval
+    // that left a free piece on the board is still a Miss); a move that
+    // *improved* the eval is never a Miss, no matter how much more was
+    // available (that path falls through to the swing guard → Inaccuracy).
+    if best_wins_material && !user_lost_material && absolute_swing <= 0 {
+        return MoveVerdict::Miss;
+    }
+
+    // Apply the swing guard before committing to Mistake / Blunder.
     let band = if relative_loss <= MISTAKE_LOSS_MAX {
         MoveVerdict::Mistake
     } else {
@@ -141,6 +237,20 @@ impl MoveAnalysis {
     /// stored on every `MoveAnalysis` for convenience.
     pub fn classify(&self, best_score: Value) -> MoveVerdict {
         classify_move(self.score, best_score, self.pre_score)
+    }
+
+    /// Material-aware verdict. `user_net_mg` / `best_net_mg` are the
+    /// settled net material outcomes (mover-POV, engine midgame-cp) of
+    /// this move's line and the best line — get them from
+    /// [`super::compute_material_outcome`] for `self` and the best
+    /// `MoveAnalysis` respectively. See [`classify_move_with_material`].
+    pub fn classify_with_material(
+        &self,
+        best_score: Value,
+        user_net_mg: i32,
+        best_net_mg: i32,
+    ) -> MoveVerdict {
+        classify_move_with_material(self.score, best_score, self.pre_score, user_net_mg, best_net_mg)
     }
 }
 
@@ -249,6 +359,102 @@ mod tests {
         // hopeless requires <=), so BestAvailable doesn't fire.
         let v = classify_move(Value(-1400), Value(-499), Value(-300));
         assert_eq!(v, MoveVerdict::Blunder);
+    }
+
+    // ---- material axis: Miss vs Blunder -----------------------------
+
+    /// One pawn on the engine midgame-cp material scale.
+    const PAWN: i32 = Value::PAWN_MG.0;
+
+    #[test]
+    fn classify_miss_when_best_wins_material_and_user_declines() {
+        // pre 0, user holds 0, best wins to +400 (Blunder band by
+        // score). Best line nets a pawn; user's nets nothing and hangs
+        // nothing; swing held at 0 -> Miss, not Blunder.
+        let v = classify_move_with_material(Value(0), Value(400), Value(0), 0, PAWN);
+        assert_eq!(v, MoveVerdict::Miss);
+    }
+
+    #[test]
+    fn classify_miss_fires_even_when_eval_held_in_a_winning_position() {
+        // Up +300 the whole time; best line grabs a free piece (+600)
+        // but user stays +300. Swing is exactly 0 (held), so the swing
+        // guard would normally quiet this — but declining a forced
+        // material win is the lesson -> Miss.
+        let v = classify_move_with_material(Value(300), Value(600), Value(300), 0, 3 * PAWN);
+        assert_eq!(v, MoveVerdict::Miss);
+    }
+
+    #[test]
+    fn classify_blunder_when_user_hangs_material_not_miss() {
+        // user dropped +400 -> -300 by hanging a piece; best held +400.
+        // user_net is a lost piece, so this is a Blunder even though the
+        // best line also wins material (best_net positive). The hang
+        // wins the tie: a Miss requires NOT losing your own material.
+        let v = classify_move_with_material(Value(-300), Value(400), Value(400), -3 * PAWN, PAWN);
+        assert_eq!(v, MoveVerdict::Blunder);
+    }
+
+    #[test]
+    fn classify_positional_drop_stays_mistake_not_miss() {
+        // 3-pawn-ish positional slide with no material on either side
+        // of the ledger: user +200, best +500 (Mistake band), swing
+        // -200, no material -> Mistake, never Miss.
+        let v = classify_move_with_material(Value(200), Value(500), Value(400), 0, 0);
+        assert_eq!(v, MoveVerdict::Mistake);
+    }
+
+    #[test]
+    fn classify_not_miss_when_position_improved_despite_bigger_material_win() {
+        // The Ng5 shape with a material-winning best line: pre +523,
+        // user improved to +823, best +949 wins a piece. Because the
+        // move IMPROVED the eval (swing +300), it's capped at Inaccuracy
+        // — improving moves are never a Miss.
+        let v = classify_move_with_material(Value(823), Value(949), Value(523), 0, 3 * PAWN);
+        assert_eq!(v, MoveVerdict::Inaccuracy);
+    }
+
+    #[test]
+    fn classify_score_only_never_returns_miss() {
+        // The material-free entry point must keep the original ladder:
+        // a worsening drop is Mistake/Blunder, never Miss. (pre 400 so
+        // the swing is negative and the guard doesn't cap to Inaccuracy.)
+        assert_eq!(
+            classify_move_with_material(Value(100), Value(400), Value(400), 0, 0),
+            MoveVerdict::Mistake
+        );
+        assert_eq!(
+            classify_move_with_material(Value(-300), Value(400), Value(400), 0, 0),
+            MoveVerdict::Blunder
+        );
+    }
+
+    /// End-to-end wiring: the same `compute_material_outcome` the
+    /// retrospective feeds into `classify_with_material` really yields a
+    /// Miss when the best line wins a piece and the user plays a quiet
+    /// non-hanging move. Uses fabricated PVs (no live search) over real
+    /// `Move`/`Position` types so the material accounting is exercised.
+    #[test]
+    fn classify_with_material_grades_declined_free_rook_as_miss() {
+        use super::super::{compute_material_outcome, test_support::ma_with_pv_score};
+        use crate::types::{Color, Move, Square};
+
+        // Black to move; the a8 rook can take the undefended a1 rook
+        // for free (Rxa1+). A quiet Ra7 declines the win.
+        let pre = Position::from_fen("r3k3/8/8/8/8/8/8/R3K3 b - - 0 1").unwrap();
+        let rxa1 = Move::normal(Square::A8, Square::A1);
+        let ra7 = Move::normal(Square::A8, Square::A7);
+
+        let best = ma_with_pv_score(vec![rxa1], Some(0), Value(1200));
+        let user = ma_with_pv_score(vec![ra7], Some(0), Value(0));
+
+        let best_net = compute_material_outcome(&best, &pre, Color::Black).net_mg_cp;
+        let user_net = compute_material_outcome(&user, &pre, Color::Black).net_mg_cp;
+        assert!(best_net >= Value::PAWN_MG.0, "best line wins a rook");
+        assert_eq!(user_net, 0, "quiet move wins nothing");
+
+        let verdict = user.classify_with_material(best.score, user_net, best_net);
+        assert_eq!(verdict, MoveVerdict::Miss);
     }
 
     // ---- MoveAnalysis::classify delegates ---------------------------

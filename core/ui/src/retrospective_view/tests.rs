@@ -10,6 +10,17 @@
     use chess_tutor_engine::types::{Color, Move, Square};
     
 
+    /// Headline scores render in chess.com-aligned pawns: an engine
+    /// score of PAWN_EG (one endgame pawn) reads as "+1.00", matching
+    /// the eval bar and the CLI. Guards against regressing to the old
+    /// PAWN_MG(128)/100 divisors.
+    #[test]
+    fn format_score_pawns_uses_pawn_eg_scale() {
+        use chess_tutor_engine::types::Value;
+        assert_eq!(format_score_pawns(Value(Value::PAWN_EG.0)), "+1.00");
+        assert_eq!(format_delta_pawns(-2 * Value::PAWN_EG.0), "-2.00");
+    }
+
     /// End-to-end smoke: analyze 1.e4 from startpos and confirm the
     /// view model returns a non-empty headline + parses without
     /// panicking. We can't assert specific cards because the
@@ -481,7 +492,7 @@
             net_eg_cp: 854,
             last_ply: 0,
         };
-        let supp = king_protector_suppression(&outcome, Color::White);
+        let supp = capture_suppression(&outcome, Color::White);
         assert!(supp.theirs_minor_captured);
         assert!(supp.our_minor_capturing);
         assert!(!supp.ours_minor_captured);
@@ -518,7 +529,7 @@
             net_eg_cp: 854 - 915,
             last_ply: 1,
         };
-        let supp = king_protector_suppression(&outcome, Color::White);
+        let supp = capture_suppression(&outcome, Color::White);
         assert!(supp.theirs_minor_captured);
         assert!(supp.ours_minor_captured);
         assert!(supp.our_minor_capturing);
@@ -545,10 +556,37 @@
             net_eg_cp: 206,
             last_ply: 0,
         };
-        let supp = king_protector_suppression(&outcome, Color::White);
+        let supp = capture_suppression(&outcome, Color::White);
         assert!(!supp.our_minor_capturing);
         assert!(!supp.theirs_minor_captured);
         assert!(!supp.ours_minor_captured);
+    }
+
+    #[test]
+    fn capture_suppression_flags_captured_rook_so_it_isnt_an_escape() {
+        // Qxh8 — we capture the opponent's rook. The trapped-rook penalty
+        // for the opponent vanishes (the rook is gone), but that's death,
+        // not an escape: theirs_rook_captured must fire so the
+        // "Opponent's rook escaped its trap" card is suppressed.
+        use chess_tutor_engine::analysis::CaptureEvent;
+        use chess_tutor_engine::types::{PieceType, Square};
+        let outcome = MaterialOutcome {
+            events: vec![CaptureEvent {
+                ply: 0,
+                captor: Color::White,
+                captor_piece: PieceType::Queen,
+                captured_piece: PieceType::Rook,
+                square: Square::H8,
+                value_mg: 1276,
+                value_eg: 1380,
+            }],
+            net_mg_cp: 1276,
+            net_eg_cp: 1380,
+            last_ply: 0,
+        };
+        let supp = capture_suppression(&outcome, Color::White);
+        assert!(supp.theirs_rook_captured);
+        assert!(!supp.ours_rook_captured);
     }
 
     #[test]
