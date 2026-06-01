@@ -219,10 +219,14 @@ fn draw_coaching_item(ui: &mut egui::Ui, item: &CoachingItem) {
                     egui::RichText::new(category_glyph(item.category))
                         .size(16.0),
                 );
-                ui.label(
-                    egui::RichText::new(&item.heading)
-                        .strong()
-                        .size(15.0),
+                // Wrap the heading within the fixed-width column instead of
+                // letting a long title stretch the panel (a bare label in a
+                // horizontal row won't wrap).
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&item.heading).strong().size(15.0),
+                    )
+                    .wrap(),
                 );
             });
             // Summary keeps `.weak()` for hierarchy below the bold

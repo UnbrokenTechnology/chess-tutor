@@ -58,7 +58,11 @@ impl eframe::App for App {
             });
         egui::SidePanel::right("sidebar")
             .resizable(false)
-            .default_width(320.0)
+            // exact_width (not default_width) pins the column: long card
+            // headings wrap within it instead of stretching the panel and
+            // squeezing the board — and a width egui grew on a prior frame
+            // can't stick, since the range is clamped to [320, 320].
+            .exact_width(320.0)
             .show(ctx, |ui| {
                 draw::side_panel::draw(ui, &self.session.build_side_panel_view(), &mut events);
             });

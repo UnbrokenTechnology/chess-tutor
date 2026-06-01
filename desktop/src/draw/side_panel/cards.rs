@@ -163,14 +163,13 @@ fn draw_item_card(
         .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             // Header row: category glyph + heading + optional delta chip.
+            // Reserve the delta chip flush-right first, then let the
+            // heading wrap into the remaining width. A bare label in a
+            // horizontal row doesn't wrap, so without this a long heading
+            // stretches the (fixed-width) panel and shrinks the board.
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(category_glyph(item.category))
-                        .size(14.0),
-                );
-                ui.label(
-                    egui::RichText::new(&item.heading)
-                        .strong()
                         .size(14.0),
                 );
                 ui.with_layout(
@@ -186,6 +185,12 @@ fn draw_item_card(
                                     .strong(),
                             );
                         }
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&item.heading).strong().size(14.0),
+                            )
+                            .wrap(),
+                        );
                     },
                 );
             });
