@@ -117,10 +117,25 @@ impl<'a> Search<'a> {
                 );
             }
 
-            // Mate found in the leader — no point searching deeper.
-            if self.root_moves[0].score.0.abs() >= Value::MATE.0 - Value::MAX_PLY {
-                break;
-            }
+            // NOTE: we deliberately do NOT stop iterative deepening when
+            // a mate appears in the leader. SF11 only short-circuits on
+            // mate under an explicit `go mate X` limit (search.cpp:521-525,
+            // gated on `Limits.mate`); in a normal depth-budget search it
+            // keeps iterating to the depth limit. That continuation is
+            // load-bearing for *mate-distance* correctness: a single
+            // depth-limited search (especially under MultiPV, where sibling
+            // PV slots pollute the TT) frequently first surfaces a *longer*
+            // mate than the optimum. Letting iterative deepening run to the
+            // full depth lets mate-distance pruning converge the leader onto
+            // the shortest mate, and makes the reported distance both
+            // depth-deterministic and MultiPV-invariant. An earlier
+            // `break`-on-mate here was the root cause of the eval-bar
+            // "mate-in-N jumps around" pathology (fixed 2026-06-01; the
+            // aspiration delta long suspected for it was a red herring).
+            // The continuation is cheap (mate pruning collapses the tree
+            // once the leader is a mate) and bounded by the analytical
+            // node/time caps; the parity bench is unaffected (its positions
+            // hold no forced mate at the bench depths).
         }
 
         // Final ordering: each PV slot's search ran with its own
@@ -230,10 +245,12 @@ impl<'a> Search<'a> {
                 }
                 self.root_moves[new_slot].prev_score = self.root_moves[new_slot].score;
 
-                // Mate-in-N termination mirrors the main IDS loop.
-                if self.root_moves[new_slot].score.0.abs() >= Value::MATE.0 - Value::MAX_PLY {
-                    break;
-                }
+                // Run the forced slot to the full depth even when it's a
+                // mate — same reasoning as the main IDS loop above. A
+                // forced move that mates should report the *shortest* mate
+                // its line reaches; breaking on the first mate found would
+                // freeze in a too-long distance and re-introduce the
+                // MultiPV mate-distance pathology this slot feeds into.
             }
 
             // Restore the tail so subsequent forced slots see the full
