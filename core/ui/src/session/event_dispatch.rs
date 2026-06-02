@@ -25,12 +25,14 @@ impl Session {
             Event::Takeback => self.takeback(),
             Event::FlipBoard => self.flipped = !self.flipped,
             Event::ToggleHint => self.toggle_hint(),
-            // The settings surface doesn't exist yet (lands in a later
-            // redesign step). Accepting the intent now keeps the gear
-            // button wired without a placeholder elsewhere.
-            Event::OpenSettings => {}
+            Event::OpenSettings => self.settings_open = true,
+            Event::CloseSettings => self.settings_open = false,
             Event::JumpToLive => self.viewing_index = None,
             Event::ChangeDepth(d) => self.depth = d,
+            Event::SetRetrospectiveDepth(d) => self.retrospective_depth = d,
+            Event::SetEvalBarVisible(on) => self.show_eval_bar = on,
+            Event::SetSupport(on) => self.learning.set_support(on),
+            Event::SetAutoCoach(on) => self.learning.auto_coach = on,
             Event::ViewHistoryIndex(target) => {
                 // Clicking the last move in the list means "back to
                 // live", not "freeze on the live-equivalent index" —

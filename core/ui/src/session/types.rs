@@ -35,12 +35,26 @@ pub struct NewGameForm {
     pub color: ColorChoice,
     pub fen: String,
     pub depth: u32,
+    /// Move-feedback (retrospective) search depth — how deeply each
+    /// played move is analysed for the backward-looking feedback zone.
+    /// Independent of the bot's play `depth`.
+    pub retrospective_depth: u32,
     /// Bot move-sampling knobs. Persists across New Game clicks so the
     /// user can tune incrementally between games without losing prior
     /// settings.
     pub noise: NoiseProfile,
     /// Eval categories the bot is blind to. Same persistence rule.
     pub eval_mask: EvalMask,
+    /// Learning-mode preferences set up on the Start screen — the
+    /// Support intervention pause, auto-coach, and best-move reveal.
+    /// This screen is their true home (PLAN build-order step 5); the
+    /// mid-game ⚙ gear edits the same set on the live session.
+    pub learning: crate::learning_mode::LearningPreferences,
+    /// Board overlays to start the game with. Same true-home rationale
+    /// as `learning`.
+    pub active_overlays: std::collections::HashSet<crate::view::OverlayKind>,
+    /// Whether the chess.com-style eval bar is shown.
+    pub show_eval_bar: bool,
     pub error: Option<String>,
 }
 
@@ -62,8 +76,12 @@ impl NewGameForm {
             },
             fen: String::new(),
             depth: session.depth,
+            retrospective_depth: session.retrospective_depth,
             noise: session.opponent.noise.clone(),
             eval_mask: session.opponent.eval_mask,
+            learning: session.learning,
+            active_overlays: session.active_overlays.clone(),
+            show_eval_bar: session.show_eval_bar,
             error: None,
         }
     }
@@ -76,8 +94,12 @@ impl NewGameForm {
             color: ColorChoice::White,
             fen: String::new(),
             depth: DEFAULT_DEPTH,
+            retrospective_depth: ANALYTICAL_DEPTH,
             noise: NoiseProfile::default(),
             eval_mask: EvalMask::EMPTY,
+            learning: crate::learning_mode::LearningPreferences::default(),
+            active_overlays: std::collections::HashSet::new(),
+            show_eval_bar: true,
             error: None,
         }
     }

@@ -50,12 +50,17 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("topbar").show(ctx, |ui| {
             draw::top_bar::draw(ui, &self.session.build_top_bar_view(), &mut events);
         });
-        egui::SidePanel::left("evalbar")
-            .resizable(false)
-            .exact_width(56.0)
-            .show(ctx, |ui| {
-                draw::eval_bar::draw(ui, &self.session.build_eval_bar_view());
-            });
+        // The eval bar is an opt-out gutter (Start/Options + ⚙). When
+        // hidden, the panel isn't reserved at all so the board claims
+        // the full width.
+        if self.session.eval_bar_visible() {
+            egui::SidePanel::left("evalbar")
+                .resizable(false)
+                .exact_width(56.0)
+                .show(ctx, |ui| {
+                    draw::eval_bar::draw(ui, &self.session.build_eval_bar_view());
+                });
+        }
         egui::SidePanel::right("sidebar")
             .resizable(false)
             // exact_width (not default_width) pins the column: long card
@@ -97,6 +102,13 @@ impl eframe::App for App {
         // the new-game dialog so a modal setup dialog still sits on top.
         if let Some(popover) = self.session.build_hint_popover_view() {
             draw::hint_popover::draw(ctx, &popover, &mut events);
+        }
+
+        // Mid-game ⚙ settings (decision #2): edits the same options as
+        // the Start screen against the live session. Rendered before the
+        // new-game dialog so a setup modal still sits on top.
+        if let Some(settings) = self.session.build_settings_view() {
+            draw::settings::draw(ctx, &settings, &mut events);
         }
 
         if let Some(dialog) = self.session.build_new_game_dialog_view() {

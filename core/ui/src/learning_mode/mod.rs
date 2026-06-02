@@ -389,6 +389,31 @@ pub fn gating_config_for(
     }
 }
 
+impl LearningPreferences {
+    /// Whether **Support** (the mid-game intervention pause) is on.
+    /// Support is the single user-facing toggle for the two underlying
+    /// axes (mistake handling + blunder safety); decision #8 collapses
+    /// the old `Supported` preset into this one boolean. True whenever
+    /// the game pauses on a detected teaching moment.
+    pub fn support_enabled(&self) -> bool {
+        !matches!(self.mistake_handling, MistakeHandling::SilentRetrospective)
+    }
+
+    /// Apply the **Support** toggle, setting both underlying axes.
+    /// On → pause on teaching moments + offer takeback after blunders;
+    /// off → silent retrospective + no safety net. Leaves `auto_coach`
+    /// and `reveal_best_moves` untouched (they are independent toggles).
+    pub fn set_support(&mut self, on: bool) {
+        if on {
+            self.mistake_handling = MistakeHandling::TeachingMoments;
+            self.blunder_safety = BlunderSafety::OfferTakeback;
+        } else {
+            self.mistake_handling = MistakeHandling::SilentRetrospective;
+            self.blunder_safety = BlunderSafety::Off;
+        }
+    }
+}
+
 impl LearningPreset {
     /// Map a preset to its concrete axis settings.
     pub fn to_preferences(self) -> LearningPreferences {

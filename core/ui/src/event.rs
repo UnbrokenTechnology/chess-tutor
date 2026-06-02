@@ -23,14 +23,31 @@ pub enum Event {
     Takeback,
     FlipBoard,
     ToggleHint,
-    /// Open the settings (⚙) surface. The mid-game config entry point
-    /// (decision #2). No-op until the settings screen lands in a later
-    /// redesign step; the intent is named now so renderers can wire the
-    /// gear button without churning the event enum later.
+    /// Open the settings (⚙) surface — the mid-game config entry point
+    /// (decision #2). Mirrors the pre-game Start/Options screen so the
+    /// same options (eval bar, Support, auto-coach, depths, overlays)
+    /// can be changed without starting a new game.
     OpenSettings,
+    /// Close the mid-game settings surface.
+    CloseSettings,
     /// Jump from "viewing move N" back to live.
     JumpToLive,
     ChangeDepth(u32),
+    /// Set the move-feedback (retrospective) search depth — how deeply
+    /// the engine analyses each played move for the backward-looking
+    /// feedback zone. Independent of the bot's play `depth`.
+    SetRetrospectiveDepth(u32),
+    /// Show or hide the eval bar (chess.com-style left gutter). Some
+    /// students prefer to play without a constant numeric judgement.
+    SetEvalBarVisible(bool),
+    /// Turn the **Support** option on/off — the intervention pause that
+    /// stops the game on a detected teaching moment / blunder. On maps
+    /// to `MistakeHandling::TeachingMoments` + `BlunderSafety::OfferTakeback`;
+    /// off maps to silent-retrospective + no safety net (decision #8).
+    SetSupport(bool),
+    /// Turn **Auto-coach** on/off — auto-open the Hint pop-over each
+    /// move. Sets `LearningPreferences::auto_coach`.
+    SetAutoCoach(bool),
 
     // ---- Move list
     /// User clicked a move row. `None` is the synthetic "live"

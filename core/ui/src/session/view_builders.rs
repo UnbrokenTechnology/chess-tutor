@@ -469,6 +469,29 @@ impl Session {
         let form = self.new_game_form.as_mut()?;
         Some(NewGameDialogView { form, first_launch })
     }
+
+    /// Build the mid-game ⚙ settings descriptor, or `None` when the
+    /// gear surface is closed. Snapshots the live option values so the
+    /// renderer paints each control with its current state; the
+    /// renderer's per-option intents edit the live session directly.
+    pub fn build_settings_view(&self) -> Option<crate::view::SettingsView> {
+        if !self.settings_open {
+            return None;
+        }
+        Some(crate::view::SettingsView {
+            depth: self.depth,
+            retrospective_depth: self.retrospective_depth,
+            show_eval_bar: self.show_eval_bar,
+            learning: self.learning,
+            active_overlays: self.active_overlays.clone(),
+        })
+    }
+
+    /// Whether the eval bar should be rendered. Renderers reserve the
+    /// left gutter only when this is `true`.
+    pub fn eval_bar_visible(&self) -> bool {
+        self.show_eval_bar
+    }
 }
 
 #[cfg(test)]

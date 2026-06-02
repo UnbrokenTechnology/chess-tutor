@@ -125,6 +125,8 @@ impl Session {
             awaiting_intervention_decision: false,
             game_review_open: false,
             retro_expanded: false,
+            show_eval_bar: true,
+            settings_open: false,
         }
     }
 
@@ -295,8 +297,20 @@ impl Session {
         let depth = form.depth;
         let noise = form.noise.clone();
         let eval_mask = form.eval_mask;
+        // The Start screen is the true home of these options (PLAN
+        // step 5): commit them onto the session before the game starts.
+        // `start_new_game` deliberately doesn't reset them, so applying
+        // here is sufficient and survives the game start.
+        let learning = form.learning;
+        let active_overlays = form.active_overlays.clone();
+        let show_eval_bar = form.show_eval_bar;
+        let retrospective_depth = form.retrospective_depth;
         self.new_game_form = None;
         self.first_launch = false;
+        self.learning = learning;
+        self.active_overlays = active_overlays;
+        self.show_eval_bar = show_eval_bar;
+        self.retrospective_depth = retrospective_depth;
         self.start_new_game(position, engine_plays, depth, noise, eval_mask);
     }
 }

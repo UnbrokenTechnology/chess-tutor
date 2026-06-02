@@ -11,5 +11,7 @@ pub(crate) mod bot_strip;
 pub(crate) mod dialog;
 pub(crate) mod eval_bar;
 pub(crate) mod hint_popover;
+pub(crate) mod options;
+pub(crate) mod settings;
 pub(crate) mod side_panel;
 pub(crate) mod top_bar;

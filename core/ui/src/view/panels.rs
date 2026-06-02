@@ -362,6 +362,34 @@ pub enum RetrospectiveKind {
     },
 }
 
+/// Mid-game settings (⚙ gear) descriptor — the live-edit counterpart
+/// of the pre-game Start/Options screen (decision #2). Carries a
+/// snapshot of the current option values so the renderer paints each
+/// control with its true state; the renderer emits the matching
+/// per-option intent (`SetEvalBarVisible`, `SetSupport`, `SetAutoCoach`,
+/// `SetRetrospectiveDepth`, `ChangeDepth`, `SetRevealBestMoves`,
+/// `ToggleOverlay`) which edit the live session directly — no new game
+/// needed. `None` when the gear is closed (`build_settings_view`).
+///
+/// Opponent strength (bot noise / eval-mask) is intentionally *not*
+/// here: changing the opponent mid-game requires a new game, so it
+/// lives only on the Start screen (PLAN open question — "⚙ mid-game
+/// settings scope").
+pub struct SettingsView {
+    /// Bot play (search) depth.
+    pub depth: u32,
+    /// Move-feedback (retrospective) search depth.
+    pub retrospective_depth: u32,
+    /// Whether the eval bar is currently shown.
+    pub show_eval_bar: bool,
+    /// Snapshot of the live learning preferences (Support / auto-coach
+    /// / reveal-best-moves derived via the accessors).
+    pub learning: crate::learning_mode::LearningPreferences,
+    /// Currently-active board overlays — renderers iterate
+    /// [`OverlayKind::ALL`] and check membership for each checkbox.
+    pub active_overlays: std::collections::HashSet<OverlayKind>,
+}
+
 /// New Game dialog descriptor.
 ///
 /// The form is mutably borrowed from the session because immediate-

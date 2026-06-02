@@ -194,6 +194,21 @@ pub struct Session {
     /// the calm default returns. Toggled by
     /// [`crate::event::Event::ToggleRetrospectiveDetail`].
     pub(crate) retro_expanded: bool,
+
+    /// Whether the chess.com-style eval bar (the left gutter) is shown.
+    /// Default `true`; toggled from the Start/Options screen or the
+    /// mid-game ⚙ gear via [`crate::event::Event::SetEvalBarVisible`].
+    /// Renderers read [`Session::eval_bar_visible`] to decide whether
+    /// to reserve the gutter at all.
+    pub(crate) show_eval_bar: bool,
+
+    /// `true` while the mid-game ⚙ settings surface is open. Opened by
+    /// [`crate::event::Event::OpenSettings`] (the gear button), closed
+    /// by [`crate::event::Event::CloseSettings`]. Drives
+    /// [`Session::build_settings_view`]; the surface edits live session
+    /// state (learning prefs, overlays, depths, eval bar) directly via
+    /// the same events the Start screen would, so no new game is needed.
+    pub(crate) settings_open: bool,
 }
 
 mod bot_strip_builder;

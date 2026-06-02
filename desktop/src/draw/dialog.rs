@@ -1,9 +1,24 @@
+//! The Start / Options screen (PLAN build-order step 5): a proper
+//! pre-game setup modal grown out of the old bare new-game dialog.
+//! Picks the opponent / strength, exposes an Options expander
+//! (Eval Bar, Support, Auto-coach, Reveal-best-move, Move-feedback
+//! depth, search Depth) plus the board-overlay toggles, and commits it
+//! all with one big **Play** button. This screen is the *true home* of
+//! the learning + overlay config that build-order step 3 stripped off
+//! the play surface; the mid-game ⚙ gear (`draw::settings`) edits the
+//! same set live.
+//!
+//! There is deliberately **no "Engine PV" toggle** — engine best-move
+//! lines are review-only (decision #9).
+
 use chess_tutor_engine::opponent::{EvalCategory, EvalMask, NoiseProfile};
 use eframe::egui;
 
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::session::ColorChoice;
 use chess_tutor_ui::view::NewGameDialogView;
+
+use super::options;
 
 pub(crate) fn draw(
     ctx: &egui::Context,
@@ -24,11 +39,13 @@ pub(crate) fn draw(
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .default_width(420.0)
+        .default_width(460.0)
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
                 ui.add_space(4.0);
-                ui.label("You play as:");
+
+                // ---- Opponent / colour ----
+                ui.label(egui::RichText::new("You play as").size(15.0).strong());
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut form.color, ColorChoice::White, "White");
                     ui.radio_value(&mut form.color, ColorChoice::Black, "Black");
@@ -46,16 +63,33 @@ pub(crate) fn draw(
                 if let Some(err) = &form.error {
                     ui.colored_label(egui::Color32::from_rgb(0xc0, 0x40, 0x40), err);
                 }
-                ui.add_space(8.0);
-
-                ui.horizontal(|ui| {
-                    ui.label("Engine depth:");
-                    ui.add(egui::Slider::new(&mut form.depth, 1..=20));
-                });
 
                 ui.add_space(12.0);
                 ui.separator();
-                ui.heading("Bot Difficulty");
+
+                // ---- Options ----
+                ui.heading("Options");
+                draw_play_options(ui, form);
+
+                ui.add_space(8.0);
+                egui::CollapsingHeader::new("Board overlays")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Persistent highlights painted on the board — space, \
+                                 pins, trapped pieces, attack heatmap, and more.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.add_space(4.0);
+                        options::overlay_toggles(ui, &mut form.active_overlays);
+                    });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.heading("Opponent strength");
                 ui.label(
                     egui::RichText::new(
                         "Tune how the bot plays. Defaults give full-strength play; \
@@ -96,12 +130,16 @@ pub(crate) fn draw(
             ui.separator();
             ui.horizontal(|ui| {
                 // Hide Cancel at first launch: no game to fall back
-                // to, the only path forward is Start.
+                // to, the only path forward is Play.
                 if !first_launch && ui.button("Cancel").clicked() {
                     cancel = true;
                 }
-                let start_label = if first_launch { "Start Game" } else { "Start" };
-                if ui.button(start_label).clicked() {
+                // One big, obvious Play button (chess.com idiom).
+                let play = egui::Button::new(
+                    egui::RichText::new("\u{25b6}  Play").size(18.0).strong(),
+                )
+                .min_size(egui::vec2(140.0, 40.0));
+                if ui.add(play).clicked() {
                     start = true;
                 }
             });
@@ -116,6 +154,36 @@ pub(crate) fn draw(
     if start {
         events.push(Event::ConfirmNewGame);
     }
+}
+
+/// The play-option toggles + depth sliders shared in spirit with the
+/// mid-game gear. Mutates the form in place; the form is committed onto
+/// the session when the user clicks Play.
+fn draw_play_options(ui: &mut egui::Ui, form: &mut chess_tutor_ui::session::NewGameForm) {
+    options::toggle_row(
+        ui,
+        &mut form.show_eval_bar,
+        "Eval bar",
+        "Show the chess.com-style evaluation bar in the left gutter. \
+         Turn it off to play without a constant numeric judgement.",
+    );
+    options::learning_toggles(ui, &mut form.learning);
+
+    ui.add_space(4.0);
+    options::depth_row(
+        ui,
+        &mut form.depth,
+        "Search depth",
+        "How deeply the bot searches when choosing its move. Higher is \
+         stronger and slower.",
+    );
+    options::depth_row(
+        ui,
+        &mut form.retrospective_depth,
+        "Move-feedback depth",
+        "How deeply each of your moves is analysed for the after-move \
+         feedback. Higher is more accurate and slower.",
+    );
 }
 
 /// Six bot-noise sliders. Free function so it can borrow `noise`

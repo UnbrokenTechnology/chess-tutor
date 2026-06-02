@@ -4,20 +4,16 @@
 //! coaching is NOT here — it pops over (`draw::hint_popover`) so the two
 //! never fight for one slot (PLAN §"coaching/hint model").
 //!
-//! STEP-5 REATTACH NOTE: the always-on learning-mode preset picker and
-//! the board-overlay toggle block were removed from this panel in
-//! build-order step 3 (they ate permanent play-surface space). They
-//! have no temporary home right now — they were *dropped*, not
-//! relocated, because the ⚙ settings surface (`Event::OpenSettings`) is
-//! still a no-op stub until step 5. Step 5 must rebuild both behind the
-//! gear: the preset picker reads `SidePanelView.learning` and emits
-//! `Event::ApplyLearningPreset` / `Event::SetRevealBestMoves`; the
-//! overlay toggles read `SidePanelView.active_overlays` and emit
-//! `Event::ToggleOverlay` per `OverlayKind::ALL`. Both view-model fields
-//! are still populated by `build_side_panel_view`, so step 5 only needs
-//! a renderer, not a session change. The prior implementations live in
-//! this file's git history (`draw_learning_mode_picker` /
-//! `draw_overlay_toggles`).
+//! The always-on learning-mode picker and board-overlay toggle block
+//! that build-order step 3 stripped off this panel now live in their
+//! true home: the pre-game Start/Options screen (`draw::dialog`) and the
+//! mid-game ⚙ settings surface (`draw::settings`), both built on the
+//! shared `draw::options` widgets. The learning toggles (Support /
+//! auto-coach / reveal-best-move) and the overlay toggles are edited
+//! there; this panel stays purely backward-looking. `SidePanelView`
+//! still carries `.learning` / `.active_overlays` for any renderer that
+//! wants to *reflect* the current state inline, but the *controls* are
+//! off the play surface (decision #2).
 
 use eframe::egui;
 

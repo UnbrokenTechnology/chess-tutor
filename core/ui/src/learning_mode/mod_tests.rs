@@ -115,3 +115,40 @@ fn blunder_takes_priority_over_allowed_in_panel() {
         crate::view::InterventionPanelKind::BlunderSafety
     ));
 }
+
+#[test]
+fn support_toggle_maps_both_underlying_axes() {
+    // Default (Practicing) — Support is off, plays silently.
+    let mut prefs = LearningPreferences::default();
+    assert!(!prefs.support_enabled());
+
+    // Turning Support on sets both the teaching pause and the blunder
+    // safety net (decision #8: one toggle, two axes).
+    prefs.set_support(true);
+    assert!(prefs.support_enabled());
+    assert_eq!(prefs.mistake_handling, MistakeHandling::TeachingMoments);
+    assert_eq!(prefs.blunder_safety, BlunderSafety::OfferTakeback);
+
+    // Turning it off returns to silent retrospective with no safety net.
+    prefs.set_support(false);
+    assert!(!prefs.support_enabled());
+    assert_eq!(prefs.mistake_handling, MistakeHandling::SilentRetrospective);
+    assert_eq!(prefs.blunder_safety, BlunderSafety::Off);
+}
+
+#[test]
+fn support_toggle_leaves_independent_axes_untouched() {
+    // auto_coach + reveal_best_moves are independent of Support and must
+    // survive a Support flip (they have their own toggles in Options/⚙).
+    let mut prefs = LearningPreferences {
+        auto_coach: true,
+        reveal_best_moves: true,
+        ..LearningPreferences::default()
+    };
+    prefs.set_support(true);
+    assert!(prefs.auto_coach);
+    assert!(prefs.reveal_best_moves);
+    prefs.set_support(false);
+    assert!(prefs.auto_coach);
+    assert!(prefs.reveal_best_moves);
+}
