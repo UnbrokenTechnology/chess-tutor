@@ -81,6 +81,14 @@ impl eframe::App for App {
                 draw::side_panel::draw(ui, &self.session.build_side_panel_view(), &mut events);
             });
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Opponent strip pinned above the board (chess.com idiom).
+            // Reserve it first via a top panel so the board below fills
+            // the remaining height — no dark band underneath it.
+            egui::TopBottomPanel::top("bot_strip")
+                .resizable(false)
+                .show_inside(ui, |ui| {
+                    draw::bot_strip::draw(ui, &self.session.build_bot_strip_view());
+                });
             draw::board::draw(ui, &self.session.build_board_view(), &mut events);
         });
 

@@ -6,7 +6,13 @@ use chess_tutor_ui::view::{AnnotationKind, BoardAnnotation, BoardView, MoveDotKi
 
 pub(crate) fn draw(ui: &mut egui::Ui, view: &BoardView, events: &mut Vec<Event>) {
     let avail = ui.available_size();
-    let board_size = avail.x.min(avail.y);
+    // Height-first sizing (decision #4): the board fills the available
+    // *height* under the bot strip so there's no dark band below it.
+    // It's only clamped by width when the column is narrower than tall
+    // — in which case the leftover lands as horizontal slack to the
+    // board's right (the board is left-aligned within the central
+    // area), which step 3 hands to the widened right column.
+    let board_size = avail.y.min(avail.x);
     let cell = board_size / 8.0;
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(board_size, board_size), egui::Sense::click());

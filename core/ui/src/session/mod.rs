@@ -191,6 +191,7 @@ pub struct Session {
     pub(crate) game_review_open: bool,
 }
 
+mod bot_strip_builder;
 mod event_dispatch;
 mod lifecycle;
 mod moves;

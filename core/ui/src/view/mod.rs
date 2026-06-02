@@ -9,7 +9,9 @@
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, File, Move, Piece, PieceType, Rank, Square};
 
+mod bot_strip;
 mod panels;
+pub use bot_strip::*;
 pub use panels::*;
 
 
