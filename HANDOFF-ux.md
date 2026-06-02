@@ -87,13 +87,20 @@ Toggleable always-on highlights painted on the live/viewed position, independent
 
 ## Backlog
 
-> **Active design brief: [`PLAN-teaching-gui.md`](PLAN-teaching-gui.md)** — how to
-> surface the CLI's teaching power (latent threats, `critique`/ALLOWED reframe,
-> tactical-vs-positional gating) in the GUI's three modes *without an LLM/NN*.
-> Decided: the tactical-mode gate is **detectors-only** (if no human-findable
-> pattern fires, the position is "quiet" for teaching — a search-only tactic is
-> engine noise with nothing to learn). Carries the per-position regression
-> matrix that is the done-definition. Read it before touching the items below.
+> **The GUI teaching-power port (formerly `PLAN-teaching-gui.md`, retired to git
+> history) landed 2026-05-31 → 2026-06-01.** All five build steps shipped: the
+> detectors-only tactical-mode gate (`analysis/tactical_mode.rs`), the
+> forcing-check-chain detector (`analysis/forcing_check_chain.rs`), the three
+> coaching cards (`latent_threat_card` / `check_followup_card` / `king_hunt_card`
+> in `coaching_view.rs`), the latent→`user_walked_into` retrospective wiring, the
+> static-vs-search override + depth-honesty retrospective notes
+> (`retrospective_view/{override_note,depth_honesty}.rs`), and the
+> ALLOWED-not-MISSED reframe in `move_assessment.rs`. The load-bearing design
+> decision — the gate is **detectors-only** (a search-only tactic a human could
+> never have seen is engine noise with nothing to learn) — now lives in
+> `analysis/tactical_mode.rs` `//!`. The five
+> [`teaching-positions/`](teaching-positions/) case studies remain the durable
+> regression targets. Residual real-play tuning items are in the lists below.
 
 ### Learning-mode polish (rough priority order)
 
@@ -123,11 +130,13 @@ Toggleable always-on highlights painted on the live/viewed position, independent
 - **Mate-pattern detail** — only BackRank / Smothered have detail prose; others ride as heading suffix. Expand when a named-mates teaching pass lands.
 - **Confidence::Medium retrospective rollout** — Medium hits still appear in retrospective (coaching is High-only); tighten retrospective to High if misfires come in.
 - **PV-freshness gate cost** — the coaching tactic hint silently disappears when the bot deviates from PV[1]; relax to "within X cp of PV[1]" if it fires too rarely.
+- **`ForcingCheckChain` depth threshold** *(from the retired teaching-gui plan)* — the king-hunt warning fires at ≥3 self-replenishing checks; confirm 3 is right in real play, may want tuning per king-exposure.
+- **Latent-threat `min_gain` over-fire watch** *(from the retired teaching-gui plan)* — `find_latent_threats` uses a permissive `min_gain` (value-of-exposed-piece, not full SEE); now that it drives a *pause* via the `user_walked_into` wiring, watch for over-firing and tighten with a second-pass search if it nags.
+- **Card-fold UX** *(from the retired teaching-gui plan)* — the "quiet-position notes" demotion when the tactical-mode gate is live: desktop egui collapsing section vs a dimmed always-visible list. Renderer-neutral data; decide in `draw::*`, not `core/ui`.
 
 ### Future teaching surfaces (deferred, durable home)
 
 - **`win_chances` adoption** — the `win_chances.rs` sigmoid (lila cp→win%, `k = −0.00368208`) **exists**; the deferred work is *using* it as the threshold to gate which retrospective cards show + expressing blunder/missed-tactic thresholds in win%-lost. **Gotcha:** normalize our cp (PawnEG ≈ 213) to pawn = 100 first, and sanity-check `k` against our SF11-classical eval (lila fit it on NNUE). See memory [[project_win_chances_adoption]].
-- **Latent-threat retrospective wiring** *(rescued from the retired PLAN-cli)* — `analysis::find_latent_threats` exists and is surfaced in the CLI (`tactics --latent`) + the `danger:` header, but is **not yet wired into `compute_tactic_outcome`'s `user_walked_into` slot.** Today `user_walked_into` requires the opponent to actually play the tactic; with latent detection the retrospective could fire pre-emptively against any user move that fails to disrupt a standing alignment (the `Qc5+`-walks-into-discovered-attack case). The pre-move coaching surface (`latent_threat_card`) is the other natural consumer.
 - **Flank-classified attack signal** (needs design discussion) — kingside (files e–h) vs queenside (a–d) board *halves*, decoupled from king location (our `kingDanger` is king-centric). Pull SF11's `KING_FLANK` / `flank_attacks` when revisited. See memory [[project_flank_attack_classification]].
 - **Named-endgame teaching library** — trap-library-shaped, built on the existing `endgame/` specialists (KPK opposition, KBNK right-corner, Lucena/Philidor). Rule text *attached* per recognized endgame, not derived (the bitbase stores win/draw, not the reason). Distinct from lichess endgame *tags* (material-bucket metadata we skip). See memory [[project_endgame_teaching_library]].
 - **Named-mate teaching library** — Anastasia / Boden / etc. engine-available (`MatePattern`); 1200 student doesn't need them by name yet.

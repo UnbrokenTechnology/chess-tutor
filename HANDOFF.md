@@ -12,7 +12,7 @@ A **chess tutor**, not a chess engine. The product surface is move-by-move teach
 
 UIs: CLI (`chess-tutor`), egui desktop (`chess-tutor-desktop`), planned Apple + Android. FFI crate (`core/ffi/`) is the prerequisite for the platform apps and doesn't exist yet.
 
-Tests: **891 engine (+4 ignored) + 150 teaching + 103 cli + 92 ui = 1236 passing**, clippy clean across all targets.
+Tests: **891 engine (+4 ignored) + 150 teaching + 103 cli + 100 ui = 1244 passing**, clippy clean across all targets.
 
 ## Status: the engine detour is COMPLETE — teaching UX is the active work
 
@@ -47,9 +47,14 @@ The five surfaces from the prior NEXT list shipped end-to-end:
 - **Coaching tactic hint** (E, PV-reuse variant) ✅ — `Session::coaching_tactic_hint()` mines the previous user-move retrospective's `analyses[user_move].pv[2..]` and gates on `history[u+1].mv == pv[1]`. New public `find_tactic_in_line(pre, line, mover, prior)` does the detection. Confidence::High only, no annotations (pedagogical rule).
 - **Overloaded coaching card** (D) ✅ — `find_overloaded(pos, !user_color)` consumed in `coaching_view::overloaded_card`. Defender → `BadPiece`, each duty → `Threat`, defender→duty arrow → `Defender`. Strict sole-defender-of-≥2 predicate keeps misfires low.
 
-### NEXT: tuning + the surfaces not yet wired
+### Two larger waves landed since (2026-05-31 → 06-01)
 
-Pick up from **[`HANDOFF-ux.md`](HANDOFF-ux.md)**. The product has three teaching surfaces below, all card-based and all reading the same engine outcomes:
+- **GUI teaching-power port** ✅ (formerly `PLAN-teaching-gui.md`, now retired to git history) — the CLI's explanatory discipline baked into which cards show and in what order, **no LLM/NN**. Shipped: the detectors-only **tactical-mode gate** (`analysis/tactical_mode.rs`), the **forcing-check-chain** detector (`analysis/forcing_check_chain.rs`), three new coaching cards (`latent_threat_card` / `check_followup_card` / `king_hunt_card`), the latent→`user_walked_into` retrospective wiring, the static-vs-search **override note** + **depth-honesty note** (`retrospective_view/{override_note,depth_honesty}.rs`), and the **ALLOWED-not-MISSED** reframe in `move_assessment.rs`. The five [`teaching-positions/`](teaching-positions/) case studies are its durable regression targets.
+- **Teaching translation layer + opponent-move retrospective** ✅ — `core/teaching` (renamed from `core/narration`) now owns all prose via one **Claim IR + `phrase`** translator; opponent moves are analysed/graded/phrased from `Perspective::Opponent`. See pillar 3 above and [`HANDOFF-ux.md`](HANDOFF-ux.md).
+
+### NEXT: tuning + persistence + the platform path
+
+Pick up from **[`HANDOFF-ux.md`](HANDOFF-ux.md)** — the teaching surfaces are wired end-to-end; remaining work is real-play tuning, the **persistence design** open thread (below), and the **FFI crate → mobile shells** path. The three teaching surfaces, all card-based and all reading the same engine outcomes:
 
 1. **Retrospective panel** — after-the-fact analysis of the user's last move. Cards per signal (material, threats, king safety, mobility, pawn structure, passed pawns, piece placement, secondary, **forced consequences of opponent's best reply**). Best-move reveal is opt-in (`LearningPreferences.reveal_best_moves`, default off).
 2. **Coaching panel** (live) — features-to-notice for the position the user is about to move from. Shown when `AssistanceLevel::Coached` is active. Surfaces hanging-piece opportunities (filtered through legal moves so in-check / pinned cases don't lie), en-passant captures, pawn weaknesses on either side, and a "your king is in check" card. Never names a move.

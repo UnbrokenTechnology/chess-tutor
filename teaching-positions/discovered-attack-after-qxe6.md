@@ -2,7 +2,7 @@
 
 A position from a real chess.com game between the user (~1200 ELO) and a 1400 ELO bot. After the user played a strong tactical exchange (`Bxe6`), the opponent recaptured with `…Qxe6` and the user — needing to move the queen out of attack — played the natural-looking `Qc5+`. The eval bar went from +3.9 to −1.5 (chess.com's numbers; our engine sees the swing as roughly +6.1 → −3.2, i.e. **a nine-pawn collapse**).
 
-Like the [missed-desperado-after-qe6](missed-desperado-after-qe6.md) position, this is a case where chess.com couldn't articulate *why* a move was bad and left the user to debug it themselves. The two positions share an architectural pattern: **the user missed a tactic the opponent had already set up.** In the earlier case the opponent's tactic was *remove-the-defender* (`…Nxe4` against `Nf5`); here it's a *discovered attack* (`…Bxh2+` revealing `…Qxe1`).
+Like the [positional-punish-after-qe6](positional-punish-after-qe6.md) position, this is a case where chess.com couldn't articulate *why* a move was bad and left the user to debug it themselves. The two positions share an architectural pattern: **the user missed a tactic the opponent had already set up.** In the earlier case the opponent's tactic was *remove-the-defender* (`…Nxe4` against `Nf5`); here it's a *discovered attack* (`…Bxh2+` revealing `…Qxe1`).
 
 Date analysed: 2026-05-29.
 
@@ -130,7 +130,7 @@ The pattern across all four: each clause is a *true static statement* about the 
 
 This is the second example we've found in real games of the same architectural failure mode:
 
-| | [missed-desperado-after-qe6](missed-desperado-after-qe6.md) | this case |
+| | [positional-punish-after-qe6](positional-punish-after-qe6.md) | this case |
 |---|---|---|
 | Opponent's setup move | `…Qe6` (kept the *standing* `…Nxe4` threat alive) | `…Qxe6` (created the e-file alignment) |
 | Opponent's tactical pattern | Remove-the-defender (`…Nxe4` removes the pawn defending `Nf5`) | Discovered attack (`…Bxh2+` unblocks `…Qxe1`) |
@@ -155,4 +155,4 @@ This is the same architectural item I noted in the missed-desperado writeup ("an
 
 If a future iteration of the coaching / retrospective panel, fed this position with `Qc5+` as the candidate move, doesn't produce a card saying roughly *"this move doesn't address Black's standing discovered-attack threat: `…Bxh2+` reveals `…Qxe1`."*, the teaching layer isn't doing its job yet.
 
-Keep this position paired with [missed-desperado-after-qe6](missed-desperado-after-qe6.md) when designing the latent-opponent-threat detector — together they exercise both the *defensive* version (opponent's tactic equalises material) and the *offensive* version (opponent's tactic wins material), so the detector needs to be general enough to handle both.
+Keep this position paired with [positional-punish-after-qe6](positional-punish-after-qe6.md) when designing the latent-opponent-threat detector — together they exercise both the *defensive* version (opponent's tactic equalises material) and the *offensive* version (opponent's tactic wins material), so the detector needs to be general enough to handle both.

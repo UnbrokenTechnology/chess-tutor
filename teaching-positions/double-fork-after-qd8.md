@@ -127,7 +127,7 @@ This is the operational form of the discipline. It is **one ply deeper than what
 
 | Case | Mechanism depth | Detectable pattern? | Teaching action |
 |---|---|---|---|
-| [`missed-desperado-after-qe6`](missed-desperado-after-qe6.md) | shallow | RemovingDefender + Desperado | Surface as named tactic |
+| [`positional-punish-after-qe6`](positional-punish-after-qe6.md) | shallow | RemovingDefender + Desperado | Surface as named tactic |
 | [`discovered-attack-after-qxe6`](discovered-attack-after-qxe6.md) | shallow (latent) | DiscoveredAttack | Surface as latent threat (`analysis/latent_threats.rs`, landed) |
 | [`silent-sequencing-after-qc8`](silent-sequencing-after-qc8.md) | deep (≥ 8 ply) | none — no pattern | Suppress blunder framing entirely |
 | [`mating-net-after-ng5`](mating-net-after-ng5.md) | deep (king hunt, ≥ 7 ply) | structural cluster, no named pattern | Open question; soft warning at best |

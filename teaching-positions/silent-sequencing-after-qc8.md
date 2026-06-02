@@ -1,6 +1,6 @@
 # Case study: silent sequencing after `…Qc8` — when "blunder" isn't a fair label
 
-A position earlier in the same chess.com game as [`missed-desperado-after-qe6`](missed-desperado-after-qe6.md) and [`discovered-attack-after-qxe6`](discovered-attack-after-qxe6.md). After the user played the strong `Bd5!` (the engine's only winning move), the opponent had earlier played `…Qc8` — which chess.com flagged as the move that swung the eval from −1.2 to +3.9 (≈5 pawns). The user's instinct was that `…Qc8` looked *brilliant* (defends one bishop, threatens another), and the engine still hates it. **Empirically, the engine only sees the problem at depth 8+. At depth 6 — the calculation horizon of a competent human in a tactical middlegame — `…Qc8` and the engine's pick `…Be5` are functionally tied.**
+A position earlier in the same chess.com game as [`positional-punish-after-qe6`](positional-punish-after-qe6.md) and [`discovered-attack-after-qxe6`](discovered-attack-after-qxe6.md). After the user played the strong `Bd5!` (the engine's only winning move), the opponent had earlier played `…Qc8` — which chess.com flagged as the move that swung the eval from −1.2 to +3.9 (≈5 pawns). The user's instinct was that `…Qc8` looked *brilliant* (defends one bishop, threatens another), and the engine still hates it. **Empirically, the engine only sees the problem at depth 8+. At depth 6 — the calculation horizon of a competent human in a tactical middlegame — `…Qc8` and the engine's pick `…Be5` are functionally tied.**
 
 This case study isn't about the chess. It's about the meta-principle: **what should the teaching layer do when its own engine confirms that a position is silently tactical, but the tactic only resolves below human calculation depth?**
 
@@ -112,7 +112,7 @@ The pattern hierarchy that's emerging:
 
 | Case | Detector signal at human depth? | Pattern nameable? | Teaching action |
 |---|---|---|---|
-| [`missed-desperado-after-qe6`](missed-desperado-after-qe6.md) | yes (Black's `…Nxe4` removes the defender of Nf5; detectable statically) | RemovingDefender + Desperado | Surface as missed tactic with named pattern |
+| [`positional-punish-after-qe6`](positional-punish-after-qe6.md) | yes (Black's `…Nxe4` removes the defender of Nf5; detectable statically) | RemovingDefender + Desperado | Surface as missed tactic with named pattern |
 | [`discovered-attack-after-qxe6`](discovered-attack-after-qxe6.md) | yes (e-file queen/bishop/rook alignment is statically detectable) | DiscoveredAttack (latent) | Surface as latent opponent threat with named pattern |
 | **silent-sequencing-after-qc8** (this file) | **no — depth-6 verdict is "fine"** | **none — no detector fires** | **Suppress blunder framing; explain only the visible static effects** |
 

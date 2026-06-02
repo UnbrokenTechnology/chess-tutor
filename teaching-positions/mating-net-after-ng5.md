@@ -116,7 +116,7 @@ The four case studies together bracket what the teaching layer should and should
 
 | Case | Mechanism | Visibility | Teaching action |
 |---|---|---|---|
-| [`missed-desperado-after-qe6`](missed-desperado-after-qe6.md) | RemovingDefender + Desperado | static, detectable | Surface as missed tactic, name the pattern |
+| [`positional-punish-after-qe6`](positional-punish-after-qe6.md) | RemovingDefender + Desperado | static, detectable | Surface as missed tactic, name the pattern |
 | [`discovered-attack-after-qxe6`](discovered-attack-after-qxe6.md) | DiscoveredAttack (latent) | static, detectable (needs latent-threat detector) | Surface as latent opponent threat, name the pattern |
 | [`silent-sequencing-after-qc8`](silent-sequencing-after-qc8.md) | Deep positional sequencing | invisible below depth 8 | Suppress blunder framing entirely — no honest mechanism to teach |
 | **`mating-net-after-ng5` (this file)** | King hunt via continuous checks | mechanism depth-out-of-reach; warning signals exist but no single one is decisive | **Open question** — neither "surface as named tactic" nor "stay silent" is right |
