@@ -12,8 +12,8 @@ use crate::learning_mode::{
     build_intervention_panel, gating_config_for,
 };
 use crate::view::{
-    BoardView, CoachingPanelView, EvalBarView, HintEntryView, HintPanelState, HintPanelView,
-    MoveListCell, MoveListRow, MoveListView, NewGameDialogView, PromotionPickerView,
+    ActionBarView, BoardView, CoachingPanelView, EvalBarView, HintEntryView, HintPanelState,
+    HintPanelView, MoveListCell, MoveListRow, MoveListView, NewGameDialogView, PromotionPickerView,
     RetrospectiveBody, RetrospectiveKind, RetrospectivePanelView, SidePanelBody, SidePanelView,
     TopBarView,
 };
@@ -223,23 +223,28 @@ impl Session {
     // ---- Event dispatch ------------------------------------------------
 
     pub fn build_top_bar_view(&self) -> TopBarView {
-        let hint_can_open = self.is_viewing_live()
-            && !self.engine_thinking
-            && self.is_users_turn()
-            && self.game_outcome().is_none();
         let review_button_enabled = self.history.iter().any(|e| {
             self.is_user_move(e) && e.retrospective.is_some()
         });
         TopBarView {
-            can_takeback: !self.history.is_empty(),
-            hint_open: self.hint_open,
-            hint_button_enabled: hint_can_open || self.hint_open,
             viewing_live: self.is_viewing_live(),
             depth: self.depth,
             engine_thinking: self.engine_thinking,
             game_outcome: self.game_outcome(),
             review_open: self.game_review_open,
             review_button_enabled,
+        }
+    }
+
+    pub fn build_action_bar_view(&self) -> ActionBarView {
+        let hint_can_open = self.is_viewing_live()
+            && !self.engine_thinking
+            && self.is_users_turn()
+            && self.game_outcome().is_none();
+        ActionBarView {
+            can_takeback: !self.history.is_empty(),
+            hint_open: self.hint_open,
+            hint_button_enabled: hint_can_open || self.hint_open,
         }
     }
 

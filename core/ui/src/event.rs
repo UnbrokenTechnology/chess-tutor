@@ -18,11 +18,16 @@ pub enum Event {
     /// User chose one of the four promotion picker entries.
     ConfirmPromotion(Move),
 
-    // ---- Top bar
+    // ---- Title bar / action bar
     RequestNewGame,
     Takeback,
     FlipBoard,
     ToggleHint,
+    /// Open the settings (⚙) surface. The mid-game config entry point
+    /// (decision #2). No-op until the settings screen lands in a later
+    /// redesign step; the intent is named now so renderers can wire the
+    /// gear button without churning the event enum later.
+    OpenSettings,
     /// Jump from "viewing move N" back to live.
     JumpToLive,
     ChangeDepth(u32),

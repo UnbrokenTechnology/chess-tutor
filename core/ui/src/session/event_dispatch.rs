@@ -25,6 +25,10 @@ impl Session {
             Event::Takeback => self.takeback(),
             Event::FlipBoard => self.flipped = !self.flipped,
             Event::ToggleHint => self.toggle_hint(),
+            // The settings surface doesn't exist yet (lands in a later
+            // redesign step). Accepting the intent now keeps the gear
+            // button wired without a placeholder elsewhere.
+            Event::OpenSettings => {}
             Event::JumpToLive => self.viewing_index = None,
             Event::ChangeDepth(d) => self.depth = d,
             Event::ViewHistoryIndex(target) => {

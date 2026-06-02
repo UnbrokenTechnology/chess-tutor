@@ -64,6 +64,20 @@ impl eframe::App for App {
             // can't stick, since the range is clamped to [320, 320].
             .exact_width(320.0)
             .show(ctx, |ui| {
+                // Big action bar pinned to the bottom of the right column
+                // (chess.com idiom). Reserve it first via a bottom-up
+                // layout, then the side-panel content fills the space above.
+                egui::TopBottomPanel::bottom("action_bar")
+                    .resizable(false)
+                    .show_inside(ui, |ui| {
+                        ui.add_space(6.0);
+                        draw::action_bar::draw(
+                            ui,
+                            &self.session.build_action_bar_view(),
+                            &mut events,
+                        );
+                        ui.add_space(6.0);
+                    });
                 draw::side_panel::draw(ui, &self.session.build_side_panel_view(), &mut events);
             });
         egui::CentralPanel::default().show(ctx, |ui| {

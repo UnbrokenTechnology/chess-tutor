@@ -5,6 +5,7 @@
 //! events into [`chess_tutor_ui::Session::dispatch`] after each
 //! frame.
 
+pub(crate) mod action_bar;
 pub(crate) mod board;
 pub(crate) mod dialog;
 pub(crate) mod eval_bar;

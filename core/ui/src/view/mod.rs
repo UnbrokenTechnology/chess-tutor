@@ -14,16 +14,21 @@ pub use panels::*;
 
 
 
-/// Top-bar panel: New Game / Takeback / Flip / Hint / Live buttons,
-/// depth tuner, and a status slot that renders as either a spinner
-/// ("engine thinking…") or a game-outcome banner.
+/// Slim title bar: app title, a ⚙ settings button, a flip-board
+/// button, and a status slot that renders as either a spinner
+/// ("engine thinking…") or a game-outcome banner. The primary play
+/// actions (Takeback / Hint / New Game) live in [`ActionBarView`] at
+/// the bottom of the right column now, not here.
+///
+/// Review / Live stay here for now — they're relocated to the
+/// post-game review surface in a later redesign step; keeping them on
+/// the title bar avoids losing the functionality in the interim.
+///
+/// `depth` is parked here as a minimal control: its true home is the
+/// Options/⚙ surface (a later step), but with no settings screen yet
+/// it stays minimally accessible on the title bar so depth tuning
+/// isn't lost.
 pub struct TopBarView {
-    pub can_takeback: bool,
-    pub hint_open: bool,
-    /// `(can-open-hint) || hint_open` — the user can always close a
-    /// hint that's already up, even if the conditions for opening one
-    /// no longer hold (engine started thinking, etc.).
-    pub hint_button_enabled: bool,
     pub viewing_live: bool,
     pub depth: u32,
     pub engine_thinking: bool,
@@ -34,6 +39,20 @@ pub struct TopBarView {
     /// `true` when there's at least one user move whose retrospective
     /// has arrived (so the review would have something to show).
     pub review_button_enabled: bool,
+}
+
+/// The big, obvious bottom-of-the-right-column action bar
+/// (chess.com idiom): Takeback / Hint / New Game. These are the
+/// primary play controls, sized large for legibility.
+pub struct ActionBarView {
+    pub can_takeback: bool,
+    /// Whether the Hint surface is currently open (the button doubles
+    /// as a toggle / "Hide Hint").
+    pub hint_open: bool,
+    /// `(can-open-hint) || hint_open` — the user can always close a
+    /// hint that's already up, even if the conditions for opening one
+    /// no longer hold (engine started thinking, etc.).
+    pub hint_button_enabled: bool,
 }
 
 /// Eval bar (left rail): one rectangle split into a white-advantage
