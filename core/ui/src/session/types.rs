@@ -177,12 +177,3 @@ pub(crate) struct PendingPromotion {
     pub(crate) candidates: [Move; 4],
 }
 
-pub(crate) struct HintResult {
-    /// Position the analyses are *for* — needed to format SAN of
-    /// candidate moves and PV plies on render. Identification of
-    /// which position this corresponds to happens at arrival time
-    /// (via `for_key` matching `self.position.key()`); once stored
-    /// the position itself carries everything the panel needs.
-    pub(crate) pos: Position,
-    pub(crate) analyses: Vec<chess_tutor_engine::analysis::MoveAnalysis>,
-}

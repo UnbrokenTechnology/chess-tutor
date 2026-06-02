@@ -1,4 +1,4 @@
-//! Side-panel, coaching, review, intervention, move-list, hint, and
+//! Side-panel, hint pop-over, review, intervention, move-list, and
 //! new-game-dialog view descriptors. Split out of `view.rs`; the
 //! board/annotation/retrospective-card types live in the parent module.
 
@@ -6,8 +6,12 @@ use super::{BoardAnnotation, RetrospectiveCategory, RetrospectiveViewModel, Sent
 use crate::session::NewGameForm;
 use chess_tutor_teaching::phrasing::Perspective;
 
-/// Right side panel: move list on top, then either retrospective or
-/// hint body depending on whether the hint panel is open.
+/// Right side panel: the backward-looking feedback zone (retrospective /
+/// review / intervention) plus the compact move list. Coaching is *not*
+/// here any more — it pops over via [`HintPopoverView`] so the
+/// backward-looking feedback and the forward-looking "what to notice"
+/// can coexist instead of fighting over one slot (PLAN §"coaching/hint
+/// model").
 pub struct SidePanelView {
     pub moves: MoveListView,
     pub body: SidePanelBody,
@@ -32,24 +36,28 @@ pub enum SidePanelBody {
     /// Takes priority over the retrospective panel so the prompt is
     /// the first thing the user sees.
     Intervention(InterventionPanelView),
-    /// Live coaching surface, shown when AssistanceLevel::Coached is
-    /// active AND it's the user's turn AND no higher-priority body
-    /// is active. Lists features-to-notice from the current
-    /// position; never names a move.
-    Coaching(CoachingPanelView),
     Retrospective(RetrospectivePanelView),
-    Hint(HintPanelView),
     /// Post-game (or on-demand) review surface — a ranked list of
     /// significant moments the user should study. Click any moment
     /// to jump the rest of the UI to that move.
     GameReview(GameReviewView),
 }
 
-/// Wrapper that lets the renderer paint a header / empty-state /
-/// disabled-state alongside the items themselves. When `items` is
-/// empty, the renderer should show an encouraging neutral message
-/// rather than a blank panel.
-pub struct CoachingPanelView {
+/// The on-demand **Hint pop-over** — a dismissible "what to notice"
+/// panel opened by the Hint button (PLAN §"coaching/hint model").
+/// Lists features-to-notice in the current position, naming patterns
+/// and squares but **never the move** (the opposite of chess.com's
+/// answer-flashing Hint). Built from
+/// [`crate::coaching_view::build_coaching_view`]; rendered as a
+/// floating pop-over so the side panel's backward-looking feedback
+/// zone stays visible underneath. `None` when the pop-over is closed.
+///
+/// A renderer-neutral descriptor: the renderer chooses the floating-
+/// panel chrome and the dismiss affordance, and emits
+/// [`crate::event::Event::ToggleHint`] to close. When `view_model.items`
+/// is empty, the renderer shows an encouraging neutral message rather
+/// than a blank pop-over.
+pub struct HintPopoverView {
     pub view_model: CoachingViewModel,
 }
 
@@ -352,27 +360,6 @@ pub enum RetrospectiveKind {
         view_model: Box<RetrospectiveViewModel>,
         selected_item: Option<usize>,
     },
-}
-
-pub struct HintPanelView {
-    pub state: HintPanelState,
-}
-
-pub enum HintPanelState {
-    Loading,
-    NoResult,
-    NoMoves,
-    Ready(Vec<HintEntryView>),
-}
-
-pub struct HintEntryView {
-    pub san: String,
-    pub score_str: String,
-    pub depth: u32,
-    pub pv_san: Vec<String>,
-    /// When `Some(i)` and `i < pv_san.len()`, the renderer appends a
-    /// "[settles ply i]" marker after the PV.
-    pub settle_marker: Option<usize>,
 }
 
 /// New Game dialog descriptor.

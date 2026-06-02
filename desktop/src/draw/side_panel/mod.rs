@@ -1,6 +1,8 @@
 //! Right-column rendering: the FEEDBACK zone (backward-looking
-//! retrospective / review) as the primary citizen on top, a compact
-//! move-list zone at the bottom.
+//! retrospective / review / intervention) as the primary citizen on
+//! top, a compact move-list zone at the bottom. Forward-looking
+//! coaching is NOT here — it pops over (`draw::hint_popover`) so the two
+//! never fight for one slot (PLAN §"coaching/hint model").
 //!
 //! STEP-5 REATTACH NOTE: the always-on learning-mode preset picker and
 //! the board-overlay toggle block were removed from this panel in
@@ -21,13 +23,12 @@ use eframe::egui;
 
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{
-    CoachingItem, CoachingPanelView, GameReviewMoment, GameReviewView, InterventionAction,
-    InterventionPanelKind, InterventionPanelView, MoveListView, ReviewMomentKind, SidePanelBody,
-    SidePanelView,
+    GameReviewMoment, GameReviewView, InterventionAction, InterventionPanelKind,
+    InterventionPanelView, MoveListView, ReviewMomentKind, SidePanelBody, SidePanelView,
 };
 
-mod cards;
-use cards::{category_glyph, draw_hint_panel, draw_retrospective, sentiment_color};
+pub(crate) mod cards;
+use cards::draw_retrospective;
 
 pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Event>) {
     // Right column split (build-order step 3): the FEEDBACK zone is the
@@ -60,21 +61,6 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                     draw_intervention_panel(ui, prompt, events);
                 });
         }
-        SidePanelBody::Hint(hint) => {
-            draw_panel_header(
-                ui,
-                "\u{1f4a1}",
-                "Hint — this position",
-                "The engine's top moves from the position in front of you.",
-                PANEL_HINT,
-            );
-            egui::ScrollArea::vertical()
-                .id_salt("hint_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    draw_hint_panel(ui, hint);
-                });
-        }
         SidePanelBody::Retrospective(retro) => {
             // Backward-looking. The temporally-explicit title + distinct
             // colour is what stops the student confusing this with the
@@ -92,23 +78,6 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     draw_retrospective(ui, retro, events);
-                });
-        }
-        SidePanelBody::Coaching(coaching) => {
-            // Forward-looking — the deliberate contrast with the
-            // retrospective's "After your move" header above.
-            draw_panel_header(
-                ui,
-                "\u{1f50e}",
-                "Before your move",
-                "What to notice in the position in front of you — you pick the move.",
-                PANEL_COACHING,
-            );
-            egui::ScrollArea::vertical()
-                .id_salt("coaching_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    draw_coaching_panel(ui, coaching);
                 });
         }
         SidePanelBody::GameReview(review) => {
@@ -129,13 +98,11 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
     }
 }
 
-// Distinct per-panel accent colours. The load-bearing pair is
-// Coaching (forward-looking, teal) vs Retrospective (backward-looking,
-// indigo): different enough that a glance tells the student whether a card
-// is about the move they're *about* to make or the one they *just* made.
-const PANEL_COACHING: egui::Color32 = egui::Color32::from_rgb(0x00, 0x83, 0x77); // teal
+// Distinct per-panel accent colours for the backward-looking side-panel
+// bodies. (The forward-looking "what to notice" coaching surface now
+// lives in the floating Hint pop-over — `draw::hint_popover` — with its
+// own teal accent, so it no longer competes for a slot here.)
 const PANEL_RETRO: egui::Color32 = egui::Color32::from_rgb(0x51, 0x39, 0x9a); // indigo
-const PANEL_HINT: egui::Color32 = egui::Color32::from_rgb(0x15, 0x65, 0xc0); // blue
 const PANEL_PAUSE: egui::Color32 = egui::Color32::from_rgb(0xc6, 0x28, 0x28); // red
 const PANEL_REVIEW: egui::Color32 = egui::Color32::from_rgb(0xb8, 0x55, 0x00); // amber
 
@@ -169,92 +136,6 @@ fn draw_panel_header(
             }
         });
     ui.add_space(6.0);
-}
-
-fn draw_coaching_panel(ui: &mut egui::Ui, view: &CoachingPanelView) {
-    // The colour-coded "Before your move" header (drawn by the caller)
-    // already frames this panel as forward-looking and move-free, so no
-    // intro line here — straight to the cards.
-    if view.view_model.items.is_empty() {
-        ui.label(
-            egui::RichText::new(
-                "Nothing jumping out positionally. Look at piece activity, pawn \
-                 chains, and which squares each side wants — then pick your move.",
-            )
-            .italics(),
-        );
-        return;
-    }
-    // Tactical / leading cards first (non-demoted). When the
-    // tactical-mode gate fired, the demoted positional cards are
-    // collapsed under a muted fold below; otherwise nothing is demoted
-    // and everything renders inline as before.
-    for item in view.view_model.items.iter().filter(|it| !it.demoted) {
-        draw_coaching_item(ui, item);
-        ui.add_space(8.0);
-    }
-    let demoted: Vec<&CoachingItem> =
-        view.view_model.items.iter().filter(|it| it.demoted).collect();
-    if !demoted.is_empty() {
-        ui.add_space(4.0);
-        // Minimal first pass at the collapse treatment (the user will
-        // refine visuals during GUI testing): a muted, default-collapsed
-        // header makes clear these are not the priority right now.
-        egui::CollapsingHeader::new(
-            egui::RichText::new("Quiet-position notes — not the priority right now")
-                .small()
-                .weak(),
-        )
-        .default_open(false)
-        .show(ui, |ui| {
-            for item in demoted {
-                draw_coaching_item(ui, item);
-                ui.add_space(8.0);
-            }
-        });
-    }
-}
-
-fn draw_coaching_item(ui: &mut egui::Ui, item: &CoachingItem) {
-    let accent = sentiment_color(item.sentiment);
-    let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 28);
-    egui::Frame::group(ui.style())
-        .stroke(egui::Stroke::new(1.5, accent))
-        .fill(bg)
-        .inner_margin(egui::Margin::same(10.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(category_glyph(item.category))
-                        .size(16.0),
-                );
-                // Wrap the heading within the fixed-width column instead of
-                // letting a long title stretch the panel (a bare label in a
-                // horizontal row won't wrap).
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&item.heading).strong().size(15.0),
-                    )
-                    .wrap(),
-                );
-            });
-            // Summary keeps `.weak()` for hierarchy below the bold
-            // heading but drops `.small()` — at small+weak it was a
-            // washed-out 10pt grey that fought the eye.
-            if !item.summary.is_empty() {
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new(&item.summary).weak());
-            }
-            // Detail prose reads at default size — it's the "why" the
-            // student needs to absorb. Adding a small vertical buffer
-            // before the separator so it doesn't feel cramped.
-            if !item.detail.is_empty() {
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(2.0);
-                ui.label(&item.detail);
-            }
-        });
 }
 
 fn draw_game_review(

@@ -92,6 +92,13 @@ impl eframe::App for App {
             draw::board::draw(ui, &self.session.build_board_view(), &mut events);
         });
 
+        // Hint pop-over (PLAN step 4): a floating "what to notice" panel
+        // over the board, opened by Hint / auto-coach. Rendered before
+        // the new-game dialog so a modal setup dialog still sits on top.
+        if let Some(popover) = self.session.build_hint_popover_view() {
+            draw::hint_popover::draw(ctx, &popover, &mut events);
+        }
+
         if let Some(dialog) = self.session.build_new_game_dialog_view() {
             draw::dialog::draw(ctx, dialog, &mut events);
         }

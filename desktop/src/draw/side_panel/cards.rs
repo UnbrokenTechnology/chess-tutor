@@ -1,14 +1,13 @@
-//! Retrospective-card and hint-panel rendering, split out of side_panel.
-//! Includes the shared category_glyph / sentiment_color helpers, which the
-//! coaching/review cards in the parent module also call (via super::).
+//! Retrospective-card rendering, split out of side_panel. Includes the
+//! shared category_glyph / sentiment_color helpers, which the hint-pop-over
+//! and review cards (in sibling modules) also call.
 
 use eframe::egui;
 
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{
-    HintPanelState, HintPanelView, RetrospectiveBody, RetrospectiveCategory,
-    RetrospectiveHeadline, RetrospectiveItem, RetrospectiveKind, RetrospectivePanelView,
-    RetrospectiveViewModel, Sentiment,
+    RetrospectiveBody, RetrospectiveCategory, RetrospectiveHeadline, RetrospectiveItem,
+    RetrospectiveKind, RetrospectivePanelView, RetrospectiveViewModel, Sentiment,
 };
 
 pub(super) fn draw_retrospective(
@@ -250,7 +249,7 @@ fn draw_item_card(
         .clicked()
 }
 
-pub(super) fn category_glyph(category: RetrospectiveCategory) -> &'static str {
+pub(crate) fn category_glyph(category: RetrospectiveCategory) -> &'static str {
     match category {
         RetrospectiveCategory::Material => "♟",
         RetrospectiveCategory::Threats => "⚔",
@@ -271,7 +270,7 @@ pub(super) fn category_glyph(category: RetrospectiveCategory) -> &'static str {
     }
 }
 
-pub(super) fn sentiment_color(sentiment: Sentiment) -> egui::Color32 {
+pub(crate) fn sentiment_color(sentiment: Sentiment) -> egui::Color32 {
     match sentiment {
         Sentiment::Positive => egui::Color32::from_rgb(0x2e, 0x7d, 0x32),
         Sentiment::Negative => egui::Color32::from_rgb(0xc6, 0x28, 0x28),
@@ -280,40 +279,3 @@ pub(super) fn sentiment_color(sentiment: Sentiment) -> egui::Color32 {
     }
 }
 
-pub(super) fn draw_hint_panel(ui: &mut egui::Ui, view: &HintPanelView) {
-    match &view.state {
-        HintPanelState::Loading => {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("analyzing position…");
-            });
-        }
-        HintPanelState::NoResult => {
-            ui.label("(no analysis yet)");
-        }
-        HintPanelState::NoMoves => {
-            ui.label("(no legal moves)");
-        }
-        HintPanelState::Ready(entries) => {
-            for (i, e) in entries.iter().enumerate() {
-                ui.add_space(if i == 0 { 0.0 } else { 8.0 });
-                ui.monospace(format!(
-                    "{}. {}    {}    depth {}",
-                    i + 1,
-                    e.san,
-                    e.score_str,
-                    e.depth,
-                ));
-                if !e.pv_san.is_empty() {
-                    let mut line = e.pv_san.join(" ");
-                    if let Some(settled) = e.settle_marker {
-                        line.push_str(&format!("  [settles ply {}]", settled));
-                    }
-                    ui.indent(format!("pv_{i}"), |ui| {
-                        ui.weak(egui::RichText::new(line).monospace());
-                    });
-                }
-            }
-        }
-    }
-}

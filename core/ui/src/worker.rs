@@ -25,13 +25,12 @@ use crate::session::RepaintFn;
 /// bought nothing. See PLAN-teaching-translation-layer.md §"Analysis
 /// config".
 const RETROSPECTIVE_MULTI_PV: usize = 2;
-/// Safety caps for analytical searches that auto-fire (retrospective,
-/// hint panel). Without these, pathological positions — notably
-/// MultiPV around a found mate — can pin the worker thread for
-/// minutes, locking the GUI mid-game. The wall-clock cap is the
-/// user-visible guarantee ("retrospective takes max N seconds"); the
-/// node cap is a backstop in case the time check is starved by
-/// scheduling.
+/// Safety caps for analytical searches that auto-fire (retrospective).
+/// Without these, pathological positions — notably MultiPV around a
+/// found mate — can pin the worker thread for minutes, locking the GUI
+/// mid-game. The wall-clock cap is the user-visible guarantee
+/// ("retrospective takes max N seconds"); the node cap is a backstop in
+/// case the time check is starved by scheduling.
 const ANALYSIS_NODE_CAP: u64 = 100_000_000;
 const ANALYSIS_TIME_MS: u64 = 10_000;
 
@@ -56,17 +55,12 @@ pub(crate) enum WorkerJob {
         gen: u64,
         target_index: usize,
     },
-    Analyze {
-        pos: Box<Position>,
-        depth: u32,
-        multi_pv: usize,
-        game_history: Vec<u64>,
-        for_key: u64,
-    },
     /// Run a search and reply with the raw analyses + timing. The
     /// dispatcher ([`crate::session::Session::run_analysis`]) blocks
     /// on the response. Used by the CLI's REPL `search` / `analyze`
-    /// commands; the GUI hint panel uses [`Self::Analyze`] instead.
+    /// commands. (The GUI Hint pop-over no longer runs a search at all —
+    /// it surfaces a static `build_coaching_view` snapshot — so the old
+    /// fire-and-forget `Analyze` job is gone.)
     AnalyzeSync {
         pos: Box<Position>,
         params: SearchParams,
@@ -106,10 +100,6 @@ pub(crate) enum WorkerResult {
         elapsed: Duration,
         nodes: u64,
         nps_m: f64,
-    },
-    Analyze {
-        for_key: u64,
-        analyses: Vec<MoveAnalysis>,
     },
     /// Blocking analysis for headless callers — CLI's REPL `search` /
     /// `analyze` commands. No stale-detection; the caller blocks via
@@ -302,38 +292,6 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                     nodes,
                     nps_m,
                 });
-                repaint();
-            }
-            WorkerJob::Analyze {
-                mut pos,
-                depth,
-                multi_pv,
-                game_history,
-                for_key,
-            } => {
-                // Same reset-before-use pattern as Retrospective —
-                // hint / analyze answer should be deterministic for
-                // the position the user is asking about.
-                analysis_engine.new_game();
-                let params = SearchParams {
-                    max_depth: depth,
-                    max_nodes: Some(ANALYSIS_NODE_CAP),
-                    max_time: Some(Duration::from_millis(ANALYSIS_TIME_MS)),
-                    multi_pv,
-                    game_history,
-                    force_include: Vec::new(),
-                    verbose_progress: false,
-                    // Hint / analyze: single-threaded for the same
-                    // determinism reason as the retrospective. The user
-                    // is exploring "what would the engine think about
-                    // X" — same question twice should give the same
-                    // answer.
-                    threads: 1,
-                    // Hint panel is analytical — unbiased eval.
-                    eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
-                };
-                let analyses = analyze_position(&mut analysis_engine, &mut pos, params);
-                let _ = tx.send(WorkerResult::Analyze { for_key, analyses });
                 repaint();
             }
             WorkerJob::AnalyzeSync { mut pos, params } => {

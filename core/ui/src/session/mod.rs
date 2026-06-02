@@ -27,7 +27,6 @@ use crate::worker::{WorkerJob, WorkerResult};
 pub type RepaintFn = Arc<dyn Fn() + Send + Sync>;
 
 pub(crate) const ENGINE_TURN_NODE_CAP: u64 = 5_000_000;
-pub(crate) const HINT_MULTI_PV: usize = 3;
 /// Engine-play depth — what the bot uses to pick its own moves.
 pub(crate) const DEFAULT_DEPTH: u32 = 10;
 /// Analytical depth for retrospective / hint / analyze paths. Kept
@@ -88,17 +87,13 @@ pub struct Session {
     /// `form.error` and keeps it open.
     pub(crate) new_game_form: Option<NewGameForm>,
 
-    /// `true` while the Hint panel is showing (replacing the
-    /// retrospective panel). Toggled by the Hint button; auto-closed
-    /// on next move, takeback, and new game.
+    /// `true` while the Hint pop-over is showing (PLAN §"coaching/hint
+    /// model"). Toggled by the Hint button; auto-opened each move when
+    /// `learning.auto_coach` is set; auto-closed on next move, takeback,
+    /// and new game. Drives [`Session::build_hint_popover_view`], a
+    /// pure `build_coaching_view` snapshot rebuilt per frame — there's
+    /// no in-flight search or cached result behind it.
     pub(crate) hint_open: bool,
-    /// `true` while a Hint Analyze job is in flight. Distinct from
-    /// `hint_open` because the panel may be open showing stale results
-    /// while we wait for fresh ones.
-    pub(crate) hint_thinking: bool,
-    /// Latest analyze result. Tagged with the position key it was
-    /// computed for so stale arrivals can be discarded.
-    pub(crate) hint_result: Option<HintResult>,
 
     /// Bot personality / variability for the current game. Reseeded
     /// on every New Game; the play loop reads `book` to pick an

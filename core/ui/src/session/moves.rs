@@ -12,31 +12,47 @@ use crate::learning_mode::MistakeHandling;
 use crate::worker::WorkerJob;
 
 impl Session {
+    /// Close the Hint pop-over. The pop-over content is a pure
+    /// `build_coaching_view` snapshot rebuilt per frame, so there's no
+    /// in-flight job or cached result to tear down — just the flag.
     pub(crate) fn close_hint(&mut self) {
         self.hint_open = false;
-        self.hint_thinking = false;
-        self.hint_result = None;
     }
 
+    /// Toggle the Hint pop-over (PLAN §"coaching/hint model"). The
+    /// pop-over surfaces *what to notice* in the current position
+    /// (`build_hint_popover_view` → `build_coaching_view`) — it names
+    /// patterns/squares but never the move, and needs no search, so
+    /// opening it is a flag flip; the snapshot is computed lazily when
+    /// the view is built.
     pub(crate) fn toggle_hint(&mut self) {
-        if self.hint_open {
-            self.close_hint();
-            return;
-        }
-        // Open and queue an Analyze job for the current live position.
+        self.hint_open = !self.hint_open;
+    }
+
+    /// Open the Hint pop-over without toggling — used by the auto-coach
+    /// path when a new user turn begins. Idempotent: a no-op if already
+    /// open.
+    pub(crate) fn open_hint(&mut self) {
         self.hint_open = true;
-        self.hint_thinking = true;
-        self.hint_result = None;
-        let _ = self.worker_tx.send(WorkerJob::Analyze {
-            pos: Box::new(self.position.clone()),
-            // Analytical paths use ANALYTICAL_DEPTH, independent of
-            // self.depth (the bot's play depth). See the constant
-            // for rationale.
-            depth: ANALYTICAL_DEPTH,
-            multi_pv: HINT_MULTI_PV,
-            game_history: game_history_for_search(&self.position_keys),
-            for_key: self.position.key(),
-        });
+    }
+
+    /// Auto-coach hook (PLAN §"coaching/hint model"): when the user has
+    /// the `auto_coach` preference on, pop the Hint open at the start of
+    /// each of their turns for maximum hand-holding. A no-op unless the
+    /// preference is set AND it's genuinely the user's live turn in an
+    /// ongoing game — so it never fires on the engine's move, while
+    /// browsing back, or after the game ends. Call after any transition
+    /// that hands the move back to the user (game start, engine reply
+    /// applied, takeback).
+    pub(crate) fn maybe_auto_coach(&mut self) {
+        if self.learning.auto_coach
+            && self.is_viewing_live()
+            && self.is_users_turn()
+            && !self.engine_thinking
+            && self.game_outcome().is_none()
+        {
+            self.open_hint();
+        }
     }
 
     pub(crate) fn handle_click(&mut self, sq: Square) {
@@ -275,6 +291,10 @@ impl Session {
         // they should see the line print again.
         self.book_out_announced = false;
         self.maybe_queue_engine_search();
+        // Takeback lands the user back on their own turn — re-open the
+        // Hint pop-over if auto-coach is on (close_hint above cleared
+        // the stale one for the position we just left).
+        self.maybe_auto_coach();
     }
 
     pub(crate) fn undo_one(&mut self) {

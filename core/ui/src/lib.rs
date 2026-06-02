@@ -21,7 +21,7 @@ pub mod view;
 mod worker;
 
 pub use learning_mode::{
-    AssistanceLevel, BlunderSafety, LearningPreferences, LearningPreset, MistakeHandling,
+    BlunderSafety, LearningPreferences, LearningPreset, MistakeHandling,
 };
 pub use retrospective_view::build_retrospective_view;
 pub use session::{RepaintFn, Session};

@@ -283,8 +283,8 @@ impl Session {
                 // pick) and is only a transient eval-bar placeholder; the
                 // retrospective analysis is the source of truth.
                 self.queue_engine_move_retrospective(engine_move_index);
-                // Engine just moved — any open Hint was for the prior
-                // position, so close it.
+                // Engine just moved — any open Hint pop-over was for the
+                // prior position, so close it.
                 self.close_hint();
                 // Self-play (EngineMode::Both) needs us to queue the
                 // *next* engine move after each completes; without this
@@ -293,6 +293,11 @@ impl Session {
                 // side-to-move isn't the engine, so the guard returns
                 // immediately.
                 self.maybe_queue_engine_search();
+                // The move is now (usually) back with the user — auto-
+                // open the Hint pop-over if they've opted into auto-coach.
+                // Guarded so it never fires mid-self-play or while the
+                // next search is still queued.
+                self.maybe_auto_coach();
             }
             WorkerResult::Retrospective {
                 gen,
@@ -353,22 +358,6 @@ impl Session {
                     }
                     self.maybe_queue_engine_search();
                 }
-            }
-            WorkerResult::Analyze { for_key, analyses } => {
-                if !self.hint_open {
-                    return;
-                }
-                if for_key != self.position.key() {
-                    // Stale: hint was issued for a different position
-                    // (e.g., user moved while it was queued).
-                    return;
-                }
-                self.hint_thinking = false;
-                let _ = for_key;
-                self.hint_result = Some(HintResult {
-                    pos: self.position.clone(),
-                    analyses,
-                });
             }
             WorkerResult::AnalyzeSync { .. } => {
                 // Synchronous analyses are consumed inline by

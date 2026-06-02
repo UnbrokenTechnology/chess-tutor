@@ -111,8 +111,6 @@ impl Session {
             viewing_index: None,
             new_game_form: Some(NewGameForm::initial()),
             hint_open: false,
-            hint_thinking: false,
-            hint_result: None,
             opponent: OpponentProfile::new_random(),
             book_cursor: None,
             book_out_announced: false,
@@ -169,6 +167,11 @@ impl Session {
         self.close_hint();
         let _ = self.worker_tx.send(WorkerJob::NewGame);
         self.maybe_queue_engine_search();
+        // If the user moves first and has auto-coach on, pop the Hint
+        // open for the opening position. (When the engine moves first
+        // this is a no-op — it's not the user's turn — and the engine-
+        // reply path re-checks once the move lands.)
+        self.maybe_auto_coach();
     }
 
     /// Toggle Session's stderr logging of book picks / opening seed /
@@ -248,6 +251,9 @@ impl Session {
         self.close_hint();
         let _ = self.worker_tx.send(WorkerJob::NewGame);
         self.maybe_queue_engine_search();
+        // Auto-coach for the opening position when the user moves first
+        // (see start_game for the no-op-when-engine-first note).
+        self.maybe_auto_coach();
     }
 
     pub(crate) fn open_new_game_dialog(&mut self) {

@@ -1,18 +1,30 @@
-//! Learning-mode preferences — how much live help the student gets
-//! during play, how (and whether) the session pauses on mistakes, and
-//! whether the engine's preferred moves are ever revealed.
+//! Learning-mode preferences — how (and whether) the session pauses on
+//! mistakes, whether the engine's preferred moves are ever revealed,
+//! and whether the Hint pop-over auto-opens each move.
 //!
-//! The three axes are deliberately independent so the user can mix
-//! them: "coached overlays during my turn + silent during mistakes +
-//! blunder safety on" is just as valid as "silent everything." The
-//! [`LearningPreset`] enum collapses common combinations into named
-//! presets for the New Game UI; advanced users tune the axes directly.
+//! The axes are deliberately independent so the user can mix them:
+//! "auto-coach each move + silent during mistakes + blunder safety on"
+//! is just as valid as "silent everything." The [`LearningPreset`] enum
+//! collapses common combinations into named presets for the
+//! Start/Options UI; advanced users tune the axes directly.
+//!
+//! **The coaching/hint model (PLAN §"coaching/hint model").** Coaching
+//! is *on-demand*, not a persistent panel-swapping mode. The student
+//! presses **Hint** to pop a transient "what to notice" panel (fed by
+//! [`crate::coaching_view::build_coaching_view`]); an optional
+//! [`LearningPreferences::auto_coach`] toggle auto-opens it each move
+//! for maximum hand-holding. The old persistent `AssistanceLevel`
+//! (Off / Prophylactic / Coached) axis is **gone** — coaching no longer
+//! shares the side-panel slot with the backward-looking retrospective,
+//! so the two can coexist by construction (retrospective in the panel,
+//! coaching in the pop-over).
 //!
 //! **Pedagogical principle.** The engine knows the best move; the
 //! student needs to *develop* the skill of finding it. Revealing the
 //! engine's choice short-circuits that practice and trains rote
 //! memorisation — so every reveal is opt-in, every pause is gated to
-//! genuine teaching moments (not every non-best move), and the
+//! genuine teaching moments (not every non-best move), the Hint
+//! pop-over names patterns/squares but never the move, and the
 //! retrospective never tells the student what to do, only what they
 //! missed.
 
@@ -23,25 +35,6 @@ pub(crate) use terms::term_prompt_copy;
 #[path = "mod_tests.rs"]
 mod tests;
 
-
-/// Live overlays / cues shown during the user's turn, *before* they
-/// commit a move.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum AssistanceLevel {
-    /// No live help during play. Pure decision-making — the user
-    /// thinks through the position with only the board and their own
-    /// candidate-move calculation.
-    #[default]
-    Off,
-    /// Overlay opponent threats only (Dvoretsky-style prophylactic
-    /// thinking). The user sees what the opponent is up to but never
-    /// receives suggestions about their own play.
-    Prophylactic,
-    /// Surface position features — imbalances, weak squares, outposts —
-    /// without naming any move (Silman-style imbalances trainer). The
-    /// student is shown *what to look at*, not *what to do about it*.
-    Coached,
-}
 
 /// What happens after the user commits a non-best move.
 ///
@@ -94,9 +87,15 @@ pub enum BlunderSafety {
 /// future deliverable.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LearningPreferences {
-    pub assistance: AssistanceLevel,
     pub mistake_handling: MistakeHandling,
     pub blunder_safety: BlunderSafety,
+    /// When `true`, the Hint pop-over auto-opens at the start of every
+    /// one of the user's turns — maximum hand-holding without the
+    /// student having to remember to press Hint. Off by default (the
+    /// pop-over is on-demand). The auto-open itself is wired through
+    /// the session; the toggle's setup UI lands with the Options
+    /// screen (PLAN build-order step 5).
+    pub auto_coach: bool,
     /// Whether the engine's preferred move is ever shown in the
     /// retrospective (text label and arrow on the board). Off by
     /// default to keep the retrospective focused on *why* the user's
@@ -118,9 +117,9 @@ pub enum LearningPreset {
     /// Silent during play, but pauses on detected teaching moments
     /// (with a takeback option after blunders).
     Supported,
-    /// Live coaching overlay (features named, never moves) + teaching
-    /// pauses + blunder safety. The most-help mode short of revealing
-    /// engine moves.
+    /// Auto-coach: the Hint pop-over ("what to notice" — features named,
+    /// never moves) auto-opens each move, plus teaching pauses + blunder
+    /// safety. The most-help mode short of revealing engine moves.
     Coached,
     /// Bespoke combination of axes.
     Custom,
@@ -395,21 +394,25 @@ impl LearningPreset {
     pub fn to_preferences(self) -> LearningPreferences {
         match self {
             LearningPreset::Practicing => LearningPreferences {
-                assistance: AssistanceLevel::Off,
                 mistake_handling: MistakeHandling::SilentRetrospective,
                 blunder_safety: BlunderSafety::Off,
+                auto_coach: false,
                 reveal_best_moves: false,
             },
             LearningPreset::Supported => LearningPreferences {
-                assistance: AssistanceLevel::Off,
                 mistake_handling: MistakeHandling::TeachingMoments,
                 blunder_safety: BlunderSafety::OfferTakeback,
+                auto_coach: false,
                 reveal_best_moves: false,
             },
+            // "Coached" now means the Hint pop-over auto-opens each move
+            // (on-demand coaching, maximum hand-holding) plus the
+            // teaching pause + blunder safety. The old persistent
+            // coaching panel is gone.
             LearningPreset::Coached => LearningPreferences {
-                assistance: AssistanceLevel::Coached,
                 mistake_handling: MistakeHandling::TeachingMoments,
                 blunder_safety: BlunderSafety::OfferTakeback,
+                auto_coach: true,
                 reveal_best_moves: false,
             },
             // Custom returns the default; callers using Custom should

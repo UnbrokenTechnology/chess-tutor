@@ -1,21 +1,18 @@
 //! Build the [`crate::view`] descriptors the renderers consume: top bar,
-//! eval bar, board, side panel, move list, retrospective, coaching, hint,
-//! the new-game dialog, and the on-demand game review.
+//! eval bar, board, side panel, move list, retrospective, the hint
+//! pop-over, the new-game dialog, and the on-demand game review.
 
 use super::*;
 
-use chess_tutor_engine::position::Position;
-use chess_tutor_engine::san;
 use chess_tutor_engine::types::{Color, Move, Square, Value};
 
 use crate::learning_mode::{
     build_intervention_panel, gating_config_for,
 };
 use crate::view::{
-    ActionBarView, BoardView, CoachingPanelView, EvalBarView, HintEntryView, HintPanelState,
-    HintPanelView, MoveListCell, MoveListRow, MoveListView, NewGameDialogView, PromotionPickerView,
-    RetrospectiveBody, RetrospectiveKind, RetrospectivePanelView, SidePanelBody, SidePanelView,
-    TopBarView,
+    ActionBarView, BoardView, EvalBarView, HintPopoverView, MoveListCell, MoveListRow,
+    MoveListView, NewGameDialogView, PromotionPickerView, RetrospectiveBody, RetrospectiveKind,
+    RetrospectivePanelView, SidePanelBody, SidePanelView, TopBarView,
 };
 
 /// Build the short headline shown for a moment in the game review
@@ -109,35 +106,6 @@ fn eval_bar_fill_and_label(score: Option<Value>) -> (f32, String) {
         }
         None => (0.5, String::from("—")),
     }
-}
-
-/// Format a score for display in the hint panel. Root-stm POV is
-/// the natural reading there ("if you play this, you'll be at
-/// +0.30").
-pub(crate) fn format_score_root_pov(score: Value, _root_stm: Color) -> String {
-    if score.abs() >= Value::MATE_IN_MAX_PLY {
-        if score.0 > 0 {
-            format!("M{}", (Value::MATE.0 - score.0).max(1))
-        } else {
-            format!("-M{}", (Value::MATE.0 + score.0).max(1))
-        }
-    } else {
-        let pawns = score.0 as f32 / Value::PAWN_EG.0 as f32;
-        format!("{:+.2}", pawns)
-    }
-}
-
-/// Walk a PV applying moves to a clone of `root` and producing a
-/// SAN per ply. Stops on any ply that doesn't apply cleanly
-/// (shouldn't happen with a real PV from the engine).
-pub(crate) fn pv_to_san(root: &Position, pv: &[Move]) -> Vec<String> {
-    let mut out = Vec::with_capacity(pv.len());
-    let mut pos = root.clone();
-    for mv in pv {
-        out.push(san::format(&pos, *mv));
-        pos.do_move(*mv);
-    }
-    out
 }
 
 impl Session {
@@ -352,11 +320,10 @@ impl Session {
     }
 
     pub fn build_side_panel_view(&self) -> SidePanelView {
-        // Body priority, top to bottom:
+        // The side-panel body is *only ever* backward-looking now
+        // (PLAN §"coaching/hint model"): coaching pops over instead of
+        // sharing this slot. Body priority, top to bottom:
         //   Intervention > GameReview (when explicitly opened)
-        //     > Hint (when explicitly opened)
-        //     > Coaching (live, when assistance = Coached, user's turn,
-        //                 viewing live, game in progress)
         //     > Retrospective (the default)
         let body = if let Some(pending) = self.pending_intervention.as_ref() {
             SidePanelBody::Intervention(build_intervention_panel(pending))
@@ -368,10 +335,6 @@ impl Session {
                 Some(review) => SidePanelBody::GameReview(review),
                 None => SidePanelBody::Retrospective(self.build_retrospective_view()),
             }
-        } else if self.hint_open {
-            SidePanelBody::Hint(self.build_hint_panel_view())
-        } else if self.coaching_should_show() {
-            SidePanelBody::Coaching(self.build_coaching_panel_view())
         } else {
             SidePanelBody::Retrospective(self.build_retrospective_view())
         };
@@ -382,6 +345,39 @@ impl Session {
             learning: self.learning,
             stick_to_bottom: self.is_viewing_live(),
         }
+    }
+
+    /// Build the on-demand Hint pop-over from the live position, or
+    /// `None` when it's closed. The pop-over is the *only* coaching
+    /// surface now (PLAN §"coaching/hint model"); it floats over the
+    /// backward-looking side panel so the two coexist. The "what to
+    /// notice" content is the same `build_coaching_view` snapshot the
+    /// old persistent panel used — names patterns/squares, never the
+    /// move — sub-millisecond and rebuilt every frame the pop-over is
+    /// open.
+    ///
+    /// Gated to the live position on the user's turn: a pop-over while
+    /// browsing back or while it's the engine's move would describe a
+    /// position the student can't act on. `hint_open` may still be set
+    /// in those moments (e.g. auto-coach fired and the engine started
+    /// thinking); returning `None` keeps the pop-over from showing
+    /// stale advice without forcing the caller to also clear the flag.
+    pub fn build_hint_popover_view(&self) -> Option<HintPopoverView> {
+        if !self.hint_open
+            || !self.is_viewing_live()
+            || !self.is_users_turn()
+            || self.game_outcome().is_some()
+        {
+            return None;
+        }
+        let tactic_hint = self.coaching_tactic_hint();
+        let view_model = crate::coaching_view::build_coaching_view(
+            &self.position,
+            self.user_color(),
+            tactic_hint.as_ref(),
+            self.coaching_prior_move(),
+        );
+        Some(HintPopoverView { view_model })
     }
 
     pub(crate) fn build_move_list_view(&self) -> MoveListView {
@@ -465,74 +461,6 @@ impl Session {
             },
             show_all_signals: self.show_all_signals,
             expanded: self.retro_expanded,
-        }
-    }
-
-    /// Conditions for the live coaching panel to appear:
-    /// - User explicitly turned it on via `AssistanceLevel::Coached`.
-    /// - It's the user's turn (coaching applies to the live position
-    ///   the student is about to move from).
-    /// - The user is viewing live, not browsing back.
-    /// - The game isn't over.
-    /// - There's no other higher-priority body active (the caller
-    ///   already drained those — this function only sees the lower-
-    ///   priority case).
-    pub(crate) fn coaching_should_show(&self) -> bool {
-        matches!(
-            self.learning.assistance,
-            crate::learning_mode::AssistanceLevel::Coached
-        ) && self.is_viewing_live()
-            && self.is_users_turn()
-            && self.game_outcome().is_none()
-    }
-
-    pub(crate) fn build_coaching_panel_view(&self) -> CoachingPanelView {
-        let tactic_hint = self.coaching_tactic_hint();
-        let view_model = crate::coaching_view::build_coaching_view(
-            &self.position,
-            self.user_color(),
-            tactic_hint.as_ref(),
-            self.coaching_prior_move(),
-        );
-        CoachingPanelView { view_model }
-    }
-
-    pub(crate) fn build_hint_panel_view(&self) -> HintPanelView {
-        if self.hint_thinking && self.hint_result.is_none() {
-            return HintPanelView {
-                state: HintPanelState::Loading,
-            };
-        }
-        let Some(result) = &self.hint_result else {
-            return HintPanelView {
-                state: HintPanelState::NoResult,
-            };
-        };
-        if result.analyses.is_empty() {
-            return HintPanelView {
-                state: HintPanelState::NoMoves,
-            };
-        }
-        let root_stm = result.pos.side_to_move();
-        let entries: Vec<HintEntryView> = result
-            .analyses
-            .iter()
-            .map(|ma| {
-                let san = san::format(&result.pos, ma.mv);
-                let score_str = format_score_root_pov(ma.score, root_stm);
-                let pv_san = pv_to_san(&result.pos, &ma.pv);
-                let settle_marker = ma.settled_ply.filter(|&i| i < pv_san.len());
-                HintEntryView {
-                    san,
-                    score_str,
-                    depth: ma.depth,
-                    pv_san,
-                    settle_marker,
-                }
-            })
-            .collect();
-        HintPanelView {
-            state: HintPanelState::Ready(entries),
         }
     }
 
