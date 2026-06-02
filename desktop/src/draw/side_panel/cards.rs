@@ -20,19 +20,6 @@ pub(super) fn draw_retrospective(
         ui.colored_label(egui::Color32::from_rgb(0xb8, 0x55, 0x00), end);
         ui.separator();
     }
-    let mut show_all = view.show_all_signals;
-    if ui
-        .checkbox(&mut show_all, "Show all signals")
-        .on_hover_text(
-            "Show every per-piece-type mobility shift and every \
-             residual term in \"Other shifts\", instead of just the \
-             largest movers.",
-        )
-        .changed()
-    {
-        events.push(Event::ToggleShowAllSignals);
-    }
-    ui.separator();
     match &view.body {
         RetrospectiveBody::NoMoves => {
             ui.label("(no moves yet)");
@@ -51,7 +38,14 @@ pub(super) fn draw_retrospective(
                     // Same cards regardless of who moved — the perspective
                     // ("you" vs "they") is already baked into the prose by
                     // the teaching translator.
-                    draw_retrospective_cards(ui, view_model, *selected_item, events);
+                    draw_retrospective_cards(
+                        ui,
+                        view_model,
+                        *selected_item,
+                        view.expanded,
+                        view.show_all_signals,
+                        events,
+                    );
                 }
                 RetrospectiveKind::Analyzing => {
                     ui.horizontal(|ui| {
@@ -64,23 +58,68 @@ pub(super) fn draw_retrospective(
     }
 }
 
+/// The feedback zone (decision #1): calm by default, deep on demand.
+/// Collapsed shows only the one-line verdict headline plus a "why this
+/// move?" affordance; expanded reveals the full per-term eval breakdown
+/// (the per-signal cards) in place below it.
 fn draw_retrospective_cards(
     ui: &mut egui::Ui,
     view_model: &RetrospectiveViewModel,
     selected_item: Option<usize>,
+    expanded: bool,
+    show_all_signals: bool,
     events: &mut Vec<Event>,
 ) {
     draw_headline_card(ui, &view_model.headline);
-    ui.add_space(8.0);
+    ui.add_space(6.0);
+
+    let has_detail = !view_model.items.is_empty();
+    // "why this move?" expander — the inline affordance that swaps the
+    // calm one-liner for the full breakdown. Disabled (greyed) when no
+    // per-term signals fired, so the student isn't promised detail that
+    // isn't there.
+    let glyph = if expanded { "\u{25be}" } else { "\u{25b8}" }; // ▾ / ▸
+    let label = egui::RichText::new(format!("{glyph} why this move?"))
+        .strong()
+        .size(14.0);
+    let resp = ui.add_enabled(has_detail, egui::Button::new(label).frame(false));
+    if resp.clicked() {
+        events.push(Event::ToggleRetrospectiveDetail);
+    }
+    if !has_detail {
+        ui.add_space(2.0);
+        ui.weak(
+            egui::RichText::new("(no detailed signals fired for this move)").small(),
+        );
+        return;
+    }
+    if !expanded {
+        return;
+    }
+
+    ui.add_space(6.0);
+    // The "show all signals" depth toggle lives with the breakdown it
+    // controls — only meaningful once the breakdown is on screen.
+    let mut show_all = show_all_signals;
+    if ui
+        .checkbox(&mut show_all, "Show all signals")
+        .on_hover_text(
+            "Show every per-piece-type mobility shift and every \
+             residual term in \"Other shifts\", instead of just the \
+             largest movers.",
+        )
+        .changed()
+    {
+        events.push(Event::ToggleShowAllSignals);
+    }
+    ui.separator();
+    ui.add_space(4.0);
     for (i, item) in view_model.items.iter().enumerate() {
         let is_selected = selected_item == Some(i);
         if draw_item_card(ui, item, is_selected) {
             events.push(Event::SelectRetrospectiveItem(i));
         }
         ui.add_space(6.0);
-    }
-    if view_model.items.is_empty() {
-        ui.weak("(no detailed signals fired for this move)");
     }
 }
 

@@ -189,6 +189,16 @@ pub struct Session {
     /// Auto-closed on takeback / new game so the user isn't left on a
     /// stale list.
     pub(crate) game_review_open: bool,
+
+    /// Feedback-zone expansion state. When `false` (default), the
+    /// retrospective shows only the one-line chess.com-style verdict
+    /// (e.g. "✓ Nf3 · Best") and a "why this move?" affordance. When
+    /// `true`, the full per-term eval breakdown with deltas expands in
+    /// place below it. Sticky across moves so a user who wants the
+    /// deep view keeps it; reset to collapsed on new game / takeback so
+    /// the calm default returns. Toggled by
+    /// [`crate::event::Event::ToggleRetrospectiveDetail`].
+    pub(crate) retro_expanded: bool,
 }
 
 mod bot_strip_builder;

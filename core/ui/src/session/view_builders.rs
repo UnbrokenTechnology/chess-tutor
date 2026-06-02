@@ -418,6 +418,7 @@ impl Session {
                 game_outcome,
                 body: RetrospectiveBody::NoMoves,
                 show_all_signals: self.show_all_signals,
+                expanded: self.retro_expanded,
             };
         };
         let viewing_back_san = (!self.is_viewing_live()).then(|| entry.san.clone());
@@ -463,6 +464,7 @@ impl Session {
                 kind,
             },
             show_all_signals: self.show_all_signals,
+            expanded: self.retro_expanded,
         }
     }
 

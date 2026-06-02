@@ -1,40 +1,49 @@
+//! Right-column rendering: the FEEDBACK zone (backward-looking
+//! retrospective / review) as the primary citizen on top, a compact
+//! move-list zone at the bottom.
+//!
+//! STEP-5 REATTACH NOTE: the always-on learning-mode preset picker and
+//! the board-overlay toggle block were removed from this panel in
+//! build-order step 3 (they ate permanent play-surface space). They
+//! have no temporary home right now — they were *dropped*, not
+//! relocated, because the ⚙ settings surface (`Event::OpenSettings`) is
+//! still a no-op stub until step 5. Step 5 must rebuild both behind the
+//! gear: the preset picker reads `SidePanelView.learning` and emits
+//! `Event::ApplyLearningPreset` / `Event::SetRevealBestMoves`; the
+//! overlay toggles read `SidePanelView.active_overlays` and emit
+//! `Event::ToggleOverlay` per `OverlayKind::ALL`. Both view-model fields
+//! are still populated by `build_side_panel_view`, so step 5 only needs
+//! a renderer, not a session change. The prior implementations live in
+//! this file's git history (`draw_learning_mode_picker` /
+//! `draw_overlay_toggles`).
+
 use eframe::egui;
 
-use std::collections::HashSet;
-
 use chess_tutor_ui::event::Event;
-use chess_tutor_ui::learning_mode::{
-    AssistanceLevel, BlunderSafety, LearningPreferences, LearningPreset, MistakeHandling,
-};
 use chess_tutor_ui::view::{
     CoachingItem, CoachingPanelView, GameReviewMoment, GameReviewView, InterventionAction,
-    InterventionPanelKind, InterventionPanelView, MoveListView, OverlayKind, ReviewMomentKind,
-    SidePanelBody, SidePanelView,
+    InterventionPanelKind, InterventionPanelView, MoveListView, ReviewMomentKind, SidePanelBody,
+    SidePanelView,
 };
 
 mod cards;
 use cards::{category_glyph, draw_hint_panel, draw_retrospective, sentiment_color};
 
 pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Event>) {
-    ui.heading("Moves");
-    ui.separator();
-    let avail_h = ui.available_height();
-    let move_h = (avail_h * 0.40).max(120.0);
-
-    egui::ScrollArea::vertical()
-        .id_salt("moves_scroll")
-        .stick_to_bottom(view.stick_to_bottom)
-        .max_height(move_h)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            draw_move_list(ui, &view.moves, events);
+    // Right column split (build-order step 3): the FEEDBACK zone is the
+    // primary citizen, filling the top; the move list is a compact
+    // secondary zone reserved at the bottom (above the action bar, which
+    // is an outer bottom panel reserved in main.rs). The learning-mode
+    // picker + overlay toggles that used to live here moved off the play
+    // surface — their home is Options/⚙ (step 5); dropped from the panel
+    // for now (see file-level note for what step 5 must reattach).
+    egui::TopBottomPanel::bottom("move_list_zone")
+        .resizable(false)
+        .show_inside(ui, |ui| {
+            draw_move_list_zone(ui, &view.moves, view.stick_to_bottom, events);
         });
 
-    ui.separator();
-    draw_learning_mode_picker(ui, &view.learning, events);
-    ui.separator();
-    draw_overlay_toggles(ui, &view.active_overlays, events);
-    ui.separator();
+    // Feedback zone fills the remaining space above the move list.
     match &view.body {
         SidePanelBody::Intervention(prompt) => {
             draw_panel_header(
@@ -405,130 +414,31 @@ fn draw_intervention_panel(
         });
 }
 
-fn draw_learning_mode_picker(
+/// Compact secondary move-list zone at the bottom of the right column
+/// (decision #5). A small "Moves" heading, then the grid in a height-
+/// capped scroll area so a long game doesn't push the feedback zone
+/// off-screen. Sticks to the bottom while following live play.
+fn draw_move_list_zone(
     ui: &mut egui::Ui,
-    learning: &LearningPreferences,
+    view: &MoveListView,
+    stick_to_bottom: bool,
     events: &mut Vec<Event>,
 ) {
-    let current_preset = preset_of(learning);
-    egui::CollapsingHeader::new(format!("Learning: {}", preset_label(current_preset)))
-        .default_open(false)
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Moves").strong().small().weak());
+    ui.separator();
+    // Cap the move list to a compact band so the feedback zone above
+    // keeps the lion's share of the column. 150px ≈ 8–9 move pairs;
+    // older moves scroll.
+    egui::ScrollArea::vertical()
+        .id_salt("moves_scroll")
+        .stick_to_bottom(stick_to_bottom)
+        .max_height(150.0)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "How much help you want during play. Changes apply to the next move.",
-                )
-                .small()
-                .weak(),
-            );
-            ui.add_space(4.0);
-            for preset in [
-                LearningPreset::Practicing,
-                LearningPreset::Supported,
-                LearningPreset::Coached,
-            ] {
-                let mut selected = current_preset == preset;
-                let resp = ui
-                    .radio_value(&mut selected, true, preset_label(preset))
-                    .on_hover_text(preset_description(preset));
-                if resp.clicked() && current_preset != preset {
-                    events.push(Event::ApplyLearningPreset(preset));
-                }
-            }
-            if matches!(current_preset, LearningPreset::Custom) {
-                ui.label(egui::RichText::new("(custom)").small().weak());
-            }
-            ui.add_space(6.0);
-            let mut reveal = learning.reveal_best_moves;
-            let resp = ui
-                .checkbox(&mut reveal, "Reveal engine's preferred moves in retrospective")
-                .on_hover_text(
-                    "Off by default. When on, the retrospective shows the engine's \
-                     top choice as a SAN tag and an on-board arrow. Off keeps the \
-                     focus on *why* your move was inaccurate without giving away \
-                     the answer.",
-                );
-            if resp.changed() {
-                events.push(Event::SetRevealBestMoves(reveal));
-            }
+            draw_move_list(ui, view, events);
         });
-}
-
-fn preset_of(prefs: &LearningPreferences) -> LearningPreset {
-    let matches_pres = |p: LearningPreset| -> bool {
-        let candidate = p.to_preferences();
-        prefs.assistance == candidate.assistance
-            && prefs.mistake_handling == candidate.mistake_handling
-            && prefs.blunder_safety == candidate.blunder_safety
-            && prefs.reveal_best_moves == candidate.reveal_best_moves
-    };
-    if matches_pres(LearningPreset::Practicing) {
-        LearningPreset::Practicing
-    } else if matches_pres(LearningPreset::Supported) {
-        LearningPreset::Supported
-    } else if matches_pres(LearningPreset::Coached) {
-        LearningPreset::Coached
-    } else {
-        LearningPreset::Custom
-    }
-}
-
-fn preset_label(preset: LearningPreset) -> &'static str {
-    match preset {
-        LearningPreset::Practicing => "Practicing",
-        LearningPreset::Supported => "Supported",
-        LearningPreset::Coached => "Coached",
-        LearningPreset::Custom => "Custom",
-    }
-}
-
-fn preset_description(preset: LearningPreset) -> &'static str {
-    match preset {
-        LearningPreset::Practicing => {
-            "Silent during play; full retrospective after each move. The strongest \
-             mode for transfer to your own games — you make the decisions, then \
-             you study what happened."
-        }
-        LearningPreset::Supported => {
-            "Same as Practicing, plus: pauses on detected teaching moments (one \
-             concept dominated the swing) and offers a takeback after blunders. \
-             Doesn't pause for every non-best move."
-        }
-        LearningPreset::Coached => {
-            "Adds live coaching overlays (features named, never moves) on top of \
-             Supported. The most-help mode short of revealing engine moves."
-        }
-        LearningPreset::Custom => "Custom-tuned combination of the axes.",
-    }
-}
-
-// Silence unused-import warning until per-axis editor lands; these are
-// re-exposed for the upcoming custom-preference UI.
-#[allow(dead_code)]
-fn _learning_axis_types_in_use() {
-    let _: AssistanceLevel = AssistanceLevel::default();
-    let _: MistakeHandling = MistakeHandling::default();
-    let _: BlunderSafety = BlunderSafety::default();
-}
-
-fn draw_overlay_toggles(
-    ui: &mut egui::Ui,
-    active: &HashSet<OverlayKind>,
-    events: &mut Vec<Event>,
-) {
-    egui::CollapsingHeader::new("Board overlays")
-        .default_open(false)
-        .show(ui, |ui| {
-            for kind in OverlayKind::ALL {
-                let mut on = active.contains(&kind);
-                let resp = ui
-                    .checkbox(&mut on, kind.label())
-                    .on_hover_text(kind.description());
-                if resp.changed() {
-                    events.push(Event::ToggleOverlay(kind));
-                }
-            }
-        });
+    ui.add_space(4.0);
 }
 
 fn draw_move_list(ui: &mut egui::Ui, view: &MoveListView, events: &mut Vec<Event>) {

@@ -56,6 +56,9 @@ impl Session {
                         _ => Some((entry_idx, item_idx)),
                     };
             }
+            Event::ToggleRetrospectiveDetail => {
+                self.retro_expanded = !self.retro_expanded;
+            }
             Event::ToggleShowAllSignals => {
                 self.show_all_signals = !self.show_all_signals;
             }

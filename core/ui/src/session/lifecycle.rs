@@ -126,6 +126,7 @@ impl Session {
             pending_intervention: None,
             awaiting_intervention_decision: false,
             game_review_open: false,
+            retro_expanded: false,
         }
     }
 
@@ -159,6 +160,9 @@ impl Session {
         self.pending_intervention = None;
         self.awaiting_intervention_decision = false;
         self.game_review_open = false;
+        // Calm default returns on a fresh game — the feedback zone
+        // collapses back to the one-line verdict.
+        self.retro_expanded = false;
         if self.log_to_stderr {
             log_new_game_intro(&self.opponent);
         }
@@ -235,6 +239,9 @@ impl Session {
         self.pending_intervention = None;
         self.awaiting_intervention_decision = false;
         self.game_review_open = false;
+        // Calm default returns on a fresh game — the feedback zone
+        // collapses back to the one-line verdict.
+        self.retro_expanded = false;
         if self.log_to_stderr {
             log_new_game_intro(&self.opponent);
         }

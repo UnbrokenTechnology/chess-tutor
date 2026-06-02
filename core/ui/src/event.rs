@@ -43,6 +43,11 @@ pub enum Event {
     /// toggles selection: same index clicked twice deselects. The
     /// selected item's annotations flow into the next [`crate::view::BoardView`].
     SelectRetrospectiveItem(usize),
+    /// User clicked the "why this move?" affordance (or collapsed it
+    /// again). Toggles whether the feedback zone shows only the
+    /// one-line verdict or expands the full per-term eval breakdown
+    /// with deltas in place. Sticky across moves for the session.
+    ToggleRetrospectiveDetail,
     /// User toggled the "show all signals" checkbox. When on, the
     /// retrospective surfaces every non-zero mobility shift per piece
     /// type and every residual term in "Other shifts" (no cumulative-

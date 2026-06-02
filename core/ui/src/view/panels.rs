@@ -199,6 +199,14 @@ pub struct RetrospectivePanelView {
     /// retrospectives include every per-piece-type mobility shift and
     /// every residual term in "Other shifts".
     pub show_all_signals: bool,
+    /// Feedback-zone expansion state (decision #1). When `false`, the
+    /// renderer paints only the one-line verdict headline plus a "why
+    /// this move?" affordance; when `true`, the full per-term eval
+    /// breakdown with deltas expands in place below the headline.
+    /// Toggling the affordance emits
+    /// [`crate::event::Event::ToggleRetrospectiveDetail`]. The
+    /// "show all signals" checkbox only makes sense while expanded.
+    pub expanded: bool,
 }
 
 /// Persistent board overlays the user can toggle from the side panel.
