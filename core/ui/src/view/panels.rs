@@ -28,6 +28,11 @@ pub struct SidePanelView {
     /// should auto-stick to the bottom. When browsing back, freeze
     /// at wherever they scrolled.
     pub stick_to_bottom: bool,
+    /// `Some` while the step-through **review mode** is active (PLAN
+    /// step 6). The body is the selected move's retrospective; this
+    /// carries the nav-bar chrome the renderer paints alongside it. The
+    /// move list rows also gain inline rating icons in this mode.
+    pub review_mode: Option<ReviewModeView>,
 }
 
 pub enum SidePanelBody {
@@ -92,11 +97,15 @@ pub struct CoachingItem {
     pub demoted: bool,
 }
 
-/// Post-game review surface: a list of significant moments derived
-/// from running [`chess_tutor_engine::analysis::classify_user_move`]
-/// over the user's moves. Renderers paint a clickable list; clicking
-/// a row emits [`crate::event::Event::JumpToReviewMoment`] which
-/// snaps the rest of the UI to that history index.
+/// Post-game review **summary** surface (build-order step 6): the
+/// verdict tallies, an eval-over-time graph, the ranked significant
+/// moments, and the big **Start Review** call-to-action. Renderers
+/// paint the tallies + graph, then a Start-Review button emitting
+/// [`crate::event::Event::StartReview`]; clicking a moment row emits
+/// [`crate::event::Event::JumpToReviewMoment`] (which enters review
+/// mode at that history index).
+///
+/// No estimated-ELO field — deliberately skipped (PLAN step 6).
 pub struct GameReviewView {
     /// Optional one-line outcome label (e.g. "Checkmate — White wins.")
     /// when the game is over.
@@ -104,9 +113,78 @@ pub struct GameReviewView {
     /// Total user moves in the game (so the renderer can show "3 of
     /// 28 moves flagged" context).
     pub user_move_count: usize,
+    /// Per-verdict tally over the user's moves, in chess.com display
+    /// order (Best → Blunder). Built from the same material-aware
+    /// classifier that drives the in-game verdict.
+    pub tallies: Vec<ReviewTally>,
+    /// Per-ply white-POV eval samples for the eval-over-time graph, in
+    /// play order. One entry per analysed history ply; plies whose
+    /// analysis hasn't arrived are omitted (the renderer draws a
+    /// best-effort line through what's present).
+    pub eval_series: Vec<EvalSample>,
     /// Ranked list of significant moments. Empty when no user moves
     /// crossed an intervention gate.
     pub moments: Vec<GameReviewMoment>,
+}
+
+/// One verdict bucket in the game-review summary (e.g. "Best ×12").
+pub struct ReviewTally {
+    /// Display tier — drives icon + colour.
+    pub tier: ReviewVerdictTier,
+    /// Human-readable label ("Best", "Good", "Inaccuracy", …).
+    pub label: &'static str,
+    /// How many of the user's moves landed in this tier.
+    pub count: usize,
+}
+
+/// Verdict tiers surfaced in the summary tally, mapped from the
+/// engine's [`chess_tutor_engine::analysis::MoveVerdict`]. `BestAvailable`
+/// folds into `Best` for the tally (both are "as good as it gets").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewVerdictTier {
+    Best,
+    Good,
+    Inaccuracy,
+    Mistake,
+    Miss,
+    Blunder,
+}
+
+impl ReviewVerdictTier {
+    /// Display order + the set the renderer iterates to lay out the
+    /// tally rows (so a zero-count tier still gets a consistent slot if
+    /// the renderer chooses to show it).
+    pub const ALL: [ReviewVerdictTier; 6] = [
+        ReviewVerdictTier::Best,
+        ReviewVerdictTier::Good,
+        ReviewVerdictTier::Inaccuracy,
+        ReviewVerdictTier::Mistake,
+        ReviewVerdictTier::Miss,
+        ReviewVerdictTier::Blunder,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewVerdictTier::Best => "Best",
+            ReviewVerdictTier::Good => "Good",
+            ReviewVerdictTier::Inaccuracy => "Inaccuracy",
+            ReviewVerdictTier::Mistake => "Mistake",
+            ReviewVerdictTier::Miss => "Miss",
+            ReviewVerdictTier::Blunder => "Blunder",
+        }
+    }
+}
+
+/// One sample on the eval-over-time graph: a play-order ply index and
+/// its post-move evaluation in white-POV pawns (chess.com convention —
+/// up = white better). Mate scores are clamped to the saturation
+/// extent so the line stays on-graph.
+pub struct EvalSample {
+    /// History index of the move that produced this evaluation.
+    pub history_index: usize,
+    /// White-POV evaluation in pawns, clamped to roughly ±10 so a
+    /// single mate/blunder doesn't flatten the rest of the curve.
+    pub pawns: f32,
 }
 
 /// One significant moment in the game review. Renderers paint these
@@ -196,6 +274,51 @@ pub struct MoveListCell {
     pub history_index: usize,
     pub san: String,
     pub selected: bool,
+    /// Inline move-rating icon (review mode only). `None` during live
+    /// play and for moves that weren't the user's / weren't analysed;
+    /// `Some(tier)` paints a small chess.com-style rating glyph next to
+    /// the SAN in the move list. Only populated while the review-mode
+    /// surface is active (PLAN step 6 — ratings are a post-game answer
+    /// key, not a live spoiler).
+    pub rating: Option<ReviewVerdictTier>,
+}
+
+/// Step-through review navigation targets (review-mode only). Emitted
+/// inside [`crate::event::Event::ReviewNav`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewNav {
+    /// One ply earlier (clamped at the first move).
+    Back,
+    /// One ply later (clamped at the last move).
+    Forward,
+    /// Jump to the first move.
+    Restart,
+    /// Jump to the last move.
+    End,
+}
+
+/// Review-mode chrome (build-order step 6): the big step-through nav
+/// bar shown while the user is walking the game move-by-move. The
+/// feedback zone itself reuses the retrospective surface (the selected
+/// move's deep breakdown); this view model only carries the nav state.
+///
+/// Renderers paint four big nav buttons (◀ ▶ ⏮ ⏭ — or restart/end +
+/// back/forward) plus an autoplay toggle, emitting
+/// [`crate::event::Event::ReviewNav`] / [`crate::event::Event::ToggleReviewAutoplay`].
+/// A "Back to summary" affordance emits [`crate::event::Event::OpenGameReview`].
+pub struct ReviewModeView {
+    /// 1-based position in the game ("move 7 of 34") for a progress
+    /// readout. `0` when there are no moves (shouldn't happen in review).
+    pub current_ply: usize,
+    /// Total plies in the game.
+    pub total_plies: usize,
+    /// Whether a step-back is possible (not already at the first move).
+    pub can_step_back: bool,
+    /// Whether a step-forward is possible (not already at the last move).
+    pub can_step_forward: bool,
+    /// Whether autoplay is currently running. The renderer ticks
+    /// `ReviewNav(Forward)` on a timer while this is `true`.
+    pub autoplay: bool,
 }
 
 pub struct RetrospectivePanelView {
@@ -215,6 +338,32 @@ pub struct RetrospectivePanelView {
     /// [`crate::event::Event::ToggleRetrospectiveDetail`]. The
     /// "show all signals" checkbox only makes sense while expanded.
     pub expanded: bool,
+    /// Engine best-line PV in SAN — **review-mode only** (decision #9:
+    /// the engine's preferred continuation is an answer key, forbidden
+    /// during live play). `None` during live play and for the analysing
+    /// state; `Some` while stepping through review and the selected
+    /// move's analysis has arrived. The first element is the engine's
+    /// best move from the pre-move position; the renderer shows it as
+    /// the move-vs-move comparison line ("you played X; the engine's
+    /// line was …").
+    pub review_pv: Option<ReviewPvLine>,
+}
+
+/// The engine's best continuation for a reviewed move, in SAN, plus
+/// the user's move for the move-vs-move comparison header. Review-mode
+/// only (decision #9).
+#[derive(Clone, Debug)]
+pub struct ReviewPvLine {
+    /// SAN of the move the user actually played.
+    pub user_san: String,
+    /// SAN of the engine's preferred move (`pv[0]`). Equal to `user_san`
+    /// when the user found the best move (the renderer can say "you
+    /// found the best move" instead of comparing).
+    pub best_san: String,
+    /// The engine's full best line in SAN, starting from the pre-move
+    /// position (so `best_line[0] == best_san`). Capped to a handful of
+    /// plies by the builder so the line stays readable.
+    pub best_line: Vec<String>,
 }
 
 /// Persistent board overlays the user can toggle from the side panel.

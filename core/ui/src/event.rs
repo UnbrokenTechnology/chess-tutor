@@ -117,8 +117,21 @@ pub enum Event {
     /// Close the game-review surface; return to the regular
     /// retrospective.
     CloseGameReview,
-    /// User clicked a moment in the game review. Session jumps the
-    /// view to that history index (sets `viewing_index`) and closes
-    /// the review surface so the retrospective for that move shows.
+    /// User clicked a moment in the game-review *summary*. Session
+    /// enters step-through review mode at that history index (sets
+    /// `viewing_index`), so the move's deep breakdown shows in the
+    /// feedback zone.
     JumpToReviewMoment(usize),
+    /// User pressed the big **Start Review** button on the summary
+    /// screen. Session enters step-through review mode at the first
+    /// move (history index 0).
+    StartReview,
+    /// Step-through review navigation (review-mode only). `Back` /
+    /// `Forward` move one ply; `Restart` jumps to the first move;
+    /// `End` jumps to the last move. The session clamps at the ends.
+    ReviewNav(crate::view::ReviewNav),
+    /// Toggle review-mode autoplay. While on, the renderer ticks
+    /// [`Event::ReviewNav`]`(Forward)` on a timer until the last move,
+    /// where the session reports autoplay as stopped.
+    ToggleReviewAutoplay,
 }

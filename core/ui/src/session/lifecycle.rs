@@ -123,7 +123,8 @@ impl Session {
             learning: LearningPreferences::default(),
             pending_intervention: None,
             awaiting_intervention_decision: false,
-            game_review_open: false,
+            review_phase: ReviewPhase::Closed,
+            review_autoplay: false,
             retro_expanded: false,
             show_eval_bar: true,
             settings_open: false,
@@ -159,7 +160,8 @@ impl Session {
         self.selected_retrospective = None;
         self.pending_intervention = None;
         self.awaiting_intervention_decision = false;
-        self.game_review_open = false;
+        self.review_phase = ReviewPhase::Closed;
+        self.review_autoplay = false;
         // Calm default returns on a fresh game — the feedback zone
         // collapses back to the one-line verdict.
         self.retro_expanded = false;
@@ -243,7 +245,8 @@ impl Session {
         self.selected_retrospective = None;
         self.pending_intervention = None;
         self.awaiting_intervention_decision = false;
-        self.game_review_open = false;
+        self.review_phase = ReviewPhase::Closed;
+        self.review_autoplay = false;
         // Calm default returns on a fresh game — the feedback zone
         // collapses back to the one-line verdict.
         self.retro_expanded = false;

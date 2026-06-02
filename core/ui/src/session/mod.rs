@@ -39,6 +39,22 @@ pub(crate) const DEFAULT_DEPTH: u32 = 10;
 /// dialog only tunes engine depth.
 pub(crate) const ANALYTICAL_DEPTH: u32 = 12;
 
+/// Which post-game review surface is showing (build-order step 6).
+/// `Closed` is normal play; the user opens `Summary` (tallies + eval
+/// graph + Start Review), then `Reviewing` to step through the game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewPhase {
+    Closed,
+    Summary,
+    Reviewing,
+}
+
+impl ReviewPhase {
+    pub(crate) fn is_open(self) -> bool {
+        !matches!(self, ReviewPhase::Closed)
+    }
+}
+
 pub struct Session {
     pub(crate) position: Position,
     /// Snapshot of the position the current game started from. Lets
@@ -179,11 +195,21 @@ pub struct Session {
     /// classifier decision lands.
     pub(crate) awaiting_intervention_decision: bool,
 
-    /// `true` while the user has opened the post-game review surface.
-    /// Renderers swap the side panel's body to the review when set.
-    /// Auto-closed on takeback / new game so the user isn't left on a
-    /// stale list.
-    pub(crate) game_review_open: bool,
+    /// Which post-game review surface (if any) is showing. `Closed`
+    /// during normal play; `Summary` when the user has opened the
+    /// game-review summary (tallies + eval graph + Start Review);
+    /// `Reviewing` once they press Start Review and step through the
+    /// game move-by-move. Renderers swap the side panel's body to match.
+    /// Reset to `Closed` on takeback / new game so the user isn't left
+    /// on a stale surface.
+    pub(crate) review_phase: ReviewPhase,
+
+    /// `true` while review-mode autoplay is running — the renderer
+    /// advances one move per frame-tick (decision: step 6 nav). Only
+    /// meaningful while [`Self::review_phase`] is `Reviewing`. The
+    /// session itself doesn't drive a timer; the renderer ticks it and
+    /// the session just stops auto-advancing at the last move.
+    pub(crate) review_autoplay: bool,
 
     /// Feedback-zone expansion state. When `false` (default), the
     /// retrospective shows only the one-line chess.com-style verdict

@@ -53,3 +53,55 @@ fn eval_bar_none_is_neutral_dash() {
     assert_eq!(label, "—");
     assert_eq!(ratio, 0.5);
 }
+
+// ---- Game-review verdict → summary-tier mapping (step 6) ----------
+
+#[test]
+fn verdict_tier_folds_best_available_into_best() {
+    use chess_tutor_engine::analysis::MoveVerdict;
+    use crate::view::ReviewVerdictTier;
+    // Both "as good as it gets" verdicts collapse to one summary bucket.
+    assert_eq!(verdict_tier(MoveVerdict::Best), ReviewVerdictTier::Best);
+    assert_eq!(
+        verdict_tier(MoveVerdict::BestAvailable),
+        ReviewVerdictTier::Best
+    );
+}
+
+#[test]
+fn verdict_tier_maps_remaining_verdicts_one_to_one() {
+    use chess_tutor_engine::analysis::MoveVerdict;
+    use crate::view::ReviewVerdictTier;
+    assert_eq!(verdict_tier(MoveVerdict::Good), ReviewVerdictTier::Good);
+    assert_eq!(
+        verdict_tier(MoveVerdict::Inaccuracy),
+        ReviewVerdictTier::Inaccuracy
+    );
+    assert_eq!(
+        verdict_tier(MoveVerdict::Mistake),
+        ReviewVerdictTier::Mistake
+    );
+    assert_eq!(verdict_tier(MoveVerdict::Miss), ReviewVerdictTier::Miss);
+    assert_eq!(
+        verdict_tier(MoveVerdict::Blunder),
+        ReviewVerdictTier::Blunder
+    );
+}
+
+#[test]
+fn review_verdict_tier_all_covers_every_tier_in_display_order() {
+    use crate::view::ReviewVerdictTier;
+    // The renderer iterates ALL to lay out the tally rows; the order is
+    // the chess.com display order (Best → Blunder).
+    assert_eq!(
+        ReviewVerdictTier::ALL,
+        [
+            ReviewVerdictTier::Best,
+            ReviewVerdictTier::Good,
+            ReviewVerdictTier::Inaccuracy,
+            ReviewVerdictTier::Mistake,
+            ReviewVerdictTier::Miss,
+            ReviewVerdictTier::Blunder,
+        ]
+    );
+}

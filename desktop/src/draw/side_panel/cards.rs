@@ -7,7 +7,7 @@ use eframe::egui;
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{
     RetrospectiveBody, RetrospectiveCategory, RetrospectiveHeadline, RetrospectiveItem,
-    RetrospectiveKind, RetrospectivePanelView, RetrospectiveViewModel, Sentiment,
+    RetrospectiveKind, RetrospectivePanelView, ReviewPvLine, RetrospectiveViewModel, Sentiment,
 };
 
 pub(super) fn draw_retrospective(
@@ -55,6 +55,48 @@ pub(super) fn draw_retrospective(
             }
         }
     }
+
+    // Engine PV / move-vs-move comparison — review-mode only (the
+    // session leaves `review_pv == None` during live play, decision #9).
+    if let Some(pv) = &view.review_pv {
+        ui.add_space(8.0);
+        draw_review_pv(ui, pv);
+    }
+}
+
+/// The review-only move-vs-move comparison: the user's move beside the
+/// engine's best line. The answer key chess.com shows in review and we
+/// deliberately withhold during play.
+fn draw_review_pv(ui: &mut egui::Ui, pv: &ReviewPvLine) {
+    let accent = egui::Color32::from_rgb(0x37, 0x6e, 0x37); // calm green
+    let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 24);
+    egui::Frame::group(ui.style())
+        .stroke(egui::Stroke::new(1.0, accent))
+        .fill(bg)
+        .inner_margin(egui::Margin::same(8.0))
+        .show(ui, |ui| {
+            if pv.user_san == pv.best_san {
+                ui.label(
+                    egui::RichText::new("You found the engine's move.")
+                        .strong()
+                        .color(accent),
+                );
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("You played").small().weak());
+                    ui.label(egui::RichText::new(&pv.user_san).monospace().strong());
+                });
+            }
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Engine line").small().weak());
+                ui.label(
+                    egui::RichText::new(pv.best_line.join(" "))
+                        .monospace()
+                        .strong(),
+                );
+            });
+        });
 }
 
 /// The feedback zone (decision #1): calm by default, deep on demand.

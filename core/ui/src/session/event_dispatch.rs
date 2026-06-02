@@ -102,23 +102,78 @@ impl Session {
                 self.takeback();
             }
             Event::OpenGameReview => {
-                // Only meaningful when there's at least one user move;
-                // for an empty history just leave the regular surface up.
+                // Open (or return to) the summary screen. Only meaningful
+                // when there's at least one user move; for an empty history
+                // just leave the regular surface up.
                 if self.history.iter().any(|e| self.is_user_move(e)) {
-                    self.game_review_open = true;
+                    self.review_phase = ReviewPhase::Summary;
+                    self.review_autoplay = false;
                     self.close_hint();
                 }
             }
             Event::CloseGameReview => {
-                self.game_review_open = false;
+                self.review_phase = ReviewPhase::Closed;
+                self.review_autoplay = false;
+            }
+            Event::StartReview => {
+                // Enter step-through review at the first move.
+                if !self.history.is_empty() {
+                    self.review_phase = ReviewPhase::Reviewing;
+                    self.review_autoplay = false;
+                    self.viewing_index = Some(0);
+                    self.selected_retrospective = None;
+                    self.close_hint();
+                }
             }
             Event::JumpToReviewMoment(history_index) => {
                 if history_index < self.history.len() {
+                    // Clicking a moment on the summary enters review mode
+                    // focused on that move (rather than dropping back to
+                    // the live play surface).
+                    self.review_phase = ReviewPhase::Reviewing;
+                    self.review_autoplay = false;
                     self.viewing_index = Some(history_index);
                     self.selected_retrospective = None;
-                    self.game_review_open = false;
                 }
             }
+            Event::ReviewNav(nav) => self.handle_review_nav(nav),
+            Event::ToggleReviewAutoplay => {
+                // Only meaningful while reviewing. Toggling on at the last
+                // move would have nothing to play, so restart from the
+                // beginning in that case.
+                if self.review_phase == ReviewPhase::Reviewing {
+                    if !self.review_autoplay
+                        && self.viewing_index == Some(self.history.len().saturating_sub(1))
+                    {
+                        self.viewing_index = Some(0);
+                    }
+                    self.review_autoplay = !self.review_autoplay;
+                }
+            }
+        }
+    }
+
+    /// Step-through review navigation. Clamps at the ends; stops
+    /// autoplay when it reaches the last move so the renderer's timer
+    /// goes quiet.
+    pub(crate) fn handle_review_nav(&mut self, nav: crate::view::ReviewNav) {
+        use crate::view::ReviewNav;
+        if self.history.is_empty() {
+            return;
+        }
+        let last = self.history.len() - 1;
+        let cur = self.viewing_index.unwrap_or(last);
+        let next = match nav {
+            ReviewNav::Back => cur.saturating_sub(1),
+            ReviewNav::Forward => (cur + 1).min(last),
+            ReviewNav::Restart => 0,
+            ReviewNav::End => last,
+        };
+        self.viewing_index = Some(next);
+        self.selected_retrospective = None;
+        // Autoplay halts at the end of the game (nothing left to advance).
+        if next == last {
+            self.review_autoplay = false;
         }
     }
 

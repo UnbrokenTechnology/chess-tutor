@@ -20,11 +20,15 @@ use eframe::egui;
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{
     GameReviewMoment, GameReviewView, InterventionAction, InterventionPanelKind,
-    InterventionPanelView, MoveListView, ReviewMomentKind, SidePanelBody, SidePanelView,
+    InterventionPanelView, MoveListView, ReviewMomentKind, ReviewVerdictTier, SidePanelBody,
+    SidePanelView,
 };
 
 pub(crate) mod cards;
 use cards::draw_retrospective;
+
+mod review;
+use review::{draw_eval_graph, draw_review_mode_bar, draw_verdict_tallies, verdict_tier_glyph};
 
 pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Event>) {
     // Right column split (build-order step 3): the FEEDBACK zone is the
@@ -39,6 +43,14 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
         .show_inside(ui, |ui| {
             draw_move_list_zone(ui, &view.moves, view.stick_to_bottom, events);
         });
+
+    // Review-mode nav bar (step 6): big step-through controls pinned
+    // just below the title, above the feedback zone. Only present while
+    // the session is in `Reviewing`.
+    if let Some(review) = &view.review_mode {
+        draw_review_mode_bar(ui, review, events);
+        ui.add_space(4.0);
+    }
 
     // Feedback zone fills the remaining space above the move list.
     match &view.body {
@@ -81,14 +93,14 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                 ui,
                 "\u{1f4d6}",
                 "Game review",
-                "The most significant moments across the whole game.",
+                "How the whole game went — tallies, the eval curve, and the moments worth studying.",
                 PANEL_REVIEW,
             );
             egui::ScrollArea::vertical()
                 .id_salt("review_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    draw_game_review(ui, review, events);
+                    draw_game_review_summary(ui, review, events);
                 });
         }
     }
@@ -134,7 +146,10 @@ fn draw_panel_header(
     ui.add_space(6.0);
 }
 
-fn draw_game_review(
+/// The game-review **summary** screen (step 6): outcome line, verdict
+/// tallies, the eval-over-time graph, a big Start Review button, then
+/// the ranked significant-moments list.
+fn draw_game_review_summary(
     ui: &mut egui::Ui,
     view: &GameReviewView,
     events: &mut Vec<Event>,
@@ -143,6 +158,31 @@ fn draw_game_review(
         ui.colored_label(egui::Color32::from_rgb(0xb8, 0x55, 0x00), end);
         ui.separator();
     }
+
+    // Verdict tallies (Best → Blunder).
+    draw_verdict_tallies(ui, &view.tallies, view.user_move_count);
+
+    // Eval-over-time graph.
+    if view.eval_series.len() >= 2 {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Evaluation over time").small().weak());
+        ui.add_space(2.0);
+        draw_eval_graph(ui, &view.eval_series);
+    }
+
+    // Big Start Review CTA.
+    ui.add_space(10.0);
+    let start = egui::Button::new(
+        egui::RichText::new("\u{25b6} Start Review").strong().size(16.0),
+    )
+    .min_size(egui::vec2(ui.available_width(), 40.0));
+    if ui.add(start).clicked() {
+        events.push(Event::StartReview);
+    }
+    ui.add_space(10.0);
+    ui.separator();
+
+    // Ranked significant moments.
     ui.label(
         egui::RichText::new(format!(
             "{} of {} of your moves flagged.",
@@ -158,8 +198,8 @@ fn draw_game_review(
             egui::RichText::new(
                 "No significant moments detected. Either you played clean, the \
                  retrospective analyses haven't all arrived yet, or the gating \
-                 thresholds skipped your moves. Try changing the learning mode \
-                 above (Supported / Coached / All-mistakes) to widen the gate.",
+                 thresholds skipped your moves. Use Start Review to step through \
+                 the whole game move-by-move.",
             )
             .small()
             .weak(),
@@ -318,6 +358,27 @@ fn draw_move_list_zone(
     ui.add_space(4.0);
 }
 
+/// One move-list cell: the SAN as a selectable label, prefixed in
+/// review mode by the small chess.com-style rating glyph. Returns
+/// `true` when clicked. The glyph and the label share one cell so the
+/// grid column count is unchanged.
+fn draw_move_cell(
+    ui: &mut egui::Ui,
+    san: &str,
+    selected: bool,
+    rating: Option<ReviewVerdictTier>,
+) -> bool {
+    let mut text = egui::RichText::new(san).monospace();
+    if let Some(tier) = rating {
+        // Prepend the glyph + colour the whole cell by tier so the
+        // rating reads at a glance without widening the column.
+        text = egui::RichText::new(format!("{} {}", verdict_tier_glyph(tier), san))
+            .monospace()
+            .color(review::verdict_tier_color(tier));
+    }
+    ui.add(egui::SelectableLabel::new(selected, text)).clicked()
+}
+
 fn draw_move_list(ui: &mut egui::Ui, view: &MoveListView, events: &mut Vec<Event>) {
     egui::Grid::new("moves_grid")
         .num_columns(3)
@@ -326,23 +387,11 @@ fn draw_move_list(ui: &mut egui::Ui, view: &MoveListView, events: &mut Vec<Event
         .show(ui, |ui| {
             for row in &view.rows {
                 ui.monospace(format!("{}.", row.move_pair_idx));
-                if ui
-                    .add(egui::SelectableLabel::new(
-                        row.white.selected,
-                        egui::RichText::new(&row.white.san).monospace(),
-                    ))
-                    .clicked()
-                {
+                if draw_move_cell(ui, &row.white.san, row.white.selected, row.white.rating) {
                     events.push(Event::ViewHistoryIndex(Some(row.white.history_index)));
                 }
                 if let Some(black) = &row.black {
-                    if ui
-                        .add(egui::SelectableLabel::new(
-                            black.selected,
-                            egui::RichText::new(&black.san).monospace(),
-                        ))
-                        .clicked()
-                    {
+                    if draw_move_cell(ui, &black.san, black.selected, black.rating) {
                         events.push(Event::ViewHistoryIndex(Some(black.history_index)));
                     }
                 } else {

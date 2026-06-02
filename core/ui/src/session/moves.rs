@@ -272,7 +272,8 @@ impl Session {
         // the normal retrospective surface.
         self.pending_intervention = None;
         self.awaiting_intervention_decision = false;
-        self.game_review_open = false;
+        self.review_phase = ReviewPhase::Closed;
+        self.review_autoplay = false;
         self.viewing_index = None;
         self.close_hint();
         self.undo_one();
