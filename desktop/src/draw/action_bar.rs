@@ -22,7 +22,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &ActionBarView, events: &mut Vec<Eve
         if ui
             .add_enabled(
                 view.can_takeback,
-                egui::Button::new(big_label("\u{27f2}", "Takeback")).min_size(size),
+                egui::Button::new(big_label("Takeback")).min_size(size),
             )
             .clicked()
         {
@@ -33,7 +33,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &ActionBarView, events: &mut Vec<Eve
         if ui
             .add_enabled(
                 view.hint_button_enabled,
-                egui::Button::new(big_label("\u{1f4a1}", hint_text)).min_size(size),
+                egui::Button::new(big_label(hint_text)).min_size(size),
             )
             .clicked()
         {
@@ -41,7 +41,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &ActionBarView, events: &mut Vec<Eve
         }
 
         if ui
-            .add(egui::Button::new(big_label("\u{271a}", "New Game")).min_size(size))
+            .add(egui::Button::new(big_label("New Game")).min_size(size))
             .clicked()
         {
             events.push(Event::RequestNewGame);
@@ -49,7 +49,9 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &ActionBarView, events: &mut Vec<Eve
     });
 }
 
-/// Glyph + label stacked into one larger, legible button face.
-fn big_label(glyph: &str, text: &str) -> egui::RichText {
-    egui::RichText::new(format!("{glyph}  {text}")).size(16.0).strong()
+/// Big, legible button face. Text-only for now — leading icons return in
+/// the later styling pass with a bundled icon font (the emoji used before
+/// rendered as tofu and crowded "New Game" off the button).
+fn big_label(text: &str) -> egui::RichText {
+    egui::RichText::new(text).size(15.0).strong()
 }

@@ -11,7 +11,6 @@ use chess_tutor_ui::view::{BotHandicap, BotStripView};
 pub(crate) fn draw(ui: &mut egui::Ui, view: &BotStripView) {
     ui.add_space(2.0);
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("🤖").size(18.0));
         ui.label(egui::RichText::new(&view.name).size(15.0).strong());
         ui.weak("·");
         ui.label(egui::RichText::new(&view.strength_label).size(13.0).weak());

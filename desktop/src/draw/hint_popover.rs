@@ -30,7 +30,7 @@ const POPOVER_ACCENT: egui::Color32 = egui::Color32::from_rgb(0x00, 0x83, 0x77);
 pub(crate) fn draw(ctx: &egui::Context, view: &HintPopoverView, events: &mut Vec<Event>) {
     let mut open = true;
     egui::Window::new(
-        egui::RichText::new("\u{1f50e}  What to notice — before you move")
+        egui::RichText::new("What to notice — before you move")
             .strong()
             .size(16.0)
             .color(POPOVER_ACCENT),

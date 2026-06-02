@@ -57,7 +57,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
         SidePanelBody::Intervention(prompt) => {
             draw_panel_header(
                 ui,
-                "\u{23f8}",
+                "\u{2016}",
                 "Pause — on your move",
                 "Your move triggered something worth a look before you continue.",
                 PANEL_PAUSE,
@@ -76,7 +76,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
             // never render at once).
             draw_panel_header(
                 ui,
-                "\u{1f4cb}",
+                "\u{21b6}",
                 "After your move",
                 "What the move you just played changed — looking back.",
                 PANEL_RETRO,
@@ -91,7 +91,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
         SidePanelBody::GameReview(review) => {
             draw_panel_header(
                 ui,
-                "\u{1f4d6}",
+                "\u{2261}",
                 "Game review",
                 "How the whole game went — tallies, the eval curve, and the moments worth studying.",
                 PANEL_REVIEW,
@@ -114,9 +114,10 @@ const PANEL_RETRO: egui::Color32 = egui::Color32::from_rgb(0x51, 0x39, 0x9a); //
 const PANEL_PAUSE: egui::Color32 = egui::Color32::from_rgb(0xc6, 0x28, 0x28); // red
 const PANEL_REVIEW: egui::Color32 = egui::Color32::from_rgb(0xb8, 0x55, 0x00); // amber
 
-/// A colour-coded, temporally-explicit banner that heads each side-panel
-/// body. Replaces the bare `ui.heading(...)` so the two look-alike panels
-/// (coaching vs retrospective) are instantly distinguishable.
+/// A colour-coded, temporally-explicit *title* for each side-panel body.
+/// Styled as a section heading (accent glyph + title, subtitle, rule) —
+/// deliberately NOT a bordered/filled card, since it labels the zone
+/// rather than being content within it.
 fn draw_panel_header(
     ui: &mut egui::Ui,
     icon: &str,
@@ -124,26 +125,24 @@ fn draw_panel_header(
     subtitle: &str,
     accent: egui::Color32,
 ) {
-    let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38);
-    egui::Frame::group(ui.style())
-        .fill(bg)
-        .stroke(egui::Stroke::new(1.5, accent))
-        .inner_margin(egui::Margin::same(8.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(icon).size(18.0));
-                ui.label(
-                    egui::RichText::new(title)
-                        .strong()
-                        .size(16.0)
-                        .color(accent),
-                );
-            });
-            if !subtitle.is_empty() {
-                ui.label(egui::RichText::new(subtitle).small().italics());
-            }
-        });
-    ui.add_space(6.0);
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        if !icon.is_empty() {
+            ui.label(egui::RichText::new(icon).size(16.0).color(accent));
+        }
+        ui.label(
+            egui::RichText::new(title)
+                .strong()
+                .size(17.0)
+                .color(accent),
+        );
+    });
+    if !subtitle.is_empty() {
+        ui.label(egui::RichText::new(subtitle).small().weak());
+    }
+    ui.add_space(3.0);
+    ui.separator();
+    ui.add_space(4.0);
 }
 
 /// The game-review **summary** screen (step 6): outcome line, verdict

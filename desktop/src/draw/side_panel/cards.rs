@@ -24,10 +24,14 @@ pub(super) fn draw_retrospective(
             ui.label("(no moves yet)");
         }
         RetrospectiveBody::Entry { viewing_back_san, kind } => {
-            if let Some(san) = viewing_back_san {
-                ui.weak(format!("viewing move: {}", san));
-                ui.separator();
-            }
+            // Always render this status line (even live) so the layout
+            // doesn't shift when you step back into history and a
+            // "viewing move:" line appears/disappears.
+            match viewing_back_san {
+                Some(san) => ui.weak(format!("viewing move: {}", san)),
+                None => ui.weak("showing the current position"),
+            };
+            ui.separator();
             match kind {
                 RetrospectiveKind::MoveReady {
                     view_model,
@@ -115,12 +119,14 @@ fn draw_retrospective_cards(
     ui.add_space(6.0);
 
     let has_detail = !view_model.items.is_empty();
-    // "why this move?" expander — the inline affordance that swaps the
-    // calm one-liner for the full breakdown. Disabled (greyed) when no
-    // per-term signals fired, so the student isn't promised detail that
-    // isn't there.
+    // Inline affordance that swaps the calm one-liner for the full
+    // breakdown. Disabled (greyed) when no per-term signals fired, so the
+    // student isn't promised detail that isn't there. Worded neutrally
+    // ("move impact", not "why this move?") so it reads sensibly whether
+    // the move was best or a blunder.
     let glyph = if expanded { "\u{25be}" } else { "\u{25b8}" }; // ▾ / ▸
-    let label = egui::RichText::new(format!("{glyph} why this move?"))
+    let verb = if expanded { "Hide" } else { "Show" };
+    let label = egui::RichText::new(format!("{glyph} {verb} move impact"))
         .strong()
         .size(14.0);
     let resp = ui.add_enabled(has_detail, egui::Button::new(label).frame(false));
@@ -302,7 +308,8 @@ pub(crate) fn category_glyph(category: RetrospectiveCategory) -> &'static str {
         RetrospectiveCategory::PiecePlacement => "◈",
         RetrospectiveCategory::Initiative => "⚡",
         RetrospectiveCategory::BlockedCenter => "▦",
-        RetrospectiveCategory::Castling => "🏰",
+        // ⌂ (house) instead of the 🏰 emoji, which renders as tofu.
+        RetrospectiveCategory::Castling => "⌂",
         RetrospectiveCategory::Space => "◫",
         // Star for a named tactic (fork / pin / mate / …); distinct
         // from Threats' crossed-swords glyph so the two cards read as

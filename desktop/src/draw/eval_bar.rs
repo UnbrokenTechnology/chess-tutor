@@ -4,11 +4,12 @@ use chess_tutor_ui::view::EvalBarView;
 
 pub(crate) fn draw(ui: &mut egui::Ui, view: &EvalBarView) {
     ui.add_space(8.0);
-    // The bar now fills the full available height — the numeric label
-    // renders *inside* it (chess.com idiom) rather than below, so no
-    // height is reserved for a separate number row.
+    // The bar fills the full available width (so it sits centred in the
+    // gutter — a prior `width - 8` left all the slack on the right) and
+    // the full height; the numeric label renders *inside* it (chess.com
+    // idiom) rather than below, so no height is reserved for a number row.
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width() - 8.0, ui.available_height() - 8.0),
+        egui::vec2(ui.available_width(), ui.available_height() - 8.0),
         egui::Sense::hover(),
     );
     let painter = ui.painter_at(rect);
@@ -45,7 +46,9 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &EvalBarView) {
         anchor,
         egui::Align2::CENTER_CENTER,
         &view.label,
-        egui::FontId::monospace(13.0),
+        // 11pt fits a 5-char score (e.g. "-1.31") inside the ~40px-wide
+        // gutter bar; 13pt overflowed the edges.
+        egui::FontId::monospace(11.0),
         text_color,
     );
 }

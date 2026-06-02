@@ -18,6 +18,9 @@ fn main() -> eframe::Result<()> {
         "Chess Tutor",
         native_options,
         Box::new(|cc| {
+            // Register a broad symbol fallback so the UI's arrows /
+            // geometric / chess glyphs render instead of tofu boxes.
+            install_symbol_fallback(&cc.egui_ctx);
             // The session spawns a worker thread that needs a "wake
             // the UI" callback. egui::Context::request_repaint is the
             // egui-native idiom; we capture the Context in a closure
@@ -29,6 +32,32 @@ fn main() -> eframe::Result<()> {
             }))
         }),
     )
+}
+
+/// Append a wide-coverage symbol font as the lowest-priority fallback for
+/// both default families, so glyphs egui's bundled fonts lack (board-flip
+/// arrows, expander triangles, media controls, chess pieces, …) render
+/// rather than showing as tofu boxes. Windows ships Segoe UI Symbol; if
+/// it's missing we degrade gracefully to egui's defaults. (Genuine colour
+/// emoji are avoided in the UI instead — egui can't render their COLR
+/// layers — so a monochrome symbol fallback is all we need here.)
+fn install_symbol_fallback(ctx: &egui::Context) {
+    const SYMBOL_FONT: &str = r"C:\Windows\Fonts\seguisym.ttf";
+    let Ok(bytes) = std::fs::read(SYMBOL_FONT) else {
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("symbol_fallback".to_owned(), egui::FontData::from_owned(bytes).into());
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("symbol_fallback".to_owned());
+    }
+    ctx.set_fonts(fonts);
 }
 
 /// Desktop-side `eframe::App`. Thin wrapper around the platform-

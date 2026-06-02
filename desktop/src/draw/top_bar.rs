@@ -30,7 +30,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>
             if ui.add(gear).on_hover_text("Settings").clicked() {
                 events.push(Event::OpenSettings);
             }
-            let flip = egui::Button::new(egui::RichText::new("\u{2922}").size(18.0));
+            let flip = egui::Button::new(egui::RichText::new("\u{21c5}").size(18.0));
             if ui.add(flip).on_hover_text("Flip board").clicked() {
                 events.push(Event::FlipBoard);
             }
