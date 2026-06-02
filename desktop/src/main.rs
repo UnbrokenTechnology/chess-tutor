@@ -9,8 +9,13 @@ mod draw;
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 800.0])
-            .with_min_inner_size([900.0, 700.0])
+            // 16:9 default (looks good full-screen / on an iPad in
+            // landscape). A square board can't fill 16:9, so the eval
+            // bar + board are drawn as one centered unit and the leftover
+            // width splits between a slightly-wider right panel and small
+            // symmetric margins. Resizable — this is just the default.
+            .with_inner_size([1280.0, 720.0])
+            .with_min_inner_size([1024.0, 640.0])
             .with_title("Chess Tutor"),
         ..Default::default()
     };
@@ -18,9 +23,11 @@ fn main() -> eframe::Result<()> {
         "Chess Tutor",
         native_options,
         Box::new(|cc| {
-            // Register a broad symbol fallback so the UI's arrows /
-            // geometric / chess glyphs render instead of tofu boxes.
-            install_symbol_fallback(&cc.egui_ctx);
+            // Bundled Inter UI font + a broad symbol fallback so arrows /
+            // geometric / media glyphs render instead of tofu boxes.
+            install_fonts(&cc.egui_ctx);
+            // SVG image loader (egui_extras) for the cburnett board pieces.
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             // The session spawns a worker thread that needs a "wake
             // the UI" callback. egui::Context::request_repaint is the
             // egui-native idiom; we capture the Context in a closure
@@ -34,29 +41,43 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Append a wide-coverage symbol font as the lowest-priority fallback for
-/// both default families, so glyphs egui's bundled fonts lack (board-flip
-/// arrows, expander triangles, media controls, chess pieces, …) render
-/// rather than showing as tofu boxes. Windows ships Segoe UI Symbol; if
-/// it's missing we degrade gracefully to egui's defaults. (Genuine colour
-/// emoji are avoided in the UI instead — egui can't render their COLR
-/// layers — so a monochrome symbol fallback is all we need here.)
-fn install_symbol_fallback(ctx: &egui::Context) {
-    const SYMBOL_FONT: &str = r"C:\Windows\Fonts\seguisym.ttf";
-    let Ok(bytes) = std::fs::read(SYMBOL_FONT) else {
-        return;
-    };
+/// Install the app's fonts: **Inter** (bundled) as the primary UI font,
+/// plus a wide-coverage **symbol fallback** (Windows' Segoe UI Symbol) so
+/// glyphs egui's bundled fonts lack (flip arrows, expander triangles,
+/// media controls, chess symbols, …) render rather than showing as tofu.
+/// egui's bundled Hack stays the monospace font (SANs / scores read well
+/// fixed-width). Genuine colour emoji are avoided in the UI instead — egui
+/// can't render their COLR layers — so a monochrome symbol fallback is all
+/// we need. The Segoe path is Windows-only; absent it, we degrade to
+/// egui's defaults.
+fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+
+    // Inter — bundled; highest-priority proportional font.
+    fonts.font_data.insert(
+        "inter".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Inter.ttf")).into(),
+    );
     fonts
-        .font_data
-        .insert("symbol_fallback".to_owned(), egui::FontData::from_owned(bytes).into());
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "inter".to_owned());
+
+    // Segoe UI Symbol — lowest-priority fallback for both families.
+    if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\seguisym.ttf") {
         fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("symbol_fallback".to_owned());
+            .font_data
+            .insert("symbol_fallback".to_owned(), egui::FontData::from_owned(bytes).into());
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("symbol_fallback".to_owned());
+        }
     }
+
     ctx.set_fonts(fonts);
 }
 
@@ -79,24 +100,14 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("topbar").show(ctx, |ui| {
             draw::top_bar::draw(ui, &self.session.build_top_bar_view(), &mut events);
         });
-        // The eval bar is an opt-out gutter (Start/Options + ⚙). When
-        // hidden, the panel isn't reserved at all so the board claims
-        // the full width.
-        if self.session.eval_bar_visible() {
-            egui::SidePanel::left("evalbar")
-                .resizable(false)
-                .exact_width(56.0)
-                .show(ctx, |ui| {
-                    draw::eval_bar::draw(ui, &self.session.build_eval_bar_view());
-                });
-        }
         egui::SidePanel::right("sidebar")
             .resizable(false)
-            // exact_width (not default_width) pins the column: long card
-            // headings wrap within it instead of stretching the panel and
-            // squeezing the board — and a width egui grew on a prior frame
-            // can't stick, since the range is clamped to [320, 320].
-            .exact_width(320.0)
+            // exact_width (not default_width) pins the column so long card
+            // headings wrap within it instead of stretching the panel. 420
+            // (up from 320) soaks up some of 16:9's extra width — more
+            // room for the deep eval breakdowns — leaving the rest as small
+            // symmetric margins around the centered board.
+            .exact_width(420.0)
             .show(ctx, |ui| {
                 // Big action bar pinned to the bottom of the right column
                 // (chess.com idiom). Reserve it first via a bottom-up
@@ -123,7 +134,41 @@ impl eframe::App for App {
                 .show_inside(ui, |ui| {
                     draw::bot_strip::draw(ui, &self.session.build_bot_strip_view());
                 });
-            draw::board::draw(ui, &self.session.build_board_view(), &mut events);
+            // Player strip below the board — the user's own captured
+            // pieces (chess.com idiom: opponent above, you below).
+            egui::TopBottomPanel::bottom("player_strip")
+                .resizable(false)
+                .show_inside(ui, |ui| {
+                    draw::player_strip::draw(ui, &self.session.build_player_strip_view());
+                });
+
+            // The eval bar + board are one centered unit: the eval bar
+            // always hugs the board, and 16:9's leftover width splits into
+            // symmetric side margins (rather than detaching a far-left
+            // eval bar from a centered board). The eval bar is opt-out
+            // (Start/Options + ⚙) — when hidden it claims no width.
+            // A thin bar (chess.com-like), not a chunky 56px gutter.
+            const EVAL_W: f32 = 30.0;
+            const EVAL_GAP: f32 = 6.0;
+            let show_eval = self.session.eval_bar_visible();
+            let lead = if show_eval { EVAL_W + EVAL_GAP } else { 0.0 };
+            let area = ui.available_rect_before_wrap();
+            let board_size = (area.width() - lead).min(area.height()).max(0.0);
+            let unit_w = lead + board_size;
+            let left = area.left() + ((area.width() - unit_w) * 0.5).max(0.0);
+            let top = area.top() + ((area.height() - board_size) * 0.5).max(0.0);
+            if show_eval {
+                let eval_rect = egui::Rect::from_min_size(
+                    egui::pos2(left, top),
+                    egui::vec2(EVAL_W, board_size),
+                );
+                draw::eval_bar::draw(ui, eval_rect, &self.session.build_eval_bar_view());
+            }
+            let board_rect = egui::Rect::from_min_size(
+                egui::pos2(left + lead, top),
+                egui::vec2(board_size, board_size),
+            );
+            draw::board::draw(ui, board_rect, &self.session.build_board_view(), &mut events);
         });
 
         // Hint pop-over (PLAN step 4): a floating "what to notice" panel

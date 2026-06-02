@@ -8,7 +8,7 @@ use super::*;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, Piece, PieceType};
 
-use crate::view::{BotHandicap, BotStripView};
+use crate::view::{BotHandicap, BotStripView, PlayerStripView};
 
 /// Standard starting count of each non-king piece type, in
 /// heaviest-first display order. Used to derive how many of each piece
@@ -41,6 +41,16 @@ impl Session {
             name: "Bot".to_string(),
             strength_label: format!("depth {}", self.depth),
             handicaps,
+            captured,
+            point_advantage,
+        }
+    }
+
+    /// Build the player strip shown *below* the board — the user's own
+    /// captured pieces and point lead (mirror of the bot strip).
+    pub fn build_player_strip_view(&self) -> PlayerStripView {
+        let (captured, point_advantage) = captured_diff(&self.position, self.user_color());
+        PlayerStripView {
             captured,
             point_advantage,
         }

@@ -1,13 +1,14 @@
 //! Retrospective-card rendering, split out of side_panel. Includes the
-//! shared category_glyph / sentiment_color helpers, which the hint-pop-over
-//! and review cards (in sibling modules) also call.
+//! shared `category_glyph` helper, which the hint-pop-over also calls.
+//! Colors come from `draw::theme` (the single palette source).
 
 use eframe::egui;
 
+use crate::draw::theme;
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{
     RetrospectiveBody, RetrospectiveCategory, RetrospectiveHeadline, RetrospectiveItem,
-    RetrospectiveKind, RetrospectivePanelView, ReviewPvLine, RetrospectiveViewModel, Sentiment,
+    RetrospectiveKind, RetrospectivePanelView, ReviewPvLine, RetrospectiveViewModel,
 };
 
 pub(super) fn draw_retrospective(
@@ -16,7 +17,7 @@ pub(super) fn draw_retrospective(
     events: &mut Vec<Event>,
 ) {
     if let Some(end) = view.game_outcome {
-        ui.colored_label(egui::Color32::from_rgb(0xb8, 0x55, 0x00), end);
+        ui.colored_label(theme::OUTCOME, end);
         ui.separator();
     }
     match &view.body {
@@ -72,7 +73,7 @@ pub(super) fn draw_retrospective(
 /// engine's best line. The answer key chess.com shows in review and we
 /// deliberately withhold during play.
 fn draw_review_pv(ui: &mut egui::Ui, pv: &ReviewPvLine) {
-    let accent = egui::Color32::from_rgb(0x37, 0x6e, 0x37); // calm green
+    let accent = theme::REVIEW_PV; // calm green
     let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 24);
     egui::Frame::group(ui.style())
         .stroke(egui::Stroke::new(1.0, accent))
@@ -171,7 +172,7 @@ fn draw_retrospective_cards(
 }
 
 fn draw_headline_card(ui: &mut egui::Ui, h: &RetrospectiveHeadline) {
-    let accent = sentiment_color(h.verdict_sentiment);
+    let accent = theme::sentiment_color(h.verdict_sentiment);
     let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 30);
 
     egui::Frame::group(ui.style())
@@ -235,7 +236,7 @@ fn draw_item_card(
     item: &RetrospectiveItem,
     is_selected: bool,
 ) -> bool {
-    let accent = sentiment_color(item.sentiment);
+    let accent = theme::sentiment_color(item.sentiment);
     let bg = if is_selected {
         egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 60)
     } else {
@@ -319,12 +320,4 @@ pub(crate) fn category_glyph(category: RetrospectiveCategory) -> &'static str {
     }
 }
 
-pub(crate) fn sentiment_color(sentiment: Sentiment) -> egui::Color32 {
-    match sentiment {
-        Sentiment::Positive => egui::Color32::from_rgb(0x2e, 0x7d, 0x32),
-        Sentiment::Negative => egui::Color32::from_rgb(0xc6, 0x28, 0x28),
-        Sentiment::Mixed => egui::Color32::from_rgb(0xef, 0x6c, 0x00),
-        Sentiment::Neutral => egui::Color32::from_rgb(0x60, 0x60, 0x60),
-    }
-}
 

@@ -29,15 +29,35 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &ActionBarView, events: &mut Vec<Eve
             events.push(Event::Takeback);
         }
 
-        let hint_text = if view.hint_open { "Hide Hint" } else { "Hint" };
-        if ui
-            .add_enabled(
-                view.hint_button_enabled,
-                egui::Button::new(big_label(hint_text)).min_size(size),
-            )
-            .clicked()
-        {
-            events.push(Event::ToggleHint);
+        // Middle button: Hint during play, Review once the game is over
+        // (a hint is useless with no move to make; you don't review
+        // mid-game). The Review form is itself a toggle.
+        if view.game_over {
+            let label = if view.review_open { "Close Review" } else { "Review" };
+            if ui
+                .add_enabled(
+                    view.review_button_enabled || view.review_open,
+                    egui::Button::new(big_label(label)).min_size(size),
+                )
+                .clicked()
+            {
+                events.push(if view.review_open {
+                    Event::CloseGameReview
+                } else {
+                    Event::OpenGameReview
+                });
+            }
+        } else {
+            let hint_text = if view.hint_open { "Hide Hint" } else { "Hint" };
+            if ui
+                .add_enabled(
+                    view.hint_button_enabled,
+                    egui::Button::new(big_label(hint_text)).min_size(size),
+                )
+                .clicked()
+            {
+                events.push(Event::ToggleHint);
+            }
         }
 
         if ui

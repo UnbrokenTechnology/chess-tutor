@@ -4,10 +4,10 @@ use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::TopBarView;
 
 /// Slim title bar: app title on the left, then (right-aligned) the
-/// ⚙ settings and ⤢ flip icon-buttons. Review / Live and the depth
-/// tuner are parked here minimally until they move to their proper
-/// homes (post-game review surface / Options screen) in later steps.
-/// The primary play actions live in the bottom action bar now.
+/// ⚙ settings and flip icon-buttons, a "Live" return-to-current button
+/// while browsing history, and the depth tuner (parked here until it
+/// moves fully into the Options/⚙ surface). The primary play actions —
+/// including Review once the game ends — live in the bottom action bar.
 pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>) {
     ui.horizontal(|ui| {
         ui.add_space(2.0);
@@ -20,7 +20,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>
             ui.spinner();
             ui.label("engine thinking…");
         } else if let Some(end) = view.game_outcome {
-            ui.colored_label(egui::Color32::from_rgb(0xb8, 0x55, 0x00), end);
+            ui.colored_label(crate::draw::theme::OUTCOME, end);
         }
 
         // Right-aligned cluster: ⚙ settings + ⤢ flip, plus the
@@ -51,24 +51,11 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>
 
             ui.separator();
 
-            // Review / Live: relocated to the post-game review surface later.
+            // "Live" returns to the current position when browsing
+            // history. Game review now lives on the action bar (the Hint
+            // button becomes Review once the game is over).
             if !view.viewing_live && ui.button("▶ Live").clicked() {
                 events.push(Event::JumpToLive);
-            }
-            let review_label = if view.review_open {
-                "Close Review"
-            } else {
-                "Review Game"
-            };
-            if ui
-                .add_enabled(view.review_button_enabled, egui::Button::new(review_label))
-                .clicked()
-            {
-                events.push(if view.review_open {
-                    Event::CloseGameReview
-                } else {
-                    Event::OpenGameReview
-                });
             }
         });
     });

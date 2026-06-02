@@ -61,7 +61,7 @@ pub(crate) fn draw(
                         .hint_text("rnbqkbnr/pppppppp/... (optional)"),
                 );
                 if let Some(err) = &form.error {
-                    ui.colored_label(egui::Color32::from_rgb(0xc0, 0x40, 0x40), err);
+                    ui.colored_label(crate::draw::theme::ERROR, err);
                 }
 
                 ui.add_space(12.0);

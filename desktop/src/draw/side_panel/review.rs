@@ -9,6 +9,7 @@
 
 use eframe::egui;
 
+use crate::draw::theme;
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{EvalSample, ReviewModeView, ReviewNav, ReviewTally, ReviewVerdictTier};
 
@@ -23,20 +24,6 @@ pub(super) fn verdict_tier_glyph(tier: ReviewVerdictTier) -> &'static str {
         ReviewVerdictTier::Mistake => "?",
         ReviewVerdictTier::Miss => "\u{00d7}",       // ×
         ReviewVerdictTier::Blunder => "??",
-    }
-}
-
-/// Per-tier accent colour. Layout-pass only — these reuse the
-/// retrospective sentiment hues so the redesign's deliberate colour
-/// pass can retune them in one place later.
-pub(super) fn verdict_tier_color(tier: ReviewVerdictTier) -> egui::Color32 {
-    match tier {
-        ReviewVerdictTier::Best => egui::Color32::from_rgb(0x2e, 0x7d, 0x32),
-        ReviewVerdictTier::Good => egui::Color32::from_rgb(0x55, 0x8b, 0x2f),
-        ReviewVerdictTier::Inaccuracy => egui::Color32::from_rgb(0xf9, 0xa8, 0x25),
-        ReviewVerdictTier::Mistake => egui::Color32::from_rgb(0xef, 0x6c, 0x00),
-        ReviewVerdictTier::Miss => egui::Color32::from_rgb(0xb3, 0x1c, 0x6a),
-        ReviewVerdictTier::Blunder => egui::Color32::from_rgb(0xc6, 0x28, 0x28),
     }
 }
 
@@ -58,7 +45,7 @@ pub(super) fn draw_verdict_tallies(
         .spacing([10.0, 3.0])
         .show(ui, |ui| {
             for tally in tallies {
-                let color = verdict_tier_color(tally.tier);
+                let color = theme::verdict_tier_color(tally.tier);
                 let dim = tally.count == 0;
                 let glyph = egui::RichText::new(verdict_tier_glyph(tally.tier))
                     .monospace()
@@ -87,14 +74,14 @@ pub(super) fn draw_eval_graph(ui: &mut egui::Ui, series: &[EvalSample]) {
     let painter = ui.painter_at(rect);
 
     // Background + zero baseline.
-    painter.rect_filled(rect, 4.0, egui::Color32::from_gray(28));
+    painter.rect_filled(rect, 4.0, theme::GRAPH_BG);
     let mid_y = rect.center().y;
     painter.line_segment(
         [
             egui::pos2(rect.left(), mid_y),
             egui::pos2(rect.right(), mid_y),
         ],
-        egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
+        egui::Stroke::new(1.0, theme::GRAPH_BASELINE),
     );
 
     // Symmetric vertical scale clamped to the data's peak magnitude
@@ -121,7 +108,7 @@ pub(super) fn draw_eval_graph(ui: &mut egui::Ui, series: &[EvalSample]) {
     if points.len() >= 2 {
         painter.add(egui::Shape::line(
             points,
-            egui::Stroke::new(1.8, egui::Color32::from_rgb(0x8a, 0xb4, 0xf8)),
+            egui::Stroke::new(1.8, theme::GRAPH_LINE),
         ));
     }
 }
@@ -133,7 +120,7 @@ pub(super) fn draw_review_mode_bar(
     view: &ReviewModeView,
     events: &mut Vec<Event>,
 ) {
-    let accent = egui::Color32::from_rgb(0xb8, 0x55, 0x00); // amber, matches review header
+    let accent = theme::OUTCOME; // amber, matches review header
     let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 22);
     egui::Frame::group(ui.style())
         .stroke(egui::Stroke::new(1.0, accent))

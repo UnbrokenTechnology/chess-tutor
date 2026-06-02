@@ -17,6 +17,7 @@
 
 use eframe::egui;
 
+use crate::draw::theme;
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{
     GameReviewMoment, GameReviewView, InterventionAction, InterventionPanelKind,
@@ -60,7 +61,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                 "\u{2016}",
                 "Pause — on your move",
                 "Your move triggered something worth a look before you continue.",
-                PANEL_PAUSE,
+                theme::BAD,
             );
             egui::ScrollArea::vertical()
                 .id_salt("intervention_scroll")
@@ -79,7 +80,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                 "\u{21b6}",
                 "After your move",
                 "What the move you just played changed — looking back.",
-                PANEL_RETRO,
+                theme::RETRO,
             );
             egui::ScrollArea::vertical()
                 .id_salt("retro_scroll")
@@ -94,7 +95,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
                 "\u{2261}",
                 "Game review",
                 "How the whole game went — tallies, the eval curve, and the moments worth studying.",
-                PANEL_REVIEW,
+                theme::OUTCOME,
             );
             egui::ScrollArea::vertical()
                 .id_salt("review_scroll")
@@ -105,14 +106,6 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
         }
     }
 }
-
-// Distinct per-panel accent colours for the backward-looking side-panel
-// bodies. (The forward-looking "what to notice" coaching surface now
-// lives in the floating Hint pop-over — `draw::hint_popover` — with its
-// own teal accent, so it no longer competes for a slot here.)
-const PANEL_RETRO: egui::Color32 = egui::Color32::from_rgb(0x51, 0x39, 0x9a); // indigo
-const PANEL_PAUSE: egui::Color32 = egui::Color32::from_rgb(0xc6, 0x28, 0x28); // red
-const PANEL_REVIEW: egui::Color32 = egui::Color32::from_rgb(0xb8, 0x55, 0x00); // amber
 
 /// A colour-coded, temporally-explicit *title* for each side-panel body.
 /// Styled as a section heading (accent glyph + title, subtitle, rule) —
@@ -154,7 +147,7 @@ fn draw_game_review_summary(
     events: &mut Vec<Event>,
 ) {
     if let Some(end) = view.game_outcome {
-        ui.colored_label(egui::Color32::from_rgb(0xb8, 0x55, 0x00), end);
+        ui.colored_label(theme::OUTCOME, end);
         ui.separator();
     }
 
@@ -216,9 +209,9 @@ fn draw_game_review_summary(
 
 fn draw_review_moment(ui: &mut egui::Ui, moment: &GameReviewMoment) -> bool {
     let accent = match moment.kind {
-        ReviewMomentKind::Blunder => egui::Color32::from_rgb(0xc6, 0x28, 0x28),
-        ReviewMomentKind::TeachingMoment => egui::Color32::from_rgb(0xef, 0x6c, 0x00),
-        ReviewMomentKind::BlunderWithLesson => egui::Color32::from_rgb(0xb3, 0x1c, 0x6a),
+        ReviewMomentKind::Blunder => theme::BAD,
+        ReviewMomentKind::TeachingMoment => theme::CAUTION,
+        ReviewMomentKind::BlunderWithLesson => theme::MISS,
     };
     let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 22);
     let frame_resp = egui::Frame::group(ui.style())
@@ -279,8 +272,8 @@ fn draw_intervention_panel(
     events: &mut Vec<Event>,
 ) {
     let accent = match view.kind {
-        InterventionPanelKind::BlunderSafety => egui::Color32::from_rgb(0xc6, 0x28, 0x28),
-        InterventionPanelKind::TeachingMoment => egui::Color32::from_rgb(0xef, 0x6c, 0x00),
+        InterventionPanelKind::BlunderSafety => theme::BAD,
+        InterventionPanelKind::TeachingMoment => theme::CAUTION,
     };
     let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 25);
     egui::Frame::group(ui.style())
@@ -373,7 +366,7 @@ fn draw_move_cell(
         // rating reads at a glance without widening the column.
         text = egui::RichText::new(format!("{} {}", verdict_tier_glyph(tier), san))
             .monospace()
-            .color(review::verdict_tier_color(tier));
+            .color(theme::verdict_tier_color(tier));
     }
     ui.add(egui::SelectableLabel::new(selected, text)).clicked()
 }

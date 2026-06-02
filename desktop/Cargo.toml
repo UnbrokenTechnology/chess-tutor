@@ -13,3 +13,4 @@ chess-tutor-engine = { path = "../core/engine" }
 chess-tutor-teaching = { path = "../core/teaching" }
 chess-tutor-ui = { path = "../core/ui" }
 eframe = { version = "0.30", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui_extras = { version = "0.30", default-features = false, features = ["svg"] }

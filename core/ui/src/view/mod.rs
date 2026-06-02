@@ -35,17 +35,12 @@ pub struct TopBarView {
     pub depth: u32,
     pub engine_thinking: bool,
     pub game_outcome: Option<&'static str>,
-    /// `true` while the game-review surface is showing in the side
-    /// panel. The "Review" button is a toggle.
-    pub review_open: bool,
-    /// `true` when there's at least one user move whose retrospective
-    /// has arrived (so the review would have something to show).
-    pub review_button_enabled: bool,
 }
 
 /// The big, obvious bottom-of-the-right-column action bar
-/// (chess.com idiom): Takeback / Hint / New Game. These are the
-/// primary play controls, sized large for legibility.
+/// (chess.com idiom): Takeback / Hint / New Game. The middle button is
+/// **Hint during play, Review once the game is over** — a hint is
+/// useless with no move to make, and you don't review mid-game.
 pub struct ActionBarView {
     pub can_takeback: bool,
     /// Whether the Hint surface is currently open (the button doubles
@@ -55,6 +50,15 @@ pub struct ActionBarView {
     /// hint that's already up, even if the conditions for opening one
     /// no longer hold (engine started thinking, etc.).
     pub hint_button_enabled: bool,
+    /// `true` once the game has a result — flips the middle button from
+    /// Hint to Review.
+    pub game_over: bool,
+    /// `true` while the game-review surface is showing (the Review
+    /// button is then a "Close Review" toggle).
+    pub review_open: bool,
+    /// `true` when the review would have something to show (≥1 user move
+    /// whose retrospective has arrived).
+    pub review_button_enabled: bool,
 }
 
 /// Eval bar (left rail): one rectangle split into a white-advantage

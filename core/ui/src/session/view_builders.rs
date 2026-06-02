@@ -282,16 +282,11 @@ impl Session {
     // ---- Event dispatch ------------------------------------------------
 
     pub fn build_top_bar_view(&self) -> TopBarView {
-        let review_button_enabled = self.history.iter().any(|e| {
-            self.is_user_move(e) && e.retrospective.is_some()
-        });
         TopBarView {
             viewing_live: self.is_viewing_live(),
             depth: self.depth,
             engine_thinking: self.engine_thinking,
             game_outcome: self.game_outcome(),
-            review_open: self.review_phase.is_open(),
-            review_button_enabled,
         }
     }
 
@@ -300,10 +295,17 @@ impl Session {
             && !self.engine_thinking
             && self.is_users_turn()
             && self.game_outcome().is_none();
+        let review_button_enabled = self
+            .history
+            .iter()
+            .any(|e| self.is_user_move(e) && e.retrospective.is_some());
         ActionBarView {
             can_takeback: !self.history.is_empty(),
             hint_open: self.hint_open,
             hint_button_enabled: hint_can_open || self.hint_open,
+            game_over: self.game_outcome().is_some(),
+            review_open: self.review_phase.is_open(),
+            review_button_enabled,
         }
     }
 

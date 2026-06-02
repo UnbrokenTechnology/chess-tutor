@@ -36,6 +36,20 @@ pub struct BotStripView {
     pub point_advantage: i32,
 }
 
+/// The player strip drawn *below* the board — the user's own
+/// captured-material diff, mirroring the bot strip above. Deliberately
+/// minimal (no name / handicaps — there's no vanity user profile,
+/// decision #3): just the pieces the user has captured and a signed
+/// point lead from the **user's** POV.
+pub struct PlayerStripView {
+    /// Pieces the user has captured from the bot, heaviest first.
+    pub captured: Vec<Piece>,
+    /// Net classical-point lead from the **user's** POV. The renderer
+    /// shows `+N` only when positive (the lead sits next to whoever
+    /// holds it).
+    pub point_advantage: i32,
+}
+
 /// One active bot handicap, structured so the renderer owns the
 /// wording (and a future locale can rephrase without touching this
 /// layer). Each variant carries the magnitude the renderer formats.

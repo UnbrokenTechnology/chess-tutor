@@ -8,10 +8,13 @@
 pub(crate) mod action_bar;
 pub(crate) mod board;
 pub(crate) mod bot_strip;
+pub(crate) mod captured;
 pub(crate) mod dialog;
 pub(crate) mod eval_bar;
 pub(crate) mod hint_popover;
 pub(crate) mod options;
+pub(crate) mod player_strip;
 pub(crate) mod settings;
 pub(crate) mod side_panel;
+pub(crate) mod theme;
 pub(crate) mod top_bar;

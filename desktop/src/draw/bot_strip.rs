@@ -3,7 +3,6 @@
 //! captured-material diff from a [`BotStripView`]. No user strip on the
 //! opposite side (decision #3).
 
-use chess_tutor_engine::types::{Color, Piece, PieceType};
 use eframe::egui;
 
 use chess_tutor_ui::view::{BotHandicap, BotStripView};
@@ -20,7 +19,11 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &BotStripView) {
             ui.label(egui::RichText::new(handicap_label(*handicap)).size(13.0));
         }
 
-        // Captured-material diff pushed to the right edge.
+        // Captured-material diff pushed to the right edge. In a
+        // right-to-left layout the `+N` lead is added first (so it sits
+        // rightmost), then the overlapped cluster to its left; the
+        // cluster paints its sprites heaviest-first left-to-right inside
+        // its allocated rect.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if view.point_advantage > 0 {
                 ui.label(
@@ -29,11 +32,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &BotStripView) {
                         .strong(),
                 );
             }
-            // Painted right-to-left, so iterate in reverse to keep the
-            // visual order heaviest-first (left to right).
-            for piece in view.captured.iter().rev() {
-                ui.label(egui::RichText::new(piece_glyph(*piece)).size(16.0));
-            }
+            crate::draw::captured::cluster(ui, &view.captured);
         });
     });
     ui.add_space(2.0);
@@ -57,22 +56,3 @@ fn handicap_label(handicap: BotHandicap) -> String {
     }
 }
 
-/// Captured-piece glyph. Always renders in the captured side's colour
-/// so a white-bot strip shows the black pieces it has taken, and vice
-/// versa.
-fn piece_glyph(piece: Piece) -> &'static str {
-    match (piece.color(), piece.kind()) {
-        (Color::White, PieceType::King) => "♔",
-        (Color::White, PieceType::Queen) => "♕",
-        (Color::White, PieceType::Rook) => "♖",
-        (Color::White, PieceType::Bishop) => "♗",
-        (Color::White, PieceType::Knight) => "♘",
-        (Color::White, PieceType::Pawn) => "♙",
-        (Color::Black, PieceType::King) => "♚",
-        (Color::Black, PieceType::Queen) => "♛",
-        (Color::Black, PieceType::Rook) => "♜",
-        (Color::Black, PieceType::Bishop) => "♝",
-        (Color::Black, PieceType::Knight) => "♞",
-        (Color::Black, PieceType::Pawn) => "♟",
-    }
-}

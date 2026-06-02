@@ -18,12 +18,13 @@ use eframe::egui;
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{CoachingItem, HintPopoverView};
 
-use crate::draw::side_panel::cards::{category_glyph, sentiment_color};
+use crate::draw::side_panel::cards::category_glyph;
+use crate::draw::theme;
 
 /// Teal accent — the forward-looking "before your move" colour, kept
 /// deliberately distinct from the backward-looking retrospective's
 /// indigo so a glance tells the student which way the panel points.
-const POPOVER_ACCENT: egui::Color32 = egui::Color32::from_rgb(0x00, 0x83, 0x77);
+use crate::draw::theme::COACHING as POPOVER_ACCENT;
 
 /// Render the Hint pop-over as a floating, dismissible egui window
 /// centred over the board area. A no-op when `view` is `None` (closed).
@@ -113,7 +114,7 @@ fn draw_items(ui: &mut egui::Ui, view: &HintPopoverView) {
 }
 
 fn draw_item(ui: &mut egui::Ui, item: &CoachingItem) {
-    let accent = sentiment_color(item.sentiment);
+    let accent = theme::sentiment_color(item.sentiment);
     let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 28);
     egui::Frame::group(ui.style())
         .stroke(egui::Stroke::new(1.5, accent))
