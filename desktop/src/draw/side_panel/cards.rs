@@ -14,25 +14,34 @@ use chess_tutor_ui::view::{
 pub(super) fn draw_retrospective(
     ui: &mut egui::Ui,
     view: &RetrospectivePanelView,
+    in_review: bool,
     events: &mut Vec<Event>,
 ) {
-    if let Some(end) = view.game_outcome {
-        ui.colored_label(theme::OUTCOME, end);
-        ui.separator();
+    // In review mode the outcome line is clutter (it's shown in the
+    // summary popover and the move list) — suppress it to give the lesson
+    // more room.
+    if !in_review {
+        if let Some(end) = view.game_outcome {
+            ui.colored_label(theme::OUTCOME, end);
+            ui.separator();
+        }
     }
     match &view.body {
         RetrospectiveBody::NoMoves => {
             ui.label("(no moves yet)");
         }
         RetrospectiveBody::Entry { viewing_back_san, kind } => {
-            // Always render this status line (even live) so the layout
-            // doesn't shift when you step back into history and a
-            // "viewing move:" line appears/disappears.
-            match viewing_back_san {
-                Some(san) => ui.weak(format!("viewing move: {}", san)),
-                None => ui.weak("showing the current position"),
-            };
-            ui.separator();
+            // The "viewing move:" status line keeps the live layout stable
+            // when stepping back into history. In review mode it's
+            // redundant (the move shows in the headline card and the move
+            // list highlights it), so it's dropped to recover space.
+            if !in_review {
+                match viewing_back_san {
+                    Some(san) => ui.weak(format!("viewing move: {}", san)),
+                    None => ui.weak("showing the current position"),
+                };
+                ui.separator();
+            }
             match kind {
                 RetrospectiveKind::MoveReady {
                     view_model,
@@ -125,11 +134,13 @@ fn draw_retrospective_cards(
     // student isn't promised detail that isn't there. Worded neutrally
     // ("move impact", not "why this move?") so it reads sensibly whether
     // the move was best or a blunder.
-    let glyph = if expanded { "\u{25be}" } else { "\u{25b8}" }; // ▾ / ▸
+    let glyph = if expanded {
+        egui_phosphor::regular::CARET_DOWN
+    } else {
+        egui_phosphor::regular::CARET_RIGHT
+    };
     let verb = if expanded { "Hide" } else { "Show" };
-    let label = egui::RichText::new(format!("{glyph} {verb} move impact"))
-        .strong()
-        .size(14.0);
+    let label = crate::draw::icon::icon_label(glyph, &format!("{verb} move impact"), 14.0);
     let resp = ui.add_enabled(has_detail, egui::Button::new(label).frame(false));
     if resp.clicked() {
         events.push(Event::ToggleRetrospectiveDetail);
@@ -255,10 +266,7 @@ fn draw_item_card(
             // horizontal row doesn't wrap, so without this a long heading
             // stretches the (fixed-width) panel and shrinks the board.
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(category_glyph(item.category))
-                        .size(14.0),
-                );
+                ui.label(category_label(item.category, 14.0));
                 ui.with_layout(
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
@@ -311,12 +319,35 @@ pub(crate) fn category_glyph(category: RetrospectiveCategory) -> &'static str {
         RetrospectiveCategory::BlockedCenter => "▦",
         // ⌂ (house) instead of the 🏰 emoji, which renders as tofu.
         RetrospectiveCategory::Castling => "⌂",
-        RetrospectiveCategory::Space => "◫",
+        // Phosphor checkerboard for "space" — the territory you already
+        // control, a chessboard-patterned grid. A Phosphor PUA glyph, so it
+        // MUST render via `category_label` (the icon family); rendering it
+        // directly in a Proportional `RichText` lets Inter's PUA shadow it.
+        RetrospectiveCategory::Space => egui_phosphor::regular::CHECKERBOARD,
         // Star for a named tactic (fork / pin / mate / …); distinct
         // from Threats' crossed-swords glyph so the two cards read as
         // different concepts in a glance.
         RetrospectiveCategory::Tactic => "★",
         RetrospectiveCategory::Secondary => "…",
+    }
+}
+
+/// True for categories whose glyph is a Phosphor icon-font codepoint (vs a
+/// Unicode chess/concept glyph). These must render through the dedicated
+/// icon family so Inter's overlapping PUA glyphs can't shadow them.
+fn category_uses_icon_font(category: RetrospectiveCategory) -> bool {
+    matches!(category, RetrospectiveCategory::Space)
+}
+
+/// A category glyph as styled `RichText` at `size` — the single renderer
+/// for category glyphs (card header + hint pop-over). Unicode glyphs use
+/// the proportional font; Phosphor-icon categories use the icon family.
+pub(crate) fn category_label(category: RetrospectiveCategory, size: f32) -> egui::RichText {
+    let glyph = category_glyph(category);
+    if category_uses_icon_font(category) {
+        crate::draw::icon::icon(glyph).size(size)
+    } else {
+        egui::RichText::new(glyph).size(size)
     }
 }
 

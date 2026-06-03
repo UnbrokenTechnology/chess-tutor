@@ -6,20 +6,6 @@
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 
-/// Convert an engine PV (a vector of moves from the root) into a list
-/// of SAN strings, playing the moves in order on a scratch position so
-/// each SAN is formatted in the context where the move is actually
-/// played.
-pub(crate) fn pv_to_san(root: &Position, pv: &[chess_tutor_engine::types::Move]) -> Vec<String> {
-    let mut out = Vec::with_capacity(pv.len());
-    let mut scratch = root.clone();
-    for mv in pv {
-        out.push(san::format_on(&mut scratch, *mv));
-        scratch.do_move(*mv);
-    }
-    out
-}
-
 /// Render a score as conventional pawns (`+0.28`, `-1.05`) or mate
 /// notation (`#5`, `-#3`). Routes through [`crate::units::format_pawns`]
 /// so the scale conversion (engine PAWN_EG = 213 → conventional
@@ -46,7 +32,7 @@ pub(crate) fn render_multi_pv(
     let top_score = lines[0].score.0;
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
-        let pv_san = pv_to_san(root, &line.pv);
+        let pv_san = san::pv_to_san(root, &line.pv);
         let oriented = orientation.apply(line.score, stm);
         let delta_engine = line.score.0 - top_score;
         let delta_str = if delta_engine == 0 {
@@ -112,7 +98,7 @@ pub(crate) fn render_debug_trajectory(
     let root_white_pov = root_trace.white_pov_value(root_stm).0;
 
     for (i, line) in lines.iter().enumerate() {
-        let pv_san = pv_to_san(root, &line.pv);
+        let pv_san = san::pv_to_san(root, &line.pv);
         writeln!(
             out,
             "  pv {} ({}):",

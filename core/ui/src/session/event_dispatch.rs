@@ -102,23 +102,31 @@ impl Session {
                 self.takeback();
             }
             Event::OpenGameReview => {
-                // Open (or return to) the summary screen. Only meaningful
-                // when there's at least one user move; for an empty history
-                // just leave the regular surface up.
-                if self.history.iter().any(|e| self.is_user_move(e)) {
-                    self.review_phase = ReviewPhase::Summary;
-                    self.review_autoplay = false;
-                    self.close_hint();
+                // Show the summary popover. Only meaningful while reviewing
+                // — that's the only surface it floats over, and the only
+                // place its trigger (the action-bar "Summary" button)
+                // appears.
+                if self.review_phase == ReviewPhase::Reviewing {
+                    self.review_summary_open = true;
                 }
             }
             Event::CloseGameReview => {
+                // Exit review entirely (action-bar "Close Review").
                 self.review_phase = ReviewPhase::Closed;
+                self.review_summary_open = false;
                 self.review_autoplay = false;
             }
+            Event::CloseReviewSummary => {
+                // Dismiss the popover but stay in step-through review.
+                self.review_summary_open = false;
+            }
             Event::StartReview => {
-                // Enter step-through review at the first move.
+                // Enter step-through review at the first move — the
+                // action-bar "Review" button starts the walk-through
+                // immediately (no summary gate).
                 if !self.history.is_empty() {
                     self.review_phase = ReviewPhase::Reviewing;
+                    self.review_summary_open = false;
                     self.review_autoplay = false;
                     self.viewing_index = Some(0);
                     self.selected_retrospective = None;
@@ -127,13 +135,14 @@ impl Session {
             }
             Event::JumpToReviewMoment(history_index) => {
                 if history_index < self.history.len() {
-                    // Clicking a moment on the summary enters review mode
-                    // focused on that move (rather than dropping back to
-                    // the live play surface).
+                    // Clicking a moment in the summary popover enters review
+                    // mode focused on that move and dismisses the popover.
                     self.review_phase = ReviewPhase::Reviewing;
+                    self.review_summary_open = false;
                     self.review_autoplay = false;
                     self.viewing_index = Some(history_index);
                     self.selected_retrospective = None;
+                    self.close_hint();
                 }
             }
             Event::ReviewNav(nav) => self.handle_review_nav(nav),

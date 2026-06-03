@@ -58,7 +58,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
         SidePanelBody::Intervention(prompt) => {
             draw_panel_header(
                 ui,
-                "\u{2016}",
+                egui_phosphor::regular::PAUSE,
                 "Pause — on your move",
                 "Your move triggered something worth a look before you continue.",
                 theme::BAD,
@@ -74,34 +74,25 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &SidePanelView, events: &mut Vec<Eve
             // Backward-looking. The temporally-explicit title + distinct
             // colour is what stops the student confusing this with the
             // forward-looking coaching panel (they share this slot but
-            // never render at once).
-            draw_panel_header(
-                ui,
-                "\u{21b6}",
-                "After your move",
-                "What the move you just played changed — looking back.",
-                theme::RETRO,
-            );
+            // never render at once). In review mode the header is dropped:
+            // the nav bar already frames the surface as review, "After
+            // your move" is self-evident when stepping moves, and the
+            // recovered vertical space goes to the lesson.
+            let in_review = view.review_mode.is_some();
+            if !in_review {
+                draw_panel_header(
+                    ui,
+                    egui_phosphor::regular::CLOCK_COUNTER_CLOCKWISE,
+                    "After your move",
+                    "What the move you just played changed — looking back.",
+                    theme::RETRO,
+                );
+            }
             egui::ScrollArea::vertical()
                 .id_salt("retro_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    draw_retrospective(ui, retro, events);
-                });
-        }
-        SidePanelBody::GameReview(review) => {
-            draw_panel_header(
-                ui,
-                "\u{2261}",
-                "Game review",
-                "How the whole game went — tallies, the eval curve, and the moments worth studying.",
-                theme::OUTCOME,
-            );
-            egui::ScrollArea::vertical()
-                .id_salt("review_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    draw_game_review_summary(ui, review, events);
+                    draw_retrospective(ui, retro, in_review, events);
                 });
         }
     }
@@ -121,7 +112,7 @@ fn draw_panel_header(
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         if !icon.is_empty() {
-            ui.label(egui::RichText::new(icon).size(16.0).color(accent));
+            ui.label(crate::draw::icon::icon(icon).size(16.0).color(accent));
         }
         ui.label(
             egui::RichText::new(title)
@@ -131,79 +122,101 @@ fn draw_panel_header(
         );
     });
     if !subtitle.is_empty() {
-        ui.label(egui::RichText::new(subtitle).small().weak());
+        // Explanatory zone subtitle — keep it at the muted-but-legible
+        // token rather than `.weak()`, which fades too far for this
+        // body-length text the student is meant to read.
+        ui.label(egui::RichText::new(subtitle).small().color(theme::TEXT_MUTED));
     }
     ui.add_space(3.0);
     ui.separator();
     ui.add_space(4.0);
 }
 
-/// The game-review **summary** screen (step 6): outcome line, verdict
-/// tallies, the eval-over-time graph, a big Start Review button, then
-/// the ranked significant-moments list.
-fn draw_game_review_summary(
-    ui: &mut egui::Ui,
+/// The game-review **summary** as an on-demand modal popover: outcome
+/// line, verdict tallies, the eval-over-time graph, and the ranked
+/// significant-moments list. Floats over the board (opened from the
+/// action-bar "Summary" button) so the step-through panel stays put.
+/// Clicking a moment jumps review there and dismisses the popover; the
+/// window's close button dismisses without leaving review.
+pub(crate) fn draw_summary_modal(
+    ctx: &egui::Context,
     view: &GameReviewView,
     events: &mut Vec<Event>,
 ) {
-    if let Some(end) = view.game_outcome {
-        ui.colored_label(theme::OUTCOME, end);
+    let mut open = true;
+    egui::Window::new(crate::draw::icon::icon_label(
+        egui_phosphor::regular::CLIPBOARD_TEXT,
+        "Game review",
+        16.0,
+    ))
+    .collapsible(false)
+    .resizable(false)
+    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+    .default_width(440.0)
+    .open(&mut open)
+    .show(ctx, |ui| {
+        if let Some(end) = view.game_outcome {
+            ui.colored_label(theme::OUTCOME, end);
+            ui.separator();
+        }
+
+        // Verdict tallies (Best → Blunder).
+        draw_verdict_tallies(ui, &view.tallies, view.user_move_count);
+
+        // Eval-over-time graph.
+        if view.eval_series.len() >= 2 {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Evaluation over time").small().weak());
+            ui.add_space(2.0);
+            draw_eval_graph(ui, &view.eval_series);
+        }
+
+        ui.add_space(8.0);
         ui.separator();
-    }
 
-    // Verdict tallies (Best → Blunder).
-    draw_verdict_tallies(ui, &view.tallies, view.user_move_count);
-
-    // Eval-over-time graph.
-    if view.eval_series.len() >= 2 {
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("Evaluation over time").small().weak());
-        ui.add_space(2.0);
-        draw_eval_graph(ui, &view.eval_series);
-    }
-
-    // Big Start Review CTA.
-    ui.add_space(10.0);
-    let start = egui::Button::new(
-        egui::RichText::new("\u{25b6} Start Review").strong().size(16.0),
-    )
-    .min_size(egui::vec2(ui.available_width(), 40.0));
-    if ui.add(start).clicked() {
-        events.push(Event::StartReview);
-    }
-    ui.add_space(10.0);
-    ui.separator();
-
-    // Ranked significant moments.
-    ui.label(
-        egui::RichText::new(format!(
-            "{} of {} of your moves flagged.",
-            view.moments.len(),
-            view.user_move_count
-        ))
-        .small()
-        .weak(),
-    );
-    if view.moments.is_empty() {
-        ui.add_space(8.0);
+        // Ranked significant moments — the heart of the popover. Scrolls
+        // within a bounded height so a long list never grows the window
+        // past the board (the old in-panel version hid these below the
+        // fold, which is the bug this popover fixes).
         ui.label(
-            egui::RichText::new(
-                "No significant moments detected. Either you played clean, the \
-                 retrospective analyses haven't all arrived yet, or the gating \
-                 thresholds skipped your moves. Use Start Review to step through \
-                 the whole game move-by-move.",
-            )
+            egui::RichText::new(format!(
+                "{} of {} of your moves flagged.",
+                view.moments.len(),
+                view.user_move_count
+            ))
             .small()
             .weak(),
         );
-        return;
-    }
-    ui.add_space(6.0);
-    for moment in &view.moments {
-        if draw_review_moment(ui, moment) {
-            events.push(Event::JumpToReviewMoment(moment.history_index));
+        if view.moments.is_empty() {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(
+                    "No significant moments detected. Either you played clean, the \
+                     retrospective analyses haven't all arrived yet, or the gating \
+                     thresholds skipped your moves. Step through the game with the \
+                     nav controls to review it move-by-move.",
+                )
+                .small()
+                .weak(),
+            );
+        } else {
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .id_salt("summary_moments_scroll")
+                .max_height(360.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for moment in &view.moments {
+                        if draw_review_moment(ui, moment) {
+                            events.push(Event::JumpToReviewMoment(moment.history_index));
+                        }
+                        ui.add_space(4.0);
+                    }
+                });
         }
-        ui.add_space(4.0);
+    });
+    if !open {
+        events.push(Event::CloseReviewSummary);
     }
 }
 

@@ -124,7 +124,18 @@ fn eval_bar_fill_and_label(score: Option<Value>) -> (f32, String) {
         Some(v) => {
             let ratio = (v.0 as f32 / EVAL_BAR_SATURATION_CP).clamp(-1.0, 1.0);
             let pawns = v.0 as f32 / Value::PAWN_EG.0 as f32;
-            (0.5 + 0.5 * ratio, format!("{:+.2}", pawns))
+            // chess.com-style rounding keeps the in-bar number narrow:
+            // whole pawns once we're +/-10 or more (the position is
+            // decided), one decimal below that — so "+25", "+5.4", "+0.6",
+            // never a five-char "+25.14" overflowing the thin bar. The cut
+            // is 9.95, not 10.0, so a value that would *round up* to "10.0"
+            // (5 chars) renders as "+10" instead.
+            let label = if pawns.abs() >= 9.95 {
+                format!("{pawns:+.0}")
+            } else {
+                format!("{pawns:+.1}")
+            };
+            (0.5 + 0.5 * ratio, label)
         }
         None => (0.5, String::from("—")),
     }
@@ -417,20 +428,13 @@ impl Session {
         // (PLAN §"coaching/hint model"): coaching pops over instead of
         // sharing this slot. Body priority, top to bottom:
         //   Intervention
-        //     > GameReview summary (review_phase == Summary)
         //     > Retrospective (the default; also the body in review mode,
         //       which adds the nav-bar chrome via `review_mode`).
+        // The game-review summary is no longer a body — it floats over
+        // this surface as a popover (`build_review_summary_view`).
         let mut review_mode: Option<ReviewModeView> = None;
         let body = if let Some(pending) = self.pending_intervention.as_ref() {
             SidePanelBody::Intervention(build_intervention_panel(pending))
-        } else if self.review_phase == ReviewPhase::Summary {
-            // build_game_review returns None only when there are no
-            // user moves at all — in that case fall back to the
-            // regular retrospective so the panel isn't blank.
-            match self.build_game_review() {
-                Some(review) => SidePanelBody::GameReview(review),
-                None => SidePanelBody::Retrospective(self.build_retrospective_view()),
-            }
         } else {
             if self.review_phase == ReviewPhase::Reviewing {
                 review_mode = Some(self.build_review_mode_view());
@@ -448,18 +452,27 @@ impl Session {
     }
 
     /// Nav-bar chrome for step-through review mode. The feedback zone
-    /// itself reuses the retrospective body; this carries only the
-    /// position counter + which nav buttons are live + autoplay state.
+    /// itself reuses the retrospective body; this carries only which nav
+    /// buttons are live + autoplay state.
     fn build_review_mode_view(&self) -> ReviewModeView {
         let total = self.history.len();
         let cur = self.viewing_index.unwrap_or(total.saturating_sub(1));
         ReviewModeView {
-            current_ply: cur + 1,
-            total_plies: total,
             can_step_back: cur > 0,
             can_step_forward: total > 0 && cur + 1 < total,
             autoplay: self.review_autoplay,
         }
+    }
+
+    /// The game-review summary popover (verdict tallies, eval curve,
+    /// ranked significant moments), or `None` when it's dismissed or there
+    /// is nothing to review. Floats over the step-through panel rather
+    /// than gating entry to it.
+    pub fn build_review_summary_view(&self) -> Option<crate::view::GameReviewView> {
+        if !self.review_summary_open {
+            return None;
+        }
+        self.build_game_review()
     }
 
     /// Build the on-demand Hint pop-over from the live position, or
@@ -622,15 +635,10 @@ impl Session {
         let pre = self.pre_move_position(idx);
         let user_san = chess_tutor_engine::san::format(&pre, user.mv);
         // Cap the displayed line so it stays a readable comparison, not a
-        // full deep dump. format_on walks the position as it renders.
+        // full deep dump.
         const MAX_PV_PLIES: usize = 6;
-        let mut scratch = pre.clone();
-        let best_line: Vec<String> = best
-            .pv
-            .iter()
-            .take(MAX_PV_PLIES)
-            .map(|&mv| chess_tutor_engine::san::format_on(&mut scratch, mv))
-            .collect();
+        let take = best.pv.len().min(MAX_PV_PLIES);
+        let best_line = chess_tutor_engine::san::pv_to_san(&pre, &best.pv[..take]);
         let best_san = best_line.first().cloned()?;
         Some(ReviewPvLine {
             user_san,

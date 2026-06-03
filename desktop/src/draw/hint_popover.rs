@@ -18,7 +18,7 @@ use eframe::egui;
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{CoachingItem, HintPopoverView};
 
-use crate::draw::side_panel::cards::category_glyph;
+use crate::draw::side_panel::cards::category_label;
 use crate::draw::theme;
 
 /// Teal accent — the forward-looking "before your move" colour, kept
@@ -122,7 +122,7 @@ fn draw_item(ui: &mut egui::Ui, item: &CoachingItem) {
         .inner_margin(egui::Margin::same(10.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(category_glyph(item.category)).size(16.0));
+                ui.label(category_label(item.category, 16.0));
                 // Wrap the heading instead of letting a long title
                 // stretch the pop-over.
                 ui.add(

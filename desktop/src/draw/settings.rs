@@ -21,7 +21,7 @@ use super::options;
 
 pub(crate) fn draw(ctx: &egui::Context, view: &SettingsView, events: &mut Vec<Event>) {
     let mut open = true;
-    egui::Window::new("\u{2699}  Settings")
+    egui::Window::new(super::icon::icon_label(egui_phosphor::regular::GEAR, "Settings", 14.0))
         .collapsible(false)
         .resizable(false)
         .open(&mut open)

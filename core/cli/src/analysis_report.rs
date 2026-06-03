@@ -44,7 +44,7 @@ pub fn render(root: &Position, analyses: &[MoveAnalysis], top_percent: f32) -> S
 }
 
 fn render_one(out: &mut String, root: &Position, a: &MoveAnalysis, rank: usize, top_percent: f32) {
-    let pv_san = pv_to_san(root, &a.pv);
+    let pv_san = san::pv_to_san(root, &a.pv);
     let mv_san = pv_san.first().cloned().unwrap_or_else(|| "?".to_string());
     let settled_str = format_settled_suffix(&a.pv, a.settled_ply);
     writeln!(
@@ -103,16 +103,6 @@ fn render_one(out: &mut String, root: &Position, a: &MoveAnalysis, rank: usize, 
         )
         .unwrap();
     }
-}
-
-fn pv_to_san(root: &Position, pv: &[Move]) -> Vec<String> {
-    let mut out = Vec::with_capacity(pv.len());
-    let mut scratch = root.clone();
-    for mv in pv {
-        out.push(san::format_on(&mut scratch, *mv));
-        scratch.do_move(*mv);
-    }
-    out
 }
 
 fn format_score_pawns(score: Value) -> String {

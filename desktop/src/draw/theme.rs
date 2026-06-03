@@ -17,7 +17,53 @@
 //! language.
 
 use chess_tutor_ui::view::{ReviewVerdictTier, Sentiment};
-use eframe::egui::Color32;
+use eframe::egui::{self, Color32, FontFamily, FontId, TextStyle};
+
+// === Text (dark theme) ===
+// egui's dark defaults sit at grey 140 (labels) / 180 (buttons), which on
+// the near-black panels reads as dim grey-on-black. We lift the base text
+// to near-white for high contrast; `.weak()` (a 50/50 fade of the base
+// toward the panel) then lands above the AA floor instead of below it.
+/// Primary text.
+pub const TEXT: Color32 = Color32::from_rgb(0xe8, 0xe6, 0xe3);
+/// Secondary / caption text. The legibility floor — don't go dimmer for
+/// anything a student is expected to read (≈6.4:1 on the dark panels).
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x9a, 0xa0, 0xa6);
+
+// === Type scale (pt) — accessibility floor is 12; nothing renders below
+// it. Mapped onto egui's built-in TextStyles in `apply`. ===
+pub const FONT_HEADING: f32 = 18.0;
+pub const FONT_BODY: f32 = 14.0;
+pub const FONT_MONO: f32 = 13.0;
+pub const FONT_CAPTION: f32 = 12.0;
+
+/// Install the app-wide egui style once at startup: the type scale (12 pt
+/// accessibility floor — `.small()` text was egui's 9 pt, which the user
+/// couldn't read) and high-contrast text on the dark panels. Background
+/// fills stay egui's dark defaults; the surface-color repaint is a
+/// separate step — this pass is fonts + text contrast only.
+pub fn apply(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+
+    style.text_styles = [
+        (TextStyle::Heading, FontId::new(FONT_HEADING, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(FONT_BODY, FontFamily::Proportional)),
+        (TextStyle::Button, FontId::new(FONT_BODY, FontFamily::Proportional)),
+        (TextStyle::Small, FontId::new(FONT_CAPTION, FontFamily::Proportional)),
+        (TextStyle::Monospace, FontId::new(FONT_MONO, FontFamily::Monospace)),
+    ]
+    .into();
+
+    let v = &mut style.visuals;
+    // Bright base text → normal labels read clearly, and `.weak()` (fade of
+    // the base toward the panel) stays legible. `.strong()` resolves to the
+    // `active` widget color, which egui's dark default already paints white.
+    v.widgets.noninteractive.fg_stroke.color = TEXT; // normal labels
+    v.widgets.inactive.fg_stroke.color = TEXT; // button text (was grey 180)
+    v.widgets.open.fg_stroke.color = TEXT;
+
+    ctx.set_style(style);
+}
 
 // === Quality hues — shared by sentiment, verdict tiers, and the
 // review/intervention chrome that keys off move quality. (Step 2 retunes

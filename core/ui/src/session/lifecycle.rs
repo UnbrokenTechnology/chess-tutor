@@ -124,6 +124,7 @@ impl Session {
             pending_intervention: None,
             awaiting_intervention_decision: false,
             review_phase: ReviewPhase::Closed,
+            review_summary_open: false,
             review_autoplay: false,
             retro_expanded: false,
             show_eval_bar: true,
@@ -161,6 +162,7 @@ impl Session {
         self.pending_intervention = None;
         self.awaiting_intervention_decision = false;
         self.review_phase = ReviewPhase::Closed;
+        self.review_summary_open = false;
         self.review_autoplay = false;
         // Calm default returns on a fresh game — the feedback zone
         // collapses back to the one-line verdict.
@@ -246,6 +248,7 @@ impl Session {
         self.pending_intervention = None;
         self.awaiting_intervention_decision = false;
         self.review_phase = ReviewPhase::Closed;
+        self.review_summary_open = false;
         self.review_autoplay = false;
         // Calm default returns on a fresh game — the feedback zone
         // collapses back to the one-line verdict.

@@ -41,11 +41,12 @@ use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::openings;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
+use chess_tutor_engine::san::pv_to_san;
 use chess_tutor_engine::types::Move;
 
 use crate::board::{render as render_board, RenderOptions};
 use crate::cli_args::{Cli, Command, EngineColor};
-use crate::search_report::{pv_to_san, render_debug_trajectory, render_multi_pv};
+use crate::search_report::{render_debug_trajectory, render_multi_pv};
 
 /// Search depth for the `tactics --latent` defusal block. Matches the
 /// `explain` default so the two surfaces agree on defusal scores. Deep

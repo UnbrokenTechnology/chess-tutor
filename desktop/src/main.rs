@@ -26,6 +26,10 @@ fn main() -> eframe::Result<()> {
             // Bundled Inter UI font + a broad symbol fallback so arrows /
             // geometric / media glyphs render instead of tofu boxes.
             install_fonts(&cc.egui_ctx);
+            // App-wide type scale (12 pt accessibility floor) + high-
+            // contrast dark text. Must follow install_fonts (it clones the
+            // current style) and precede any rendering.
+            draw::theme::apply(&cc.egui_ctx);
             // SVG image loader (egui_extras) for the cburnett board pieces.
             egui_extras::install_image_loaders(&cc.egui_ctx);
             // The session spawns a worker thread that needs a "wake
@@ -63,6 +67,17 @@ fn install_fonts(ctx: &egui::Context) {
         .entry(egui::FontFamily::Proportional)
         .or_default()
         .insert(0, "inter".to_owned());
+
+    // Phosphor icon font for UI chrome glyphs (gear / flip / review nav).
+    // `add_to_fonts` inserts the font data + appends it to the Proportional
+    // family. But Inter maps ~745 PUA codepoints (its stylistic alternates)
+    // that overlap Phosphor's icon range, and Inter wins in Proportional —
+    // so we ALSO expose Phosphor as its own dedicated family and render
+    // every icon through it (see draw::icon), where Inter can't shadow it.
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("phosphor".into()), vec!["phosphor".to_owned()]);
 
     // Segoe UI Symbol — lowest-priority fallback for both families.
     if let Ok(bytes) = std::fs::read(r"C:\Windows\Fonts\seguisym.ttf") {
@@ -147,8 +162,11 @@ impl eframe::App for App {
             // symmetric side margins (rather than detaching a far-left
             // eval bar from a centered board). The eval bar is opt-out
             // (Start/Options + ⚙) — when hidden it claims no width.
-            // A thin bar (chess.com-like), not a chunky 56px gutter.
-            const EVAL_W: f32 = 30.0;
+            // A thin bar (chess.com-like), not a chunky 56px gutter — sized
+            // to seat the 12pt score inside. chess.com-style rounding caps
+            // the number at ~4 chars ("-9.9" / "+25" / "-M99"), which fits
+            // ~34px; below that the text starts clipping at the edges.
+            const EVAL_W: f32 = 34.0;
             const EVAL_GAP: f32 = 6.0;
             let show_eval = self.session.eval_bar_visible();
             let lead = if show_eval { EVAL_W + EVAL_GAP } else { 0.0 };
@@ -183,6 +201,13 @@ impl eframe::App for App {
         // new-game dialog so a setup modal still sits on top.
         if let Some(settings) = self.session.build_settings_view() {
             draw::settings::draw(ctx, &settings, &mut events);
+        }
+
+        // Game-review summary popover: on-demand (action-bar "Summary")
+        // while reviewing, floated over the board so the step-through
+        // panel stays put underneath.
+        if let Some(review) = self.session.build_review_summary_view() {
+            draw::side_panel::draw_summary_modal(ctx, &review, &mut events);
         }
 
         if let Some(dialog) = self.session.build_new_game_dialog_view() {

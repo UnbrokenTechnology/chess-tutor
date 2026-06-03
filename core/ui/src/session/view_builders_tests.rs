@@ -42,9 +42,28 @@ fn eval_bar_black_mate_is_signed() {
 
 #[test]
 fn eval_bar_cp_score_uses_pawn_eg_scale() {
-    // One endgame pawn reads as +1.00 (chess.com-aligned), not raw cp.
+    // One endgame pawn reads as +1.0 (chess.com-aligned, one-decimal
+    // rounding under +/-10), not raw cp.
     let (_, label) = eval_bar_fill_and_label(Some(Value(Value::PAWN_EG.0)));
-    assert_eq!(label, "+1.00");
+    assert_eq!(label, "+1.0");
+}
+
+#[test]
+fn eval_bar_large_score_drops_the_decimal() {
+    // Decided positions (>= +/-10 pawns) show whole pawns so the number
+    // stays narrow in the thin bar: 25.14 pawns -> "+25", not "+25.14".
+    let (_, label) = eval_bar_fill_and_label(Some(Value(25 * Value::PAWN_EG.0)));
+    assert_eq!(label, "+25");
+}
+
+#[test]
+fn eval_bar_value_that_would_round_to_ten_uses_the_integer_form() {
+    // ~9.97 pawns is below 10 but rounds up to "10.0" at one decimal — the
+    // 5-char string the cut is meant to avoid. The 9.95 threshold sends it
+    // to the integer branch instead, so it reads "+10".
+    let cp = (9.97 * Value::PAWN_EG.0 as f32) as i32;
+    let (_, label) = eval_bar_fill_and_label(Some(Value(cp)));
+    assert_eq!(label, "+10");
 }
 
 #[test]

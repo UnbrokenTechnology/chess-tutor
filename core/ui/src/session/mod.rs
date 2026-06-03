@@ -39,13 +39,14 @@ pub(crate) const DEFAULT_DEPTH: u32 = 10;
 /// dialog only tunes engine depth.
 pub(crate) const ANALYTICAL_DEPTH: u32 = 12;
 
-/// Which post-game review surface is showing (build-order step 6).
-/// `Closed` is normal play; the user opens `Summary` (tallies + eval
-/// graph + Start Review), then `Reviewing` to step through the game.
+/// Whether post-game review is active. `Closed` is normal play;
+/// `Reviewing` is step-through review (entered directly from the
+/// action-bar "Review" button). The summary (tallies + eval curve +
+/// significant moments) is no longer a separate phase — it's an on-demand
+/// popover while reviewing, tracked by [`Session::review_summary_open`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReviewPhase {
     Closed,
-    Summary,
     Reviewing,
 }
 
@@ -196,13 +197,18 @@ pub struct Session {
     pub(crate) awaiting_intervention_decision: bool,
 
     /// Which post-game review surface (if any) is showing. `Closed`
-    /// during normal play; `Summary` when the user has opened the
-    /// game-review summary (tallies + eval graph + Start Review);
-    /// `Reviewing` once they press Start Review and step through the
-    /// game move-by-move. Renderers swap the side panel's body to match.
-    /// Reset to `Closed` on takeback / new game so the user isn't left
-    /// on a stale surface.
+    /// `Closed` during normal play; `Reviewing` once the user presses
+    /// the action-bar "Review" button and steps through the game
+    /// move-by-move. Renderers swap the side panel's body to match. Reset
+    /// to `Closed` on takeback / new game so the user isn't left on a
+    /// stale surface.
     pub(crate) review_phase: ReviewPhase,
+
+    /// `true` while the game-review summary popover is showing (tallies +
+    /// eval curve + significant moments), floated over the board on top
+    /// of the step-through panel. Only meaningful while `Reviewing`; reset
+    /// whenever review closes or a moment is jumped to.
+    pub(crate) review_summary_open: bool,
 
     /// `true` while review-mode autoplay is running — the renderer
     /// advances one move per frame-tick (decision: step 6 nav). Only

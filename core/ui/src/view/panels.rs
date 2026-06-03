@@ -42,10 +42,6 @@ pub enum SidePanelBody {
     /// the first thing the user sees.
     Intervention(InterventionPanelView),
     Retrospective(RetrospectivePanelView),
-    /// Post-game (or on-demand) review surface — a ranked list of
-    /// significant moments the user should study. Click any moment
-    /// to jump the rest of the UI to that move.
-    GameReview(GameReviewView),
 }
 
 /// The on-demand **Hint pop-over** — a dismissible "what to notice"
@@ -97,13 +93,12 @@ pub struct CoachingItem {
     pub demoted: bool,
 }
 
-/// Post-game review **summary** surface (build-order step 6): the
-/// verdict tallies, an eval-over-time graph, the ranked significant
-/// moments, and the big **Start Review** call-to-action. Renderers
-/// paint the tallies + graph, then a Start-Review button emitting
-/// [`crate::event::Event::StartReview`]; clicking a moment row emits
-/// [`crate::event::Event::JumpToReviewMoment`] (which enters review
-/// mode at that history index).
+/// Post-game review **summary** surface: the verdict tallies, an
+/// eval-over-time graph, and the ranked significant moments. Rendered as
+/// an on-demand popover over the step-through panel (not a gate to it).
+/// Clicking a moment row emits [`crate::event::Event::JumpToReviewMoment`]
+/// (enter review at that history index + dismiss the popover); dismissing
+/// emits [`crate::event::Event::CloseReviewSummary`].
 ///
 /// No estimated-ELO field — deliberately skipped (PLAN step 6).
 pub struct GameReviewView {
@@ -302,16 +297,12 @@ pub enum ReviewNav {
 /// feedback zone itself reuses the retrospective surface (the selected
 /// move's deep breakdown); this view model only carries the nav state.
 ///
-/// Renderers paint four big nav buttons (◀ ▶ ⏮ ⏭ — or restart/end +
-/// back/forward) plus an autoplay toggle, emitting
-/// [`crate::event::Event::ReviewNav`] / [`crate::event::Event::ToggleReviewAutoplay`].
-/// A "Back to summary" affordance emits [`crate::event::Event::OpenGameReview`].
+/// Renderers paint five nav buttons (restart / back / play-pause /
+/// forward / end), emitting [`crate::event::Event::ReviewNav`] /
+/// [`crate::event::Event::ToggleReviewAutoplay`]. The summary popover is
+/// reached from the action bar ([`crate::event::Event::OpenGameReview`]),
+/// not from this bar.
 pub struct ReviewModeView {
-    /// 1-based position in the game ("move 7 of 34") for a progress
-    /// readout. `0` when there are no moves (shouldn't happen in review).
-    pub current_ply: usize,
-    /// Total plies in the game.
-    pub total_plies: usize,
     /// Whether a step-back is possible (not already at the first move).
     pub can_step_back: bool,
     /// Whether a step-forward is possible (not already at the last move).

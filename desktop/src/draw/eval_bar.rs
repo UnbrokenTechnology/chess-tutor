@@ -41,8 +41,10 @@ pub(crate) fn draw(ui: &mut egui::Ui, rect: egui::Rect, view: &EvalBarView) {
         anchor,
         egui::Align2::CENTER_CENTER,
         &view.label,
-        // 9pt fits a 5-char score (e.g. "-1.31") inside the ~30px-wide bar.
-        egui::FontId::monospace(9.0),
+        // 12pt is the accessibility floor. The label is chess.com-rounded
+        // upstream to <=4 chars ("-9.9" / "+25"), which seats inside the
+        // ~34px bar the caller sizes.
+        egui::FontId::monospace(12.0),
         text_color,
     );
 }

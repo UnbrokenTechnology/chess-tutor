@@ -294,61 +294,71 @@ fn piece_type_of(piece: crate::types::Piece) -> PieceType {
 ///
 /// `pos` is not permanently modified: check/mate detection uses do/undo.
 pub fn format(pos: &Position, mv: Move) -> String {
-    // Clone so the caller's position is untouched by the do/undo we
-    // need for the check/mate suffix.
+    // Clone so the caller's position is untouched: formatting the
+    // check/mate suffix requires applying the move, and we must not leak
+    // that mutation back to the caller. This is the non-mutating, single-
+    // move formatter — use it for any display path. To render a whole PV,
+    // use [`pv_to_san`].
     let mut scratch = pos.clone();
-    format_on(&mut scratch, mv)
+    format_and_advance(&mut scratch, mv)
 }
 
-/// Same as [`format`], but operates on `pos` directly. `pos` is
-/// restored to its original state before returning.
-pub fn format_on(pos: &mut Position, mv: Move) -> String {
-    // Castling first.
-    if mv.kind() == MoveKind::Castling {
-        let base = if mv.to().file() == File::G {
-            "O-O"
+/// Render a principal variation as a list of SAN strings, each formatted
+/// from the board it is actually played on. Walks an internal scratch
+/// clone of `root`, so the caller's position is untouched.
+pub fn pv_to_san(root: &Position, pv: &[Move]) -> Vec<String> {
+    let mut scratch = root.clone();
+    pv.iter().map(|&mv| format_and_advance(&mut scratch, mv)).collect()
+}
+
+/// Format `mv` as SAN against `scratch` and **advance `scratch` past it**.
+///
+/// Private on purpose: the mutation is a controlled primitive, used only
+/// by [`format`] (on a throwaway clone) and [`pv_to_san`] (which walks the
+/// line). Computing the check/mate suffix requires the position *after*
+/// the move; rather than do/undo on every call, [`pv_to_san`] reuses the
+/// advance to step down the variation. No public, non-mutating-looking
+/// formatter ever leaves a caller's board mutated.
+fn format_and_advance(pos: &mut Position, mv: Move) -> String {
+    // The move text is built from the position *before* the move (the
+    // piece on `from`, disambiguation against same-type peers, capture).
+    let base = if mv.kind() == MoveKind::Castling {
+        if mv.to().file() == File::G {
+            "O-O".to_string()
         } else {
-            "O-O-O"
-        };
-        return with_check_suffix(pos, mv, base);
-    }
-
-    let moved = piece_type_of(pos.piece_on(mv.from()).expect("from must be occupied"));
-    let is_cap = is_capture_move(pos, mv);
-
-    let mut out = String::new();
-
-    if moved == PieceType::Pawn {
-        if is_cap {
-            out.push(file_char(mv.from().file()));
-            out.push('x');
-        }
-        out.push_str(&mv.to().to_algebraic());
-        if mv.kind() == MoveKind::Promotion {
-            out.push('=');
-            out.push(piece_letter(mv.promoted_to()));
+            "O-O-O".to_string()
         }
     } else {
-        out.push(piece_letter(moved));
-        out.push_str(&disambig_for(pos, mv, moved));
-        if is_cap {
-            out.push('x');
+        let moved = piece_type_of(pos.piece_on(mv.from()).expect("from must be occupied"));
+        let is_cap = is_capture_move(pos, mv);
+        let mut out = String::new();
+        if moved == PieceType::Pawn {
+            if is_cap {
+                out.push(file_char(mv.from().file()));
+                out.push('x');
+            }
+            out.push_str(&mv.to().to_algebraic());
+            if mv.kind() == MoveKind::Promotion {
+                out.push('=');
+                out.push(piece_letter(mv.promoted_to()));
+            }
+        } else {
+            out.push(piece_letter(moved));
+            out.push_str(&disambig_for(pos, mv, moved));
+            if is_cap {
+                out.push('x');
+            }
+            out.push_str(&mv.to().to_algebraic());
         }
-        out.push_str(&mv.to().to_algebraic());
-    }
+        out
+    };
 
-    with_check_suffix(pos, mv, &out)
-}
-
-fn with_check_suffix(pos: &mut Position, mv: Move, base: &str) -> String {
-    let state = pos.do_move(mv);
-    let opponent_in_check = pos.in_check();
-    let opponent_has_moves = !legal_moves_vec(pos).is_empty();
-    pos.undo_move(mv, state);
-
-    let suffix = match (opponent_in_check, opponent_has_moves) {
-        (true, false) => "#",
-        (true, true) => "+",
+    // Advance; the check/mate suffix is read from the resulting position
+    // (the opponent is now to move).
+    let _ = pos.do_move(mv);
+    let suffix = match (pos.in_check(), legal_moves_vec(pos).is_empty()) {
+        (true, true) => "#",
+        (true, false) => "+",
         _ => "",
     };
     format!("{base}{suffix}")

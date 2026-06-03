@@ -127,49 +127,37 @@ pub(super) fn draw_review_mode_bar(
         .fill(bg)
         .inner_margin(egui::Margin::same(6.0))
         .show(ui, |ui| {
+            // Just the nav buttons now — the "Move N of M" readout (the
+            // move list highlights the position) and the "Summary" button
+            // (moved to the action bar) were removed to recover vertical
+            // space for the lesson.
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Move {} of {}",
-                        view.current_ply, view.total_plies
-                    ))
-                    .small()
-                    .strong(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .button(egui::RichText::new("Summary").small())
-                        .on_hover_text("Back to the game-review summary")
-                        .clicked()
-                    {
-                        events.push(Event::OpenGameReview);
-                    }
-                });
-            });
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                let btn = |label: &str| {
-                    egui::Button::new(egui::RichText::new(label).size(18.0))
+                let btn = |glyph: &str| {
+                    egui::Button::new(crate::draw::icon::icon(glyph).size(18.0))
                         .min_size(egui::vec2(40.0, 36.0))
                 };
-                // ⏮ restart
+                // skip-to-first
                 if ui
-                    .add_enabled(view.can_step_back, btn("\u{23ee}"))
+                    .add_enabled(view.can_step_back, btn(egui_phosphor::regular::SKIP_BACK))
                     .on_hover_text("First move")
                     .clicked()
                 {
                     events.push(Event::ReviewNav(ReviewNav::Restart));
                 }
-                // ◀ back
+                // step back
                 if ui
-                    .add_enabled(view.can_step_back, btn("\u{25c0}"))
+                    .add_enabled(view.can_step_back, btn(egui_phosphor::regular::CARET_LEFT))
                     .on_hover_text("Previous move")
                     .clicked()
                 {
                     events.push(Event::ReviewNav(ReviewNav::Back));
                 }
-                // ▶ / ⏸ autoplay toggle
-                let play_glyph = if view.autoplay { "\u{23f8}" } else { "\u{25b6}" };
+                // play / pause autoplay toggle
+                let play_glyph = if view.autoplay {
+                    egui_phosphor::regular::PAUSE
+                } else {
+                    egui_phosphor::regular::PLAY
+                };
                 if ui
                     .add_enabled(
                         view.can_step_forward || view.autoplay,
@@ -180,17 +168,23 @@ pub(super) fn draw_review_mode_bar(
                 {
                     events.push(Event::ToggleReviewAutoplay);
                 }
-                // ▷ forward
+                // step forward
                 if ui
-                    .add_enabled(view.can_step_forward, btn("\u{25b6}\u{25b6}"))
+                    .add_enabled(
+                        view.can_step_forward,
+                        btn(egui_phosphor::regular::CARET_RIGHT),
+                    )
                     .on_hover_text("Next move")
                     .clicked()
                 {
                     events.push(Event::ReviewNav(ReviewNav::Forward));
                 }
-                // ⏭ end
+                // skip-to-last
                 if ui
-                    .add_enabled(view.can_step_forward, btn("\u{23ed}"))
+                    .add_enabled(
+                        view.can_step_forward,
+                        btn(egui_phosphor::regular::SKIP_FORWARD),
+                    )
                     .on_hover_text("Last move")
                     .clicked()
                 {

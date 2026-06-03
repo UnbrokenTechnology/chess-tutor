@@ -152,16 +152,6 @@ pub(super) fn announce_opening_if_changed(
     Ok(())
 }
 
-fn pv_to_san(pos: &Position, pv: &[Move]) -> Vec<String> {
-    let mut out = Vec::with_capacity(pv.len());
-    let mut scratch = pos.clone();
-    for mv in pv {
-        out.push(san::format_on(&mut scratch, *mv));
-        scratch.do_move(*mv);
-    }
-    out
-}
-
 pub(super) fn print_search_report(
     out: &mut io::StdoutLock<'_>,
     pos: &Position,
@@ -173,7 +163,7 @@ pub(super) fn print_search_report(
     }
     if outcome.analyses.len() == 1 {
         let analysis = &outcome.analyses[0];
-        let pv_san = pv_to_san(pos, &analysis.pv);
+        let pv_san = san::pv_to_san(pos, &analysis.pv);
         writeln!(
             out,
             "depth {} | {} | {} ms",
@@ -193,7 +183,7 @@ pub(super) fn print_search_report(
     )?;
     let top_cp = outcome.analyses[0].score.0;
     for (i, analysis) in outcome.analyses.iter().enumerate() {
-        let pv_san = pv_to_san(pos, &analysis.pv);
+        let pv_san = san::pv_to_san(pos, &analysis.pv);
         let delta = analysis.score.0 - top_cp;
         let delta_str = if delta == 0 {
             "(0 cp)".to_string()

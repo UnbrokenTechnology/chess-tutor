@@ -135,9 +135,11 @@ pub(crate) fn draw(
                     cancel = true;
                 }
                 // One big, obvious Play button (chess.com idiom).
-                let play = egui::Button::new(
-                    egui::RichText::new("\u{25b6}  Play").size(18.0).strong(),
-                )
+                let play = egui::Button::new(crate::draw::icon::icon_label(
+                    egui_phosphor::regular::PLAY,
+                    "Play",
+                    18.0,
+                ))
                 .min_size(egui::vec2(140.0, 40.0));
                 if ui.add(play).clicked() {
                     start = true;

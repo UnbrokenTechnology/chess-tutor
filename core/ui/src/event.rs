@@ -109,22 +109,25 @@ pub enum Event {
     TakeBackDuringIntervention,
 
     // ---- Game Review
-    /// Open the game-review surface in the side panel — list of
-    /// significant moments derived from the assessment classifier.
-    /// Available any time there have been user moves; most useful
-    /// after a game ends.
+    /// Open the game-review **summary** as a modal popover (verdict
+    /// tallies, eval curve, ranked significant moments). Available while
+    /// reviewing; floats over the board so the step-through panel stays
+    /// underneath.
     OpenGameReview,
-    /// Close the game-review surface; return to the regular
-    /// retrospective.
+    /// Exit review mode entirely (back to the live/closed surface). This
+    /// is the action-bar "Close Review" intent, distinct from merely
+    /// dismissing the summary popover ([`Event::CloseReviewSummary`]).
     CloseGameReview,
+    /// Dismiss the summary popover without leaving review mode.
+    CloseReviewSummary,
     /// User clicked a moment in the game-review *summary*. Session
     /// enters step-through review mode at that history index (sets
-    /// `viewing_index`), so the move's deep breakdown shows in the
-    /// feedback zone.
+    /// `viewing_index`) and dismisses the summary popover, so the move's
+    /// deep breakdown shows in the feedback zone.
     JumpToReviewMoment(usize),
-    /// User pressed the big **Start Review** button on the summary
-    /// screen. Session enters step-through review mode at the first
-    /// move (history index 0).
+    /// Enter step-through review mode at the first move (history index 0).
+    /// This is the action-bar "Review" intent — review starts immediately,
+    /// with the summary available on demand via [`Event::OpenGameReview`].
     StartReview,
     /// Step-through review navigation (review-mode only). `Back` /
     /// `Forward` move one ply; `Restart` jumps to the first move;

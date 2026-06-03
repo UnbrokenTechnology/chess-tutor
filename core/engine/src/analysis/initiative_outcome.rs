@@ -134,11 +134,9 @@ fn inspect_opponent_reply(
         return (false, false, None);
     };
 
-    // SAN must be formatted from the pre-reply position (it scans
-    // for ambiguity, check, etc.) — clone so format_on doesn't
-    // mutate our scratch.
-    let mut for_san = post_user_pos.clone();
-    let san_string = san::format_on(&mut for_san, reply);
+    // SAN formatted from the pre-reply position (it scans for ambiguity,
+    // check, etc.). `format` is the non-mutating single-move formatter.
+    let san_string = san::format(post_user_pos, reply);
 
     let is_capture = post_user_pos.is_capture(reply);
 

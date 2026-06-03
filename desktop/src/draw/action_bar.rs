@@ -19,7 +19,17 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &ActionBarView, events: &mut Vec<Eve
     let size = egui::vec2(button_w, BUTTON_HEIGHT);
 
     ui.horizontal(|ui| {
-        if ui
+        // Left slot: Takeback during play; while reviewing, Takeback is
+        // meaningless (the game is over), so this becomes the Summary
+        // button that opens the review-summary popover.
+        if view.review_open {
+            if ui
+                .add(egui::Button::new(big_label("Summary")).min_size(size))
+                .clicked()
+            {
+                events.push(Event::OpenGameReview);
+            }
+        } else if ui
             .add_enabled(
                 view.can_takeback,
                 egui::Button::new(big_label("Takeback")).min_size(size),
@@ -44,7 +54,10 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &ActionBarView, events: &mut Vec<Eve
                 events.push(if view.review_open {
                     Event::CloseGameReview
                 } else {
-                    Event::OpenGameReview
+                    // "Review" enters step-through review immediately (no
+                    // summary gate); the summary is on-demand via the
+                    // left "Summary" button (OpenGameReview).
+                    Event::StartReview
                 });
             }
         } else {

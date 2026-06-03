@@ -23,14 +23,18 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>
             ui.colored_label(crate::draw::theme::OUTCOME, end);
         }
 
-        // Right-aligned cluster: ⚙ settings + ⤢ flip, plus the
+        // Right-aligned cluster: settings gear + flip, plus the
         // interim Review / Live and depth controls.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let gear = egui::Button::new(egui::RichText::new("\u{2699}").size(18.0));
+            let gear = egui::Button::new(
+                crate::draw::icon::icon(egui_phosphor::regular::GEAR).size(18.0),
+            );
             if ui.add(gear).on_hover_text("Settings").clicked() {
                 events.push(Event::OpenSettings);
             }
-            let flip = egui::Button::new(egui::RichText::new("\u{21c5}").size(18.0));
+            let flip = egui::Button::new(
+                crate::draw::icon::icon(egui_phosphor::regular::ARROWS_DOWN_UP).size(18.0),
+            );
             if ui.add(flip).on_hover_text("Flip board").clicked() {
                 events.push(Event::FlipBoard);
             }

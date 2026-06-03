@@ -52,13 +52,7 @@ pub(crate) fn format_attackers(attackers: &[PieceLocation]) -> String {
 /// formatted relative to the position it's played from.
 pub(crate) fn pv_to_san_through(root: &Position, pv: &[Move], through_ply: usize) -> Vec<String> {
     let limit = (through_ply + 1).min(pv.len());
-    let mut out = Vec::with_capacity(limit);
-    let mut scratch = root.clone();
-    for mv in &pv[..limit] {
-        out.push(san::format_on(&mut scratch, *mv));
-        scratch.do_move(*mv);
-    }
-    out
+    san::pv_to_san(root, &pv[..limit])
 }
 
 /// Format a shelter score (engine-cp midgame component) as
