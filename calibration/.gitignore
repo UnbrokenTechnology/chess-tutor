@@ -11,3 +11,4 @@ books/
 # reproducible from the scripts. Track summaries by hand if useful.
 runs/
 *.pgn
+.venv/
