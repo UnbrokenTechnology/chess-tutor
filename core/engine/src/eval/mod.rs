@@ -129,6 +129,31 @@ pub(crate) struct Evaluator<'a> {
     /// "which bishop's activity improved?" highlight). Entries are
     /// described by [`PerPieceMobilityRecord`].
     pub per_piece_mobility: Option<Vec<PerPieceMobilityRecord>>,
+
+    /// Opt-in per-piece reachable-outpost tracker. Same opt-in
+    /// discipline as [`Self::per_piece_mobility`]: `None` on the hot
+    /// search path, `Some(vec)` on analysis snapshots that want to draw
+    /// "this knight has a route to that outpost square." Each entry is
+    /// `(knight_square, color, outpost_square)`; one entry per reachable
+    /// outpost square (a knight may have several).
+    pub per_piece_reachable_outpost: Option<Vec<(Square, Color, Square)>>,
+
+    /// Opt-in per-piece minor-behind-pawn tracker. Same opt-in discipline
+    /// as [`Self::per_piece_mobility`]. Each entry is `(minor_square,
+    /// color, covering_pawn_square)` — the minor sitting directly behind a
+    /// pawn and the pawn shielding it — so the retrospective can highlight
+    /// *which* minor gained / lost pawn cover.
+    pub per_piece_minor_behind_pawn: Option<Vec<(Square, Color, Square)>>,
+
+    /// Opt-in king-ring attacker tracker. Same opt-in discipline as
+    /// [`Self::per_piece_mobility`]. Each entry is `(attacker_square,
+    /// threatened_king_color, attacked_ring_squares)` — a piece bearing on
+    /// the *enemy* king ring, paired with the colour of the king under fire
+    /// and the subset of that king's ring the piece actually attacks — so
+    /// the retrospective can draw an arrow from each attacker to the ring
+    /// square it bears on (the bare count doesn't say where the pressure is,
+    /// and a slider rarely attacks the king square itself).
+    pub per_piece_king_attacker: Option<Vec<(Square, Color, Bitboard)>>,
 }
 
 /// One entry of the [`Evaluator::per_piece_mobility`] tracker —
@@ -166,6 +191,9 @@ impl<'a> Evaluator<'a> {
             king_attackers_weight: [0; 2],
             king_attacks_count: [0; 2],
             per_piece_mobility: None,
+            per_piece_reachable_outpost: None,
+            per_piece_minor_behind_pawn: None,
+            per_piece_king_attacker: None,
         }
     }
 

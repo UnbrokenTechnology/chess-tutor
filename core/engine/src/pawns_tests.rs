@@ -1,6 +1,26 @@
 use super::*;
 
 
+    #[test]
+    fn king_shield_pawns_picks_frontmost_on_three_king_files() {
+        // White king castled to g1 behind f2/g2/h2; the shield is those
+        // three pawns (frontmost on the f/g/h files on White's side).
+        let pos = Position::from_fen("4k3/8/8/8/8/8/5PPP/6K1 w - - 0 1").unwrap();
+        let shield = king_shield_pawns(&pos, Color::White);
+        let squares: Vec<Square> = shield.into_iter().collect();
+        assert_eq!(squares, vec![Square::F2, Square::G2, Square::H2]);
+    }
+
+    #[test]
+    fn king_shield_pawns_advanced_pawn_is_frontmost_and_open_file_empty() {
+        // g-pawn pushed to g3 (still the frontmost g-file pawn), h-file
+        // open (no own pawn → no shield square there). King on g1 → files
+        // f, g, h; only f2 and g3 are covered.
+        let pos = Position::from_fen("4k3/8/8/8/8/6P1/5P2/6K1 w - - 0 1").unwrap();
+        let squares: Vec<Square> = king_shield_pawns(&pos, Color::White).into_iter().collect();
+        assert_eq!(squares, vec![Square::F2, Square::G3]);
+    }
+
     // ---- Starting position ------------------------------------------
 
     #[test]

@@ -52,7 +52,7 @@
 use crate::attacks::{king_attacks, pawn_attacks_from, square_distance};
 use crate::bitboard::{
     adjacent_files_bb, file_bb, forward_file_bb, forward_ranks_bb, passed_pawn_span,
-    pawn_attack_span, rank_bb, Bitboard,
+    pawn_attack_span, rank_bb, square_bb, Bitboard,
 };
 use crate::position::Position;
 use crate::types::{CastlingRights, Color, Direction, File, PieceType, Rank, Score, Square};
@@ -654,6 +654,34 @@ fn evaluate_shelter(pos: &Position, us: Color, king_sq: Square) -> (Score, Score
     }
 
     (shield, storm)
+}
+
+/// The friendly pawns that form the king's shelter — the frontmost (most
+/// advanced toward the enemy) own pawn on the king's file and each of its
+/// two neighbours, restricted to the king's own side of the board. These
+/// are exactly the pawns whose advancement [`SHELTER_STRENGTH`] scores in
+/// [`evaluate_shelter`], so a "your king is safer (pawn shield)" card can
+/// highlight the cover the move strengthened. A file with no own pawn on
+/// the king's side (an open shelter file) contributes nothing. The centre
+/// file is clamped to `b..g` so the three-file sweep never falls off the
+/// board, matching [`evaluate_shelter`].
+pub fn king_shield_pawns(pos: &Position, us: Color) -> Bitboard {
+    let them = !us;
+    let king_sq = pos.king_square(us);
+    let our_pawns = pos.pieces(PieceType::Pawn)
+        & pos.pieces_by_color(us)
+        & !forward_ranks_bb(them, king_sq);
+    let center_idx = king_sq.file().index().clamp(File::B.index(), File::G.index());
+    let mut shield = Bitboard::EMPTY;
+    for offset in -1i32..=1 {
+        let file = File::from_index((center_idx as i32 + offset) as u8)
+            .expect("clamped to b..g; ±1 stays in a..h");
+        let on_file = our_pawns & file_bb(file);
+        if on_file.any() {
+            shield |= square_bb(on_file.frontmost(them));
+        }
+    }
+    shield
 }
 
 /// Chebyshev distance from `king_sq` to the nearest own pawn, for use as

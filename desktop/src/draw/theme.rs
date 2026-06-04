@@ -92,8 +92,6 @@ pub const RETRO: Color32 = Color32::from_rgb(0x51, 0x39, 0x9a); // indigo
 pub const COACHING: Color32 = Color32::from_rgb(0x00, 0x83, 0x77); // teal
 /// Game outcome + game-review surfaces.
 pub const OUTCOME: Color32 = Color32::from_rgb(0xb8, 0x55, 0x00); // amber
-/// Review-mode engine-PV / move-comparison box.
-pub const REVIEW_PV: Color32 = Color32::from_rgb(0x37, 0x6e, 0x37); // calm green
 
 // === Eval bar ===
 pub const EVAL_WHITE: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);

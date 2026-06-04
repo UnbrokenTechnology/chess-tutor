@@ -28,7 +28,6 @@ impl Session {
             Event::OpenSettings => self.settings_open = true,
             Event::CloseSettings => self.settings_open = false,
             Event::JumpToLive => self.viewing_index = None,
-            Event::ChangeDepth(d) => self.depth = d,
             Event::SetRetrospectiveDepth(d) => self.retrospective_depth = d,
             Event::SetEvalBarVisible(on) => self.show_eval_bar = on,
             Event::SetSupport(on) => self.learning.set_support(on),

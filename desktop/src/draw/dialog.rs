@@ -1,12 +1,14 @@
 //! The Start / Options screen (PLAN build-order step 5): a proper
 //! pre-game setup modal grown out of the old bare new-game dialog.
-//! Picks the opponent / strength, exposes an Options expander
-//! (Eval Bar, Support, Auto-coach, Reveal-best-move, Move-feedback
-//! depth, search Depth) plus the board-overlay toggles, and commits it
-//! all with one big **Play** button. This screen is the *true home* of
-//! the learning + overlay config that build-order step 3 stripped off
-//! the play surface; the mid-game ⚙ gear (`draw::settings`) edits the
-//! same set live.
+//! Picks the opponent / strength, exposes an Options block (Eval Bar,
+//! Support, Auto-coach, Reveal-best-move, Move-feedback depth) plus the
+//! board-overlay toggles, and commits it all with one big **Play**
+//! button. **Bot search depth lives in the Opponent-strength section**,
+//! not Options — it only affects the opponent's move selection, so it's
+//! a strength lever, fixed per game (the mid-game ⚙ gear can't change
+//! it). This screen is the *true home* of the learning + overlay config
+//! that build-order step 3 stripped off the play surface; the mid-game
+//! ⚙ gear (`draw::settings`) edits the same live-changeable set.
 //!
 //! There is deliberately **no "Engine PV" toggle** — engine best-move
 //! lines are review-only (decision #9).
@@ -93,14 +95,20 @@ pub(crate) fn draw(
                 ui.label(
                     egui::RichText::new(
                         "Tune how the bot plays. Defaults give full-strength play; \
-                         raise the mistake knobs for a weaker, more punishable opponent.",
+                         lower the search depth or raise the mistake knobs for a \
+                         weaker, more punishable opponent.",
                     )
                     .small()
                     .weak(),
                 );
                 ui.add_space(6.0);
 
-                draw_noise_controls(ui, &mut form.noise);
+                // Search depth is the primary strength lever — it only
+                // affects the bot's move selection (not retrospective or
+                // game review), so it belongs here. Rendered in the same
+                // grid as the noise knobs so its label/slider columns line
+                // up with them.
+                draw_strength_controls(ui, &mut form.depth, &mut form.noise);
 
                 ui.add_space(8.0);
                 ui.collapsing("Eval mask (advanced) — categories the bot is blind to", |ui| {
@@ -172,13 +180,10 @@ fn draw_play_options(ui: &mut egui::Ui, form: &mut chess_tutor_ui::session::NewG
     options::learning_toggles(ui, &mut form.learning);
 
     ui.add_space(4.0);
-    options::depth_row(
-        ui,
-        &mut form.depth,
-        "Search depth",
-        "How deeply the bot searches when choosing its move. Higher is \
-         stronger and slower.",
-    );
+    // Bot search depth is NOT here — it only affects the opponent's move
+    // selection, so it lives in the Opponent-strength section. This is
+    // the move-feedback (retrospective/review) depth, a genuine generic
+    // analysis setting.
     options::depth_row(
         ui,
         &mut form.retrospective_depth,
@@ -188,13 +193,23 @@ fn draw_play_options(ui: &mut egui::Ui, form: &mut chess_tutor_ui::session::NewG
     );
 }
 
-/// Six bot-noise sliders. Free function so it can borrow `noise`
-/// without fighting the borrow checker over the whole form.
-fn draw_noise_controls(ui: &mut egui::Ui, noise: &mut NoiseProfile) {
-    egui::Grid::new("bot_noise_grid")
+/// The opponent-strength sliders: search depth + the six noise knobs,
+/// all in one 2-column grid so the label/slider columns align. Free
+/// function so it can borrow the two form fields disjointly without
+/// fighting the borrow checker over the whole form.
+fn draw_strength_controls(ui: &mut egui::Ui, depth: &mut u32, noise: &mut NoiseProfile) {
+    egui::Grid::new("bot_strength_grid")
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
+            ui.label("Search depth:").on_hover_text(
+                "How deeply the bot searches when choosing its move. Higher is \
+                 stronger and slower. Only affects the opponent — your move \
+                 feedback uses its own depth.",
+            );
+            ui.add(egui::Slider::new(depth, 1..=20));
+            ui.end_row();
+
             ui.label("Blunder chance:")
                 .on_hover_text(
                     "Per-move probability of a deliberate blunder — a move that \

@@ -5,7 +5,7 @@
 use super::{post_user_move, MoveAnalysis};
 use crate::eval::PiecesBreakdown;
 use crate::position::Position;
-use crate::types::{Color, PieceType};
+use crate::types::{Color, PieceType, Square};
 
 /// Pre/post snapshots of the 11-sub-term per-piece positional
 /// breakdown on both sides. "Post" is the position immediately after
@@ -75,6 +75,49 @@ fn snapshot_pieces_both(pos: &Position) -> (PiecesBreakdown, PiecesBreakdown) {
     let w = crate::eval::pieces::evaluate(&mut e, Color::White);
     let b = crate::eval::pieces::evaluate(&mut e, Color::Black);
     (w, b)
+}
+
+/// Each `side` knight that can hop to an outpost square, paired with the
+/// outpost it reaches — exactly the `(knight, outpost)` pairs the
+/// `reachable_outposts` eval term scored (it primes the opt-in tracker,
+/// so the result can't diverge from the score). The retrospective diffs
+/// pre vs post to draw the route the knight *gained* (or lost). One pair
+/// per reachable outpost; a knight eyeing two outposts yields two.
+pub fn reachable_outpost_squares(pos: &Position, side: Color) -> Vec<(Square, Square)> {
+    let mut e = crate::eval::Evaluator::new(pos);
+    e.per_piece_reachable_outpost = Some(Vec::new());
+    e.initialize(Color::White);
+    e.initialize(Color::Black);
+    let _ = crate::eval::pieces::evaluate(&mut e, Color::White);
+    let _ = crate::eval::pieces::evaluate(&mut e, Color::Black);
+    e.per_piece_reachable_outpost
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, c, _)| *c == side)
+        .map(|(knight, _, outpost)| (knight, outpost))
+        .collect()
+}
+
+/// Each `side` minor sitting directly behind a pawn, paired with the
+/// covering pawn — exactly the `(minor, pawn)` pairs the
+/// `minor_behind_pawn` eval term scored (it primes the opt-in tracker, so
+/// the result matches the score). The retrospective diffs pre vs post to
+/// highlight *which* minor gained / lost its pawn cover.
+pub fn minor_behind_pawn_squares(pos: &Position, side: Color) -> Vec<(Square, Square)> {
+    let mut e = crate::eval::Evaluator::new(pos);
+    e.per_piece_minor_behind_pawn = Some(Vec::new());
+    e.initialize(Color::White);
+    e.initialize(Color::Black);
+    let _ = crate::eval::pieces::evaluate(&mut e, Color::White);
+    let _ = crate::eval::pieces::evaluate(&mut e, Color::Black);
+    e.per_piece_minor_behind_pawn
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, c, _)| *c == side)
+        .map(|(minor, _, pawn)| (minor, pawn))
+        .collect()
 }
 
 /// Snapshot piece-positional terms at the pre-move position and at
@@ -184,6 +227,28 @@ mod tests {
             "1...e5 should not change white's bishop-pawn count, got pre={} post={}",
             outcome.theirs_bishop_pawn_count_pre,
             outcome.theirs_bishop_pawn_count_post,
+        );
+    }
+
+    #[test]
+    fn minor_behind_pawn_squares_finds_the_minor_and_its_pawn() {
+        // White bishop on e2 with a white pawn directly in front on e3.
+        let pos = Position::from_fen("4k3/8/8/8/8/4P3/4B3/4K3 w - - 0 1").unwrap();
+        let ours = minor_behind_pawn_squares(&pos, Color::White);
+        assert_eq!(ours, vec![(Square::E2, Square::E3)]);
+        // Black has no such minor.
+        assert!(minor_behind_pawn_squares(&pos, Color::Black).is_empty());
+    }
+
+    #[test]
+    fn reachable_outpost_squares_finds_knight_and_target() {
+        // White knight on e4, pawn on b4 guarding c5; Black has no pawns,
+        // so c5 is a clean outpost the knight can hop to.
+        let pos = Position::from_fen("4k3/8/8/8/1P2N3/8/8/4K3 w - - 0 1").unwrap();
+        let ours = reachable_outpost_squares(&pos, Color::White);
+        assert!(
+            ours.contains(&(Square::E4, Square::C5)),
+            "expected the e4 knight to have a route to the c5 outpost, got {ours:?}"
         );
     }
 

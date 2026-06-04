@@ -464,6 +464,58 @@
     }
 
     #[test]
+    fn forced_consequences_suppressed_when_a_clean_recapture_exists() {
+        // White's Ng4xh6 captures a Black knight on h6. Black can recapture
+        // gxh6 (doubling + isolating the h-pawns) OR Ng8xh6 (a clean,
+        // material-sound recapture that keeps the structure intact). Since
+        // a sound alternative avoids the concession, the card must NOT fire
+        // — we don't claim a weakness the opponent can simply sidestep.
+        let make = |fen: &str| {
+            let pre = Position::from_fen(fen).unwrap();
+            let user_move = Move::normal(Square::G4, Square::H6);
+            // Hand-built PV whose reply is the *structure-damaging*
+            // recapture (the search's tie-break could land on either).
+            let user = chess_tutor_engine::analysis::MoveAnalysis {
+                mv: user_move,
+                score: chess_tutor_engine::types::Value::ZERO,
+                depth: 1,
+                pv: vec![user_move, Move::normal(Square::G7, Square::H6)],
+                ply_traces: vec![chess_tutor_engine::eval::EvalTrace::zero()],
+                settled_ply: None,
+                pre_move_trace: chess_tutor_engine::eval::EvalTrace::zero(),
+                pre_score: chess_tutor_engine::types::Value::ZERO,
+                term_deltas: Vec::new(),
+            };
+            build_forced_consequences_items(
+                &user,
+                &pre,
+                Color::White,
+                chess_tutor_teaching::phrasing::Perspective::Player,
+            )
+        };
+
+        // g8 knight present → Ng8xh6 is a clean alternative → suppressed.
+        let with_alt = make("4k1n1/6pp/7n/8/6N1/8/8/4K3 w - - 0 1");
+        assert!(
+            !with_alt
+                .iter()
+                .any(|it| it.heading.contains("doubled") || it.heading.contains("isolated")),
+            "a clean alternative recapture must suppress the concession, got: {:?}",
+            with_alt.iter().map(|i| &i.heading).collect::<Vec<_>>()
+        );
+
+        // Remove the g8 knight → gxh6 is the only recapture → card fires.
+        let only_pawn = make("4k3/6pp/7n/8/6N1/8/8/4K3 w - - 0 1");
+        assert!(
+            only_pawn
+                .iter()
+                .any(|it| it.heading.contains("doubled") || it.heading.contains("isolated")),
+            "when gxh6 is the only recapture the concession must surface, got: {:?}",
+            only_pawn.iter().map(|i| &i.heading).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn forced_consequences_skips_when_pv_has_no_reply() {
         // A user move with no engine reply in the PV (terminal
         // position or single-ply analysis) must not produce any

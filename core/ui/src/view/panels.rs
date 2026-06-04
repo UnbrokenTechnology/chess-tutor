@@ -93,43 +93,48 @@ pub struct CoachingItem {
     pub demoted: bool,
 }
 
-/// Post-game review **summary** surface: the verdict tallies, an
-/// eval-over-time graph, and the ranked significant moments. Rendered as
-/// an on-demand popover over the step-through panel (not a gate to it).
-/// Clicking a moment row emits [`crate::event::Event::JumpToReviewMoment`]
-/// (enter review at that history index + dismiss the popover); dismissing
-/// emits [`crate::event::Event::CloseReviewSummary`].
+/// Post-game review **summary** surface: a White/Black verdict table and
+/// an eval-over-time graph. Rendered as an on-demand popover over the
+/// step-through panel (not a gate to it). Dismissing emits
+/// [`crate::event::Event::CloseReviewSummary`].
 ///
-/// No estimated-ELO field — deliberately skipped (PLAN step 6).
+/// No estimated-ELO field — deliberately skipped (PLAN step 6). The old
+/// ranked significant-moments list was dropped: the move list already
+/// flags those moves (red glyph + rating), so the list was redundant and
+/// cramped.
 pub struct GameReviewView {
     /// Optional one-line outcome label (e.g. "Checkmate — White wins.")
     /// when the game is over.
     pub game_outcome: Option<&'static str>,
-    /// Total user moves in the game (so the renderer can show "3 of
-    /// 28 moves flagged" context).
+    /// Total user moves in the game (used by the builder's "nothing to
+    /// review yet" guard).
     pub user_move_count: usize,
-    /// Per-verdict tally over the user's moves, in chess.com display
-    /// order (Best → Blunder). Built from the same material-aware
-    /// classifier that drives the in-game verdict.
-    pub tallies: Vec<ReviewTally>,
+    /// Per-verdict tally split by side, in chess.com display order
+    /// (Best → Blunder). Built from the same material-aware classifier
+    /// that drives the in-game verdict — applied to *both* colours now
+    /// that opponent moves are analysed retrospectively.
+    pub tallies: Vec<ReviewTallyRow>,
+    /// Which side the student played — drives the highlighted column in
+    /// the verdict table.
+    pub user_is_white: bool,
     /// Per-ply white-POV eval samples for the eval-over-time graph, in
     /// play order. One entry per analysed history ply; plies whose
     /// analysis hasn't arrived are omitted (the renderer draws a
     /// best-effort line through what's present).
     pub eval_series: Vec<EvalSample>,
-    /// Ranked list of significant moments. Empty when no user moves
-    /// crossed an intervention gate.
-    pub moments: Vec<GameReviewMoment>,
 }
 
-/// One verdict bucket in the game-review summary (e.g. "Best ×12").
-pub struct ReviewTally {
+/// One verdict row in the game-review summary table, with per-side
+/// counts (e.g. "Best — White 12, Black 9").
+pub struct ReviewTallyRow {
     /// Display tier — drives icon + colour.
     pub tier: ReviewVerdictTier,
     /// Human-readable label ("Best", "Good", "Inaccuracy", …).
     pub label: &'static str,
-    /// How many of the user's moves landed in this tier.
-    pub count: usize,
+    /// How many of White's moves landed in this tier.
+    pub white: usize,
+    /// How many of Black's moves landed in this tier.
+    pub black: usize,
 }
 
 /// Verdict tiers surfaced in the summary tally, mapped from the
@@ -180,36 +185,6 @@ pub struct EvalSample {
     /// White-POV evaluation in pawns, clamped to roughly ±10 so a
     /// single mate/blunder doesn't flatten the rest of the curve.
     pub pawns: f32,
-}
-
-/// One significant moment in the game review. Renderers paint these
-/// in order and emit [`crate::event::Event::JumpToReviewMoment`] when
-/// the user clicks one.
-pub struct GameReviewMoment {
-    /// Index into `Session::history()`.
-    pub history_index: usize,
-    /// Move pair number (1-indexed, like the move list).
-    pub move_pair_number: usize,
-    /// Which side made the move.
-    pub side_to_move_label: &'static str,
-    /// SAN of the user's move.
-    pub san: String,
-    /// What kind of moment this is — drives icon + colour theming.
-    pub kind: ReviewMomentKind,
-    /// Short label describing the moment ("Blunder — lost knight",
-    /// "Missed positional point: king safety").
-    pub headline: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReviewMomentKind {
-    /// Realized material loss — `BlunderInfo` fired.
-    Blunder,
-    /// Teaching moment — `TeachingInfo` fired. Drives a less alarming
-    /// colour than [`Self::Blunder`].
-    TeachingMoment,
-    /// Both gates fired on the same move.
-    BlunderWithLesson,
 }
 
 /// Mid-game prompt rendered while a [`crate::learning_mode::PendingIntervention`]
@@ -329,32 +304,6 @@ pub struct RetrospectivePanelView {
     /// [`crate::event::Event::ToggleRetrospectiveDetail`]. The
     /// "show all signals" checkbox only makes sense while expanded.
     pub expanded: bool,
-    /// Engine best-line PV in SAN — **review-mode only** (decision #9:
-    /// the engine's preferred continuation is an answer key, forbidden
-    /// during live play). `None` during live play and for the analysing
-    /// state; `Some` while stepping through review and the selected
-    /// move's analysis has arrived. The first element is the engine's
-    /// best move from the pre-move position; the renderer shows it as
-    /// the move-vs-move comparison line ("you played X; the engine's
-    /// line was …").
-    pub review_pv: Option<ReviewPvLine>,
-}
-
-/// The engine's best continuation for a reviewed move, in SAN, plus
-/// the user's move for the move-vs-move comparison header. Review-mode
-/// only (decision #9).
-#[derive(Clone, Debug)]
-pub struct ReviewPvLine {
-    /// SAN of the move the user actually played.
-    pub user_san: String,
-    /// SAN of the engine's preferred move (`pv[0]`). Equal to `user_san`
-    /// when the user found the best move (the renderer can say "you
-    /// found the best move" instead of comparing).
-    pub best_san: String,
-    /// The engine's full best line in SAN, starting from the pre-move
-    /// position (so `best_line[0] == best_san`). Capped to a handful of
-    /// plies by the builder so the line stays readable.
-    pub best_line: Vec<String>,
 }
 
 /// Persistent board overlays the user can toggle from the side panel.
@@ -507,17 +456,15 @@ pub enum RetrospectiveKind {
 /// snapshot of the current option values so the renderer paints each
 /// control with its true state; the renderer emits the matching
 /// per-option intent (`SetEvalBarVisible`, `SetSupport`, `SetAutoCoach`,
-/// `SetRetrospectiveDepth`, `ChangeDepth`, `SetRevealBestMoves`,
-/// `ToggleOverlay`) which edit the live session directly — no new game
-/// needed. `None` when the gear is closed (`build_settings_view`).
+/// `SetRetrospectiveDepth`, `SetRevealBestMoves`, `ToggleOverlay`) which
+/// edit the live session directly — no new game needed. `None` when the
+/// gear is closed (`build_settings_view`).
 ///
-/// Opponent strength (bot noise / eval-mask) is intentionally *not*
-/// here: changing the opponent mid-game requires a new game, so it
-/// lives only on the Start screen (PLAN open question — "⚙ mid-game
-/// settings scope").
+/// Opponent strength (bot search depth, noise, eval-mask) is
+/// intentionally *not* here: changing the opponent mid-game requires a
+/// new game, so it lives only on the Start screen (PLAN open question —
+/// "⚙ mid-game settings scope").
 pub struct SettingsView {
-    /// Bot play (search) depth.
-    pub depth: u32,
     /// Move-feedback (retrospective) search depth.
     pub retrospective_depth: u32,
     /// Whether the eval bar is currently shown.

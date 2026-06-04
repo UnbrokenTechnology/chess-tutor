@@ -8,7 +8,7 @@ use chess_tutor_engine::analysis::{
 };
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
-use chess_tutor_engine::types::Color;
+use chess_tutor_engine::types::{Color, Value};
 
 use chess_tutor_teaching::claim::{verdict_claim, Claim};
 use chess_tutor_teaching::phrasing::{
@@ -24,6 +24,12 @@ use super::helpers::*;
 // ---------------------------------------------------------------------
 // Headline
 // ---------------------------------------------------------------------
+
+/// Below this score gap (in pawns) the engine's "preferred" move is
+/// treated as interchangeable with the user's, so the reveal is
+/// suppressed — no "engine preferred X [Δ +0.00]" noise after an
+/// equally-good move.
+const NEGLIGIBLE_GAP_PAWNS: f32 = 0.05;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_headline(
@@ -72,11 +78,18 @@ pub(super) fn build_headline(
     // skip them — telling the student the answer trains memorisation,
     // not the understanding the per-category cards below are designed
     // to build.
+    //
+    // Also suppressed when the engine's pick scores within a rounding
+    // hair of the user's move: "engine preferred d4 (+0.38) [Δ +0.00]"
+    // after a perfectly good 1.e4 is noise — at that gap the moves are
+    // interchangeable, so we treat the user's move as best and show no
+    // alternative.
     let mut best_san = None;
     let mut best_score = None;
     let mut gap = None;
     let mut best_move_annotation = None;
-    if reveal_best_moves && best.mv != user.mv {
+    let gap_pawns = (user.score.0 - best.score.0).abs() as f32 / Value::PAWN_EG.0 as f32;
+    if reveal_best_moves && best.mv != user.mv && gap_pawns > NEGLIGIBLE_GAP_PAWNS {
         let san = san::format(pre_move_pos, best.mv);
         best_score = Some(format_score_pawns(best.score));
         gap = Some(format_delta_pawns(user.score.0 - best.score.0));

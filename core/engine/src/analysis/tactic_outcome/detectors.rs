@@ -300,6 +300,17 @@ fn detect_removing_defender(
         .into_iter()
         .map(|h| h.location.square)
         .filter(|&y| guarded_by_x.contains(y) && !pre_hanging.contains(&y))
+        // The freed piece is the *prize* — it must be worth winning. A freed
+        // pawn isn't the lesson, and (the bug this guard fixes) capturing a
+        // bigger defender to "free" a pawn is really just winning the
+        // defender — a HangingCapture / favourable trade, not this pattern.
+        // E.g. `cxb8=R+` grabs a rook and leaves only the b7 *pawn* loose:
+        // that's winning the rook, not "removing the defender of b7." Mirrors
+        // the latent scan's `x_value >= 3` (≥ a minor) floor.
+        .filter(|&y| {
+            post.piece_on(y)
+                .is_some_and(|p| p.kind().classical_points() >= 3)
+        })
         .collect();
 
     if freed.is_empty() {

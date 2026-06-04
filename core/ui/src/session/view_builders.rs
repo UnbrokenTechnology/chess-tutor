@@ -7,62 +7,13 @@ use super::*;
 use super::queries::entry_eval_white_pov;
 use chess_tutor_engine::types::{Color, Move, Square, Value};
 
-use crate::learning_mode::{
-    build_intervention_panel, gating_config_for,
-};
+use crate::learning_mode::build_intervention_panel;
 use crate::view::{
     ActionBarView, BoardView, EvalBarView, EvalSample, HintPopoverView, MoveListCell, MoveListRow,
     MoveListView, NewGameDialogView, PromotionPickerView, RetrospectiveBody, RetrospectiveKind,
-    RetrospectivePanelView, ReviewModeView, ReviewPvLine, ReviewTally, ReviewVerdictTier,
-    SidePanelBody, SidePanelView, TopBarView,
+    RetrospectivePanelView, ReviewModeView, ReviewTallyRow, ReviewVerdictTier, SidePanelBody,
+    SidePanelView, TopBarView,
 };
-
-/// Build the short headline shown for a moment in the game review
-/// list. Mirrors the in-game prompt phrasing without ever naming the
-/// engine's preferred move.
-pub(crate) fn review_headline_for(
-    assessment: &chess_tutor_engine::analysis::MoveAssessment,
-) -> String {
-    if let Some(b) = assessment.blunder {
-        let pawns = (b.material_loss_cp as f32) / 100.0;
-        return match b.lost_piece_square {
-            Some(sq) => format!(
-                "Material at risk: piece on {} ({:.1} pawns)",
-                sq.to_algebraic(),
-                pawns
-            ),
-            None => format!("Material at risk: {:.1} pawns", pawns),
-        };
-    }
-    if let Some(a) = assessment.allowed.as_ref() {
-        // ALLOWED-not-MISSED: the row leads with what the move allowed,
-        // not a missed point. Pattern name + swing, no squares.
-        return format!(
-            "You allowed {} ({:.1} pawns swing)",
-            crate::learning_mode::allowed_pattern_phrase_pub(a.walked_into.pattern),
-            (a.conceded_cp as f32) / 100.0,
-        );
-    }
-    if let Some(t) = assessment.teaching {
-        let (area_a, _) = crate::learning_mode::term_prompt_copy(t.dominant.term);
-        return match t.secondary {
-            None => format!(
-                "Missed point: {} ({:.1} pawns concentrated)",
-                area_a,
-                (t.dominant.severity_cp as f32) / 100.0
-            ),
-            Some(secondary) => {
-                let (area_b, _) = crate::learning_mode::term_prompt_copy(secondary.term);
-                let combined = ((t.dominant.severity_cp + secondary.severity_cp) as f32) / 100.0;
-                format!(
-                    "Missed points: {} and {} ({:.1} pawns split)",
-                    area_a, area_b, combined
-                )
-            }
-        };
-    }
-    "Significant moment".to_string()
-}
 
 /// Map an engine [`MoveVerdict`] to the summary tally tier. `Best` and
 /// `BestAvailable` both fold into `Best` (both are "as good as it
@@ -141,32 +92,30 @@ fn eval_bar_fill_and_label(score: Option<Value>) -> (f32, String) {
     }
 }
 
+/// Whether a board annotation's square(s) intersect `keys` — used by the
+/// review-mode auto-render to decide if a card's spatial story bears on
+/// the engine's best move or the move played.
+fn annotation_touches(ann: &crate::view::BoardAnnotation, keys: &[Square]) -> bool {
+    use crate::view::BoardAnnotation as A;
+    match ann {
+        A::Arrow { from, to, .. } => keys.contains(from) || keys.contains(to),
+        A::SquareHighlight { square, .. } => keys.contains(square),
+    }
+}
+
 impl Session {
-    /// Walk every user move's cached retrospective analysis through
-    /// the engine classifier and return the ranked list of moments
-    /// worth reviewing. Returns `None` when the game has no user
-    /// moves whose retrospective has arrived yet.
-    ///
-    /// Reuses [`crate::learning_mode::gating_config_for`] with the
-    /// user's current `mistake_handling` preference so the same gate
-    /// drives both the in-game prompt and the post-game review —
-    /// switching to "AllMistakes" before opening review surfaces
-    /// every non-best move, switching back tightens the list.
-    /// Material-aware [`MoveVerdict`] for the user move at history index
-    /// `idx`, or `None` when it isn't a user move or its retrospective
-    /// hasn't arrived. Reuses the same material-aware classifier path the
-    /// in-game verdict uses, so the summary tally and the inline review
-    /// rating agree with the live feedback.
-    pub(crate) fn review_verdict_for(
+    /// Material-aware [`MoveVerdict`] for *any* analysed move at history
+    /// index `idx` (either colour), or `None` when its retrospective
+    /// hasn't arrived. Opponent moves are analysed retrospectively too,
+    /// so this grades them with the same classifier the student's moves
+    /// use — the summary table reads it for the Black/White split.
+    pub(crate) fn move_verdict_for(
         &self,
         idx: usize,
     ) -> Option<chess_tutor_engine::analysis::MoveVerdict> {
         use chess_tutor_engine::analysis::compute_material_outcome;
 
         let entry = self.history.get(idx)?;
-        if !self.is_user_move(entry) {
-            return None;
-        }
         let retro = entry.retrospective.as_ref()?;
         let best = retro.analyses.first()?;
         let user = retro.analyses.iter().find(|a| a.mv == retro.user_move)?;
@@ -177,25 +126,31 @@ impl Session {
         Some(user.classify_with_material(best.score, user_net, best_net))
     }
 
-    /// Per-verdict tally over the user's analysed moves, in display
-    /// order ([`ReviewVerdictTier::ALL`]).
-    fn review_tallies(&self) -> Vec<ReviewTally> {
-        let mut counts = [0usize; ReviewVerdictTier::ALL.len()];
+    /// Per-verdict tally split by side, in display order
+    /// ([`ReviewVerdictTier::ALL`]). Counts every analysed move on each
+    /// colour — the summary renders it as a White/Black table.
+    fn review_tallies(&self) -> Vec<ReviewTallyRow> {
+        let mut white = [0usize; ReviewVerdictTier::ALL.len()];
+        let mut black = [0usize; ReviewVerdictTier::ALL.len()];
         for idx in 0..self.history.len() {
-            if let Some(v) = self.review_verdict_for(idx) {
+            if let Some(v) = self.move_verdict_for(idx) {
                 let tier = verdict_tier(v);
                 if let Some(slot) = ReviewVerdictTier::ALL.iter().position(|t| *t == tier) {
-                    counts[slot] += 1;
+                    match self.history[idx].moved_by {
+                        Color::White => white[slot] += 1,
+                        Color::Black => black[slot] += 1,
+                    }
                 }
             }
         }
         ReviewVerdictTier::ALL
             .iter()
-            .zip(counts)
-            .map(|(tier, count)| ReviewTally {
+            .enumerate()
+            .map(|(slot, tier)| ReviewTallyRow {
                 tier: *tier,
                 label: tier.label(),
-                count,
+                white: white[slot],
+                black: black[slot],
             })
             .collect()
     }
@@ -219,59 +174,13 @@ impl Session {
     }
 
     pub fn build_game_review(&self) -> Option<crate::view::GameReviewView> {
-        use crate::view::{GameReviewMoment, GameReviewView, ReviewMomentKind};
+        use crate::view::GameReviewView;
 
-        let mut moments: Vec<GameReviewMoment> = Vec::new();
-        let mut user_move_count: usize = 0;
-        let config = gating_config_for(self.learning.mistake_handling);
-
-        for (idx, entry) in self.history.iter().enumerate() {
-            if !self.is_user_move(entry) {
-                continue;
-            }
-            user_move_count += 1;
-            let Some(retro) = entry.retrospective.as_ref() else {
-                // Analysis hasn't arrived yet — skip silently. Most
-                // common case is the very-latest move while the worker
-                // is still computing.
-                continue;
-            };
-            let pre = self.pre_move_position(idx);
-            let prior_move = self.prior_move_for(idx);
-            let assessment = chess_tutor_engine::analysis::classify_user_move(
-                &pre,
-                &retro.analyses,
-                retro.user_move,
-                &config,
-                prior_move,
-            );
-            // ALLOWED collapses into the same review row as a teaching
-            // moment (both are "your move had a teachable cost"); the
-            // headline below distinguishes them.
-            let teaching_like = assessment.teaching.is_some() || assessment.allowed.is_some();
-            let kind = match (assessment.blunder.is_some(), teaching_like) {
-                (true, true) => ReviewMomentKind::BlunderWithLesson,
-                (true, false) => ReviewMomentKind::Blunder,
-                (false, true) => ReviewMomentKind::TeachingMoment,
-                (false, false) => continue,
-            };
-            let headline = review_headline_for(&assessment);
-            let move_pair_number = idx / 2 + 1;
-            let side_to_move_label = if entry.moved_by == Color::White {
-                "White"
-            } else {
-                "Black"
-            };
-            moments.push(GameReviewMoment {
-                history_index: idx,
-                move_pair_number,
-                side_to_move_label,
-                san: entry.san.clone(),
-                kind,
-                headline,
-            });
-        }
-
+        let user_move_count = self
+            .history
+            .iter()
+            .filter(|e| self.is_user_move(e))
+            .count();
         if user_move_count == 0 {
             return None;
         }
@@ -279,8 +188,8 @@ impl Session {
             game_outcome: self.game_outcome(),
             user_move_count,
             tallies: self.review_tallies(),
+            user_is_white: self.user_color() == Color::White,
             eval_series: self.review_eval_series(),
-            moments,
         })
     }
 
@@ -295,7 +204,6 @@ impl Session {
     pub fn build_top_bar_view(&self) -> TopBarView {
         TopBarView {
             viewing_live: self.is_viewing_live(),
-            depth: self.depth,
             engine_thinking: self.engine_thinking,
             game_outcome: self.game_outcome(),
         }
@@ -399,7 +307,7 @@ impl Session {
             &result.analyses,
             result.user_move,
             self.show_all_signals,
-            self.learning.reveal_best_moves,
+            self.reveal_best_moves_effective(),
             prior_move,
             perspective,
         );
@@ -409,6 +317,28 @@ impl Session {
         if let Some((selected_entry, item_idx)) = self.selected_retrospective {
             if selected_entry == entry_idx {
                 if let Some(item) = vm.items.get(item_idx) {
+                    out.extend(item.annotations.iter().copied());
+                }
+            }
+        }
+        // Review-mode auto-render: paint, without a click, every card whose
+        // spatial story bears on the engine's best move or the move played
+        // — "only the important stuff" (the hanging piece *if* the best move
+        // captures it, the fork you played, …). A positional card on
+        // squares unrelated to either move stays click-only, so the board
+        // doesn't drown in arrows. Post-game an answer key is appropriate;
+        // during live play we never auto-reveal (decision #9), so this is
+        // gated to review.
+        if self.review_phase == ReviewPhase::Reviewing {
+            let mut keys: Vec<Square> = Vec::new();
+            if let Some(best) = result.analyses.first() {
+                keys.push(best.mv.from());
+                keys.push(best.mv.to());
+            }
+            keys.push(result.user_move.from());
+            keys.push(result.user_move.to());
+            for item in &vm.items {
+                if item.annotations.iter().any(|a| annotation_touches(a, &keys)) {
                     out.extend(item.annotations.iter().copied());
                 }
             }
@@ -464,10 +394,10 @@ impl Session {
         }
     }
 
-    /// The game-review summary popover (verdict tallies, eval curve,
-    /// ranked significant moments), or `None` when it's dismissed or there
-    /// is nothing to review. Floats over the step-through panel rather
-    /// than gating entry to it.
+    /// The game-review summary popover (White/Black verdict table + eval
+    /// curve), or `None` when it's dismissed or there is nothing to
+    /// review. Floats over the step-through panel rather than gating entry
+    /// to it.
     pub fn build_review_summary_view(&self) -> Option<crate::view::GameReviewView> {
         if !self.review_summary_open {
             return None;
@@ -515,10 +445,11 @@ impl Session {
         // them while stepping through review (decision #9). Computing a
         // material-aware verdict per row is cheap (it reads cached
         // analyses) but pointless during live play, where ratings would
-        // spoil.
+        // spoil. Both sides are rated: recognising the opponent's blunders
+        // is as instructive as recognising your own.
         let rate = self.review_phase == ReviewPhase::Reviewing;
         let rating_at = |idx: usize| -> Option<ReviewVerdictTier> {
-            rate.then(|| self.review_verdict_for(idx).map(verdict_tier))
+            rate.then(|| self.move_verdict_for(idx).map(verdict_tier))
                 .flatten()
         };
         let rows = (0..history_len.div_ceil(2))
@@ -547,6 +478,16 @@ impl Session {
         MoveListView { rows }
     }
 
+    /// Whether the retrospective should reveal the engine's preferred
+    /// move (SAN chip + board arrow). The student's `reveal_best_moves`
+    /// preference enables it for live after-move feedback; **review mode**
+    /// also enables it unconditionally — post-game it's an answer key, not
+    /// a mid-game spoiler (the chess.com-familiar idiom), so showing the
+    /// alternative helps the student see what they missed faster.
+    pub(crate) fn reveal_best_moves_effective(&self) -> bool {
+        self.learning.reveal_best_moves || self.review_phase == ReviewPhase::Reviewing
+    }
+
     pub(crate) fn build_retrospective_view(&self) -> RetrospectivePanelView {
         let game_outcome = self.game_outcome();
         let Some((entry_index, entry)) = self.panel_entry_with_index() else {
@@ -555,7 +496,6 @@ impl Session {
                 body: RetrospectiveBody::NoMoves,
                 show_all_signals: self.show_all_signals,
                 expanded: self.retro_expanded,
-                review_pv: None,
             };
         };
         let viewing_back_san = (!self.is_viewing_live()).then(|| entry.san.clone());
@@ -578,7 +518,7 @@ impl Session {
                     &result.analyses,
                     result.user_move,
                     self.show_all_signals,
-                    self.learning.reveal_best_moves,
+                    self.reveal_best_moves_effective(),
                     prior_move,
                     perspective,
                 );
@@ -594,11 +534,6 @@ impl Session {
             }
             None => RetrospectiveKind::Analyzing,
         };
-        // Engine PV / move-vs-move comparison is review-mode only
-        // (decision #9): an answer key is forbidden during live play.
-        let review_pv = (self.review_phase == ReviewPhase::Reviewing)
-            .then(|| self.build_review_pv_line(entry_index, entry))
-            .flatten();
         RetrospectivePanelView {
             game_outcome,
             body: RetrospectiveBody::Entry {
@@ -607,44 +542,7 @@ impl Session {
             },
             show_all_signals: self.show_all_signals,
             expanded: self.retro_expanded,
-            review_pv,
         }
-    }
-
-    /// Build the engine best-line PV (in SAN) for the reviewed move at
-    /// history index `idx`, for the move-vs-move comparison surface.
-    /// `None` when the move isn't a user move, its analysis hasn't
-    /// arrived, or the engine has no best line. Review-mode only — the
-    /// caller gates on [`ReviewPhase::Reviewing`].
-    fn build_review_pv_line(
-        &self,
-        idx: usize,
-        entry: &HistoryEntry,
-    ) -> Option<ReviewPvLine> {
-        // Only the user's own moves get a "you vs the engine" comparison;
-        // grading the engine's own moves against itself is meaningless.
-        if !self.is_user_move(entry) {
-            return None;
-        }
-        let retro = entry.retrospective.as_ref()?;
-        let best = retro.analyses.first()?;
-        if best.pv.is_empty() {
-            return None;
-        }
-        let user = retro.analyses.iter().find(|a| a.mv == retro.user_move)?;
-        let pre = self.pre_move_position(idx);
-        let user_san = chess_tutor_engine::san::format(&pre, user.mv);
-        // Cap the displayed line so it stays a readable comparison, not a
-        // full deep dump.
-        const MAX_PV_PLIES: usize = 6;
-        let take = best.pv.len().min(MAX_PV_PLIES);
-        let best_line = chess_tutor_engine::san::pv_to_san(&pre, &best.pv[..take]);
-        let best_san = best_line.first().cloned()?;
-        Some(ReviewPvLine {
-            user_san,
-            best_san,
-            best_line,
-        })
     }
 
     pub fn build_new_game_dialog_view(&mut self) -> Option<NewGameDialogView<'_>> {
@@ -662,7 +560,6 @@ impl Session {
             return None;
         }
         Some(crate::view::SettingsView {
-            depth: self.depth,
             retrospective_depth: self.retrospective_depth,
             show_eval_bar: self.show_eval_bar,
             learning: self.learning,

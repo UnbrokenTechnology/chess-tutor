@@ -13,7 +13,10 @@
 //! Split out of `retrospective_view`; the orchestrator
 //! ([`super::build_retrospective_view`]) assembles the cards.
 
-use chess_tutor_engine::analysis::PiecesPositionalOutcome;
+use chess_tutor_engine::analysis::{
+    minor_behind_pawn_squares, reachable_outpost_squares, PiecesPositionalOutcome,
+};
+use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, PieceType};
 
 use chess_tutor_teaching::claim::{
@@ -21,7 +24,9 @@ use chess_tutor_teaching::claim::{
 };
 use chess_tutor_teaching::phrasing::{phrase, Locale, Perspective, PhrasingContext, Verbosity};
 
-use crate::view::{RetrospectiveCategory, RetrospectiveItem, Sentiment};
+use crate::view::{
+    AnnotationKind, BoardAnnotation, RetrospectiveCategory, RetrospectiveItem, Sentiment,
+};
 
 /// Capture-aware suppression flags built from the realized capture events,
 /// so the per-claim loop can drop cards whose term delta is an artifact
@@ -105,11 +110,18 @@ impl CaptureSuppression {
 
 /// Build the piece-placement cards for one analysed move. `perspective`
 /// selects "you" vs "they" and drives the student-POV sentiment colour.
+///
+/// `pre`/`post` are the positions before and immediately after the user's
+/// move; the outpost-route and minor-behind-pawn cards diff the per-piece
+/// squares between them to highlight *which* piece changed (e.g. which
+/// knight gained a route, which minor gained / lost pawn cover).
 pub(super) fn build_pieces_positional_items(
     outcome: &PiecesPositionalOutcome,
-    _root_stm: Color,
+    root_stm: Color,
     kp_supp: CaptureSuppression,
     perspective: Perspective,
+    pre: &Position,
+    post: &Position,
 ) -> Vec<RetrospectiveItem> {
     let ctx = PhrasingContext {
         perspective,
@@ -133,9 +145,129 @@ pub(super) fn build_pieces_positional_items(
             if kp_supp.suppresses(*side, *category, worsened) {
                 return None;
             }
-            Some(pieces_item(claim, &ctx))
+            let mut item = pieces_item(claim, &ctx);
+            item.annotations = placement_annotations(
+                *side,
+                *category,
+                *direction,
+                root_stm,
+                item.sentiment,
+                pre,
+                post,
+            );
+            Some(item)
         })
         .collect()
+}
+
+/// Spatial annotations for the two placement cards that carry a concrete
+/// piece + target: the reachable-outpost route and the minor-behind-pawn
+/// cover. Other categories stay text-only (no square data to point at
+/// yet). Highlights/arrows are coloured by the card's student-POV
+/// sentiment (`GoodPiece` green / `BadPiece` orange) so a gain reads
+/// green and a concession orange regardless of which side it lands on.
+fn placement_annotations(
+    side: PlacementSide,
+    category: PlacementCategory,
+    direction: StructureDirection,
+    root_stm: Color,
+    sentiment: Sentiment,
+    pre: &Position,
+    post: &Position,
+) -> Vec<BoardAnnotation> {
+    let side_color = if side == PlacementSide::Mover {
+        root_stm
+    } else {
+        !root_stm
+    };
+    let kind = if sentiment == Sentiment::Positive {
+        AnnotationKind::GoodPiece
+    } else {
+        AnnotationKind::BadPiece
+    };
+    let improved = direction == StructureDirection::Improved;
+    match category {
+        PlacementCategory::ReachableOutposts => {
+            outpost_route_annotations(side_color, improved, kind, pre, post)
+        }
+        PlacementCategory::MinorBehindPawn => {
+            minor_cover_annotations(side_color, improved, kind, pre, post)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Draw the route(s) a knight *gained* to an outpost (knight + arrow +
+/// outpost square), diffing pre vs post so only the newly-available route
+/// is shown. On a closed route (worsened) just flag the knight that lost
+/// it, if it's still on the board.
+fn outpost_route_annotations(
+    side_color: Color,
+    improved: bool,
+    kind: AnnotationKind,
+    pre: &Position,
+    post: &Position,
+) -> Vec<BoardAnnotation> {
+    let pre_set = reachable_outpost_squares(pre, side_color);
+    let post_set = reachable_outpost_squares(post, side_color);
+    let mut out = Vec::new();
+    if improved {
+        for (knight, outpost) in &post_set {
+            if !pre_set.iter().any(|(k, _)| k == knight) {
+                out.push(BoardAnnotation::SquareHighlight { square: *knight, kind });
+                out.push(BoardAnnotation::Arrow {
+                    from: *knight,
+                    to: *outpost,
+                    kind,
+                });
+                out.push(BoardAnnotation::SquareHighlight { square: *outpost, kind });
+            }
+        }
+    } else {
+        for (knight, _) in &pre_set {
+            if !post_set.iter().any(|(k, _)| k == knight) && occupied_by(post, *knight, side_color) {
+                out.push(BoardAnnotation::SquareHighlight { square: *knight, kind });
+            }
+        }
+    }
+    out
+}
+
+/// Highlight the minor that gained / lost pawn cover, diffing pre vs post.
+/// On a gain, also flag the covering pawn (it's on the post board); on a
+/// loss the pawn is gone, so only the now-uncovered minor is flagged (and
+/// only if it's still on the board — a captured minor isn't an exposure).
+fn minor_cover_annotations(
+    side_color: Color,
+    improved: bool,
+    kind: AnnotationKind,
+    pre: &Position,
+    post: &Position,
+) -> Vec<BoardAnnotation> {
+    let pre_set = minor_behind_pawn_squares(pre, side_color);
+    let post_set = minor_behind_pawn_squares(post, side_color);
+    let mut out = Vec::new();
+    if improved {
+        for (minor, pawn) in &post_set {
+            if !pre_set.iter().any(|(m, _)| m == minor) {
+                out.push(BoardAnnotation::SquareHighlight { square: *minor, kind });
+                out.push(BoardAnnotation::SquareHighlight { square: *pawn, kind });
+            }
+        }
+    } else {
+        for (minor, _) in &pre_set {
+            if !post_set.iter().any(|(m, _)| m == minor) && occupied_by(post, *minor, side_color) {
+                out.push(BoardAnnotation::SquareHighlight { square: *minor, kind });
+            }
+        }
+    }
+    out
+}
+
+/// Whether `sq` holds a piece of `color` in `pos` — guards a "lost"
+/// highlight from pointing at an empty (or recaptured) square.
+fn occupied_by(pos: &Position, sq: chess_tutor_engine::types::Square, color: Color) -> bool {
+    pos.piece_on(sq).is_some_and(|p| p.color() == color)
 }
 
 /// Turn one [`Claim::PiecePlacement`] into a card — prose from the
@@ -204,7 +336,17 @@ fn strip_trailing_shift(detail: &str) -> String {
 mod tests {
     use super::*;
     use chess_tutor_engine::eval::PiecesBreakdown;
+    use chess_tutor_engine::position::Position;
     use chess_tutor_engine::types::Score;
+
+    /// Positions for the annotation diff. These tests hand-build the
+    /// outcome (it won't match a real board), so they pass startpos for
+    /// both pre/post; the diff finds no change and emits no annotations,
+    /// which is fine — they assert on heading / sentiment / chip, not
+    /// annotations.
+    fn dummy_pos() -> Position {
+        Position::startpos()
+    }
 
     fn pib_zero() -> PiecesBreakdown {
         PiecesBreakdown {
@@ -247,7 +389,7 @@ mod tests {
         let mut post = pib_zero();
         post.outposts = Score::new(30, 0);
         let o = outcome(pib_zero(), post, pib_zero(), pib_zero());
-        let cards = build_pieces_positional_items(&o, Color::White, CaptureSuppression::default(), Perspective::Player);
+        let cards = build_pieces_positional_items(&o, Color::White, CaptureSuppression::default(), Perspective::Player, &dummy_pos(), &dummy_pos());
         let card = cards
             .iter()
             .find(|c| c.heading == "Your knight reached an outpost")
@@ -264,7 +406,7 @@ mod tests {
         let mut their_pre = pib_zero();
         their_pre.outposts = Score::new(30, 0);
         let o = outcome(pib_zero(), pib_zero(), their_pre, pib_zero());
-        let cards = build_pieces_positional_items(&o, Color::White, CaptureSuppression::default(), Perspective::Player);
+        let cards = build_pieces_positional_items(&o, Color::White, CaptureSuppression::default(), Perspective::Player, &dummy_pos(), &dummy_pos());
         let card = cards
             .iter()
             .find(|c| c.heading == "You denied the opponent's knight an outpost")
@@ -285,7 +427,7 @@ mod tests {
             ours_rook_captured: true,
             ..CaptureSuppression::default()
         };
-        let cards = build_pieces_positional_items(&o, Color::White, supp, Perspective::Player);
+        let cards = build_pieces_positional_items(&o, Color::White, supp, Perspective::Player, &dummy_pos(), &dummy_pos());
         assert!(
             !cards.iter().any(|c| c.heading.contains("rook escaped")),
             "captured rook must not read as an escape"
@@ -297,7 +439,7 @@ mod tests {
         let mut post = pib_zero();
         post.outposts = Score::new(10, 0);
         let o = outcome(pib_zero(), post, pib_zero(), pib_zero());
-        assert!(build_pieces_positional_items(&o, Color::White, CaptureSuppression::default(), Perspective::Player)
+        assert!(build_pieces_positional_items(&o, Color::White, CaptureSuppression::default(), Perspective::Player, &dummy_pos(), &dummy_pos())
             .is_empty());
     }
 }

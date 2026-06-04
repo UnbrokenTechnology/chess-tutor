@@ -314,10 +314,23 @@ fn annotation_square_colors(
             Some(egui::Color32::from_rgba_unmultiplied(0xff, 0xeb, 0x3b, 0x55)),
             None,
         ),
+        // A ring square the move freed from attack — green fill, like
+        // the good-piece highlight but a touch more saturated.
+        AnnotationKind::FreedSquare => (
+            Some(egui::Color32::from_rgba_unmultiplied(0x30, 0xc0, 0x50, 0x60)),
+            Some(egui::Color32::from_rgb(0x20, 0x80, 0x38)),
+        ),
+        // A friendly shield pawn — blue fill, the "your cover" colour.
+        AnnotationKind::ShieldPawn => (
+            Some(egui::Color32::from_rgba_unmultiplied(0x30, 0x70, 0xd0, 0x60)),
+            Some(egui::Color32::from_rgb(0x20, 0x50, 0xa0)),
+        ),
         // Arrow-only kinds — square fallback is just a subtle tint.
         AnnotationKind::BestMove
         | AnnotationKind::Attacker
         | AnnotationKind::Defender
+        | AnnotationKind::NeutralizedAttacker
+        | AnnotationKind::MitigatedAttacker
         | AnnotationKind::TriggerMove => (None, None),
     }
 }
@@ -328,6 +341,25 @@ fn arrow_color(kind: AnnotationKind) -> egui::Color32 {
         AnnotationKind::Capture => egui::Color32::from_rgba_unmultiplied(0xff, 0x60, 0x20, 0xd0),
         AnnotationKind::Attacker => egui::Color32::from_rgba_unmultiplied(0xff, 0x40, 0x40, 0xd0),
         AnnotationKind::Defender => egui::Color32::from_rgba_unmultiplied(0x40, 0xa0, 0x60, 0xd0),
+        // Bright green — distinct from the muted defender/good-piece
+        // greens; reads as "this threat is gone."
+        AnnotationKind::NeutralizedAttacker => {
+            egui::Color32::from_rgba_unmultiplied(0x30, 0xc0, 0x50, 0xd0)
+        }
+        // Amber — "this attacker is reduced but not gone." Distinct from
+        // the gold TriggerMove arrow and the green neutralized one.
+        AnnotationKind::MitigatedAttacker => {
+            egui::Color32::from_rgba_unmultiplied(0xe0, 0xb0, 0x20, 0xd0)
+        }
+        // Square-only kind; never drawn as an arrow, but the match is
+        // exhaustive — mirror its fill green.
+        AnnotationKind::FreedSquare => {
+            egui::Color32::from_rgba_unmultiplied(0x30, 0xc0, 0x50, 0xd0)
+        }
+        // Square-only kind; mirror its blue fill for the exhaustive match.
+        AnnotationKind::ShieldPawn => {
+            egui::Color32::from_rgba_unmultiplied(0x30, 0x70, 0xd0, 0xd0)
+        }
         AnnotationKind::Threat => egui::Color32::from_rgba_unmultiplied(0xff, 0x40, 0x40, 0xd0),
         AnnotationKind::KingRing => egui::Color32::from_rgba_unmultiplied(0xb0, 0x30, 0x10, 0xd0),
         AnnotationKind::GoodPiece => egui::Color32::from_rgba_unmultiplied(0x20, 0x70, 0x30, 0xd0),

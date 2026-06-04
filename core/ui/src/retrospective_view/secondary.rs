@@ -1,11 +1,19 @@
-//! Secondary terms ("Other shifts" / Helped / Hurt fallback) card builder.
+//! Secondary-term card builder — one card per residual eval term.
 //!
-//! The prose (the helped/hurt lists) is produced by the shared teaching
-//! translator ([`chess_tutor_teaching`]) from a [`Claim::Secondary`]; the
-//! shared salience (the cumulative-coverage trim, the consumed-term skip,
-//! the mover-POV sign flip) lives in [`secondary_claim`]. This builder
-//! owns only the *structured* card surface the translator deliberately
-//! doesn't carry — the sentiment and the net score chip.
+//! Replaces the old single aggregated "Other shifts" card. That card was
+//! uninformative both folded ("2 helped, 1 hurt" says nothing) and
+//! expanded ("development +0.48, flank attacks +0.31, king safety −0.04"
+//! demands you already know the terms). Each residual term now gets its
+//! own labelled card with its own student-POV chip + sentiment, so the
+//! feedback zone stays scannable.
+//!
+//! Salience: a term is promoted to a default card only when its student-
+//! POV impact clears [`SECONDARY_PROMOTE_CP`]; smaller residual terms
+//! surface only under the panel's "Show all signals" toggle (`show_all`).
+//! The shared consumed-term skip + mover-POV sign flip still come from the
+//! teaching crate's [`secondary_claim`] (called untrimmed); this builder
+//! owns the per-term split, the student-POV re-sign, and the structured
+//! card surface.
 //!
 //! Split out of `retrospective_view`; the orchestrator
 //! ([`super::build_retrospective_view`]) assembles the cards.
@@ -13,81 +21,82 @@
 use chess_tutor_engine::analysis::{MoveAnalysis, TermId};
 use chess_tutor_engine::types::Color;
 
-use chess_tutor_teaching::claim::{secondary_claim, Claim, SECONDARY_DEFAULT_TOP_PERCENT};
-use chess_tutor_teaching::phrasing::{phrase, Locale, Perspective, PhrasingContext, Verbosity};
+use chess_tutor_teaching::claim::{secondary_claim, Claim};
+use chess_tutor_teaching::phrasing::Perspective;
 
 use crate::view::{RetrospectiveCategory, RetrospectiveItem, Sentiment};
 
-/// Build the "Other shifts" card for one analysed move. `perspective`
-/// selects the student-POV sentiment colour (the term deltas are
-/// mover-POV; under `Opponent` a mover-helping shift hurts the student,
-/// so the sentiment + the signed chip flip — the translator's content
-/// stays mover-POV by design, see `phrase_secondary`).
+/// Minimum student-POV magnitude (canonical pawn=100 cp) for a residual
+/// term to earn a default card. Below this the term is real but minor, so
+/// it hides behind "Show all signals" — keeps a quiet move's card list
+/// short while never losing a signal. 20 cp ≈ 0.20 pawns.
+const SECONDARY_PROMOTE_CP: i32 = 20;
+
+/// Build one card per residual eval-term shift for an analysed move. The
+/// term deltas come from [`secondary_claim`] mover-POV (positive helped
+/// the mover); under the `Opponent` perspective a mover-helping shift
+/// hurts the student, so the chip + sentiment flip.
 ///
-/// `show_all` bypasses the 50%-coverage trim so every residual term with
-/// a non-zero delta appears as a row. The GUI's collapsible card keeps
-/// the noise out of the way until the user expands.
-pub(super) fn build_secondary_item(
+/// `show_all` drops the [`SECONDARY_PROMOTE_CP`] floor so every non-zero
+/// residual term gets a card; otherwise only the meaningful movers do.
+pub(super) fn build_secondary_items(
     user: &MoveAnalysis,
     root_stm: Color,
     skip: &[TermId],
     show_all: bool,
     perspective: Perspective,
-) -> Option<RetrospectiveItem> {
-    let top_percent = if show_all { 100.0 } else { SECONDARY_DEFAULT_TOP_PERCENT };
-    let claim = secondary_claim(user, root_stm, skip, top_percent)?;
-    let ctx = PhrasingContext {
-        perspective,
-        locale: Locale::En,
-        verbosity: Verbosity::Normal,
-        reveal_moves: false,
+) -> Vec<RetrospectiveItem> {
+    // Untrimmed (100% coverage): we apply our own per-term magnitude gate
+    // below rather than the claim's cumulative-coverage trim.
+    let Some(Claim::Secondary { terms }) = secondary_claim(user, root_stm, skip, 100.0) else {
+        return Vec::new();
     };
-    Some(secondary_item(&claim, &ctx))
+
+    // Re-sign to student POV, gate by magnitude, biggest-impact first.
+    let mut rows: Vec<(TermId, i32)> = terms
+        .into_iter()
+        .map(|(term, mover_cp)| {
+            let student_cp = match perspective {
+                Perspective::Player => mover_cp,
+                Perspective::Opponent => -mover_cp,
+            };
+            (term, student_cp)
+        })
+        .filter(|(_, cp)| show_all || cp.abs() >= SECONDARY_PROMOTE_CP)
+        .collect();
+    rows.sort_by_key(|(_, cp)| std::cmp::Reverse(cp.abs()));
+
+    rows.into_iter().map(|(term, cp)| term_card(term, cp)).collect()
 }
 
-/// Turn one [`Claim::Secondary`] into a card — prose from the
-/// translator, structured surface (sentiment, net score chip, terse
-/// summary) computed here from the claim's mover-POV term deltas.
-fn secondary_item(claim: &Claim, ctx: &PhrasingContext) -> RetrospectiveItem {
-    let phrasing = phrase(claim, ctx);
-    let Claim::Secondary { terms } = claim else {
-        unreachable!("secondary_claim always returns Claim::Secondary");
-    };
-
-    // Deltas are mover-POV (positive = helped the mover). The helped/hurt
-    // *counts* are mover-relative and stay so (matching the translator's
-    // mover-POV content); but the sentiment colour and the signed chip read
-    // from the *student's* side, so under the opponent perspective a
-    // mover-helping net is a negative for the student — flip the sign.
-    let helped = terms.iter().filter(|(_, cp)| *cp > 0).count();
-    let hurt = terms.iter().filter(|(_, cp)| *cp < 0).count();
-    let mover_net: i32 = terms.iter().map(|(_, cp)| *cp).sum();
-    let student_net = match ctx.perspective {
-        Perspective::Player => mover_net,
-        Perspective::Opponent => -mover_net,
-    };
-
-    let sentiment = if student_net > 0 {
+/// One residual-term card: the term's plain-English label, its student-POV
+/// chip, and a sentiment colour. `student_cp` is guaranteed non-zero
+/// (`secondary_claim` drops zero deltas), so the sign is unambiguous.
+fn term_card(term: TermId, student_cp: i32) -> RetrospectiveItem {
+    let pawns = student_cp as f32 / 100.0;
+    let sentiment = if student_cp > 0 {
         Sentiment::Positive
-    } else if student_net < 0 {
-        Sentiment::Negative
     } else {
-        Sentiment::Mixed
+        Sentiment::Negative
     };
-    let summary = match (helped, hurt) {
-        (h, 0) => format!("{h} helped"),
-        (0, t) => format!("{t} hurt"),
-        (h, t) => format!("{h} helped, {t} hurt"),
-    };
-
     RetrospectiveItem {
         category: RetrospectiveCategory::Secondary,
-        heading: "Other shifts".to_string(),
-        summary,
-        detail: phrasing.detail.unwrap_or_default(),
-        score_delta_pawns: Some(student_net as f32 / 100.0),
+        heading: capitalize_first(term.pretty_label()),
+        summary: format!("{pawns:+.2} pawns"),
+        detail: String::new(),
+        score_delta_pawns: Some(pawns),
         sentiment,
         annotations: Vec::new(),
+    }
+}
+
+/// Capitalize the first character of a `pretty_label` (which is lowercase
+/// — "development", "king safety") for a card heading.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -122,19 +131,26 @@ mod tests {
     }
 
     #[test]
-    fn smoke_other_shifts_card_renders_via_translator() {
+    fn per_term_cards_replace_the_aggregated_other_shifts_card() {
         let (_pos, analyses, e4) = analyses_for_e4();
         let user = analyses.iter().find(|a| a.mv == e4).unwrap();
-        // With no terms skipped, some shift should survive the trim on
-        // a real opening move.
-        if let Some(card) = build_secondary_item(user, Color::White, &[], false, Perspective::Player) {
-            assert_eq!(card.heading, "Other shifts");
-            // Detail comes from the translator's helped/hurt lists.
+        // With no terms skipped, every residual term fires under show_all.
+        let all = build_secondary_items(user, Color::White, &[], true, Perspective::Player);
+        assert!(!all.is_empty(), "1.e4 should shift several residual terms");
+        // No aggregated card survives; each card names a single term with a
+        // capitalized heading and carries a chip.
+        for card in &all {
+            assert_ne!(card.heading, "Other shifts");
             assert!(
-                card.detail.contains("Also helped") || card.detail.contains("Also hurt"),
-                "unexpected detail: {}",
-                card.detail
+                card.heading.chars().next().is_some_and(|c| c.is_uppercase()),
+                "heading should be capitalized: {:?}",
+                card.heading
             );
+            assert!(card.score_delta_pawns.is_some());
         }
+        // The promote gate trims the default (non-show_all) list to the
+        // meaningful movers — never more cards than show_all surfaces.
+        let promoted = build_secondary_items(user, Color::White, &[], false, Perspective::Player);
+        assert!(promoted.len() <= all.len());
     }
 }

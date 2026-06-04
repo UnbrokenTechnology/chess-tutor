@@ -190,6 +190,29 @@ fn outcome_reports_walked_into_fork() {
     assert!(outcome.user_played_tactic.is_none());
 }
 
+#[test]
+fn qxf6_walked_into_targets_the_real_bishop_not_the_phantom_pawn() {
+    // End-to-end of the reported GUI bug. After 1...Qxf6 the *real* standing
+    // threat is White's Bb2 capturing the f6 queen (sole defender of the d6
+    // bishop, which White's Qd1 already eyes up the open d-file) — target =
+    // the d6 *bishop*. The old PV detector instead mislabelled cxb8=… as
+    // "remove the rook to win the b7 pawn." The walked-into must now name the
+    // genuine d6 removing-defender and never the b7 pawn.
+    let pre = pos("1r1qk3/ppP2ppr/3b1N1p/8/1nB1P3/1P3N2/PBP2PPP/R2Q1RK1 b - - 0 1");
+    let qxf6 = Move::normal(Square::D8, Square::F6);
+    let ma = ma_with_pv(vec![qxf6], Some(0));
+    let outcome = compute_tactic_outcome(&ma, &ma, &pre, Color::Black, None);
+    let walked = outcome
+        .user_walked_into
+        .expect("the standing d6 removing-defender stands after Qxf6");
+    assert_eq!(walked.pattern, TacticPattern::RemovingDefender);
+    assert_eq!(walked.targets, vec![Square::D6]);
+    assert!(
+        !walked.targets.contains(&Square::B7),
+        "must not target the (unattacked) b7 pawn"
+    );
+}
+
 // ---- latent walked-into (PLAN §4.1 pre-emptive wiring) --------------
 
 #[test]
@@ -402,6 +425,22 @@ fn not_removing_defender_when_capturing_the_defender_loses_material() {
     assert!(
         detect_line_tactic(&pre, &[qxh8], Color::White, 0, None).is_none(),
         "Qxh8 loses the queen (rook is knight-defended) — not a removing-the-defender tactic"
+    );
+}
+
+#[test]
+fn not_removing_defender_when_only_a_pawn_is_freed() {
+    // Reported GUI bug. After 1...Qxf6 the engine's reply cxb8=Q+ grabs the
+    // b8 rook (the prize) and leaves the b7 *pawn* loose. The old detector
+    // mislabelled this "remove the defender (rook b8) to win the b7 pawn" —
+    // but capturing the rook IS the win, and a freed pawn isn't this pattern.
+    // The ≥-minor freed-piece floor must suppress it.
+    let pre = pos("1r2k3/ppP2ppr/3b1q1p/8/1nB1P3/1P3N2/PBP2PPP/R2Q1RK1 w - - 0 2");
+    let cxb8 = Move::promotion(Square::C7, Square::B8, crate::types::PieceType::Queen);
+    let hit = detect_line_tactic(&pre, &[cxb8], Color::White, 0, None);
+    assert!(
+        hit.map(|h| h.pattern) != Some(TacticPattern::RemovingDefender),
+        "capturing the rook on b8 must not read as 'removing the defender of the b7 pawn'"
     );
 }
 

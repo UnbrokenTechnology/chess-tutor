@@ -11,7 +11,7 @@ use eframe::egui;
 
 use crate::draw::theme;
 use chess_tutor_ui::event::Event;
-use chess_tutor_ui::view::{EvalSample, ReviewModeView, ReviewNav, ReviewTally, ReviewVerdictTier};
+use chess_tutor_ui::view::{EvalSample, ReviewModeView, ReviewNav, ReviewTallyRow, ReviewVerdictTier};
 
 /// Small chess.com-style glyph for a verdict tier. ASCII-leaning so it
 /// renders on egui's default font without tofu; the colour (not the
@@ -27,42 +27,85 @@ pub(super) fn verdict_tier_glyph(tier: ReviewVerdictTier) -> &'static str {
     }
 }
 
-/// The verdict tally block: one chip per tier with its count. Zero-count
-/// tiers render dimmed so the row layout stays stable.
+/// The verdict tally table: one row per tier, with a White and a Black
+/// count column. The column for the side the student played is
+/// highlighted (header marked "(you)" + bold counts). A row with no
+/// moves on either side renders dimmed so the table layout stays stable.
 pub(super) fn draw_verdict_tallies(
     ui: &mut egui::Ui,
-    tallies: &[ReviewTally],
-    user_move_count: usize,
+    tallies: &[ReviewTallyRow],
+    user_is_white: bool,
 ) {
-    ui.label(
-        egui::RichText::new(format!("{user_move_count} of your moves"))
-            .small()
-            .weak(),
-    );
-    ui.add_space(4.0);
     egui::Grid::new("verdict_tallies")
-        .num_columns(2)
-        .spacing([10.0, 3.0])
+        .num_columns(3)
+        .spacing([18.0, 4.0])
+        .min_col_width(44.0)
         .show(ui, |ui| {
-            for tally in tallies {
-                let color = theme::verdict_tier_color(tally.tier);
-                let dim = tally.count == 0;
-                let glyph = egui::RichText::new(verdict_tier_glyph(tally.tier))
-                    .monospace()
-                    .strong()
-                    .color(if dim { color.gamma_multiply(0.4) } else { color });
-                let label = egui::RichText::new(format!("{} {}", tally.label, tally.count))
-                    .strong()
-                    .color(if dim {
-                        ui.visuals().weak_text_color()
-                    } else {
-                        color
-                    });
-                ui.label(glyph);
-                ui.label(label);
+            // Header row: blank label cell, then the two side columns.
+            ui.label("");
+            draw_side_header(ui, "White", user_is_white);
+            draw_side_header(ui, "Black", !user_is_white);
+            ui.end_row();
+
+            for row in tallies {
+                let color = theme::verdict_tier_color(row.tier);
+                let dim = row.white == 0 && row.black == 0;
+                let glyph_color = if dim { color.gamma_multiply(0.4) } else { color };
+                // Label cell: tier glyph + name.
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(verdict_tier_glyph(row.tier))
+                            .monospace()
+                            .strong()
+                            .color(glyph_color),
+                    );
+                    ui.label(egui::RichText::new(row.label).color(glyph_color));
+                });
+                draw_count_cell(ui, row.white, color, user_is_white, dim);
+                draw_count_cell(ui, row.black, color, !user_is_white, dim);
                 ui.end_row();
             }
         });
+}
+
+/// A column header ("White" / "Black"), marked "(you)" and brightened
+/// for the side the student played.
+fn draw_side_header(ui: &mut egui::Ui, side: &str, is_user: bool) {
+    let text = if is_user {
+        format!("{side} (you)")
+    } else {
+        side.to_string()
+    };
+    ui.label(
+        egui::RichText::new(text)
+            .small()
+            .strong()
+            .color(if is_user {
+                theme::TEXT
+            } else {
+                theme::TEXT_MUTED
+            }),
+    );
+}
+
+/// One per-side count cell. Zero counts dim; the student's column is
+/// bold and tier-coloured, the opponent's is muted.
+fn draw_count_cell(
+    ui: &mut egui::Ui,
+    count: usize,
+    color: egui::Color32,
+    is_user: bool,
+    dim_row: bool,
+) {
+    let mut text = egui::RichText::new(count.to_string()).monospace();
+    text = if count == 0 || dim_row {
+        text.color(ui.visuals().weak_text_color())
+    } else if is_user {
+        text.strong().color(color)
+    } else {
+        text.color(theme::TEXT_MUTED)
+    };
+    ui.label(text);
 }
 
 /// Hand-painted eval-over-time line. White-advantage above the centre
@@ -132,9 +175,15 @@ pub(super) fn draw_review_mode_bar(
             // (moved to the action bar) were removed to recover vertical
             // space for the lesson.
             ui.horizontal(|ui| {
+                // Stretch the five buttons to fill the panel width so the
+                // bar reads as a single full-width control rather than a
+                // narrow left-aligned cluster with dead space to its right.
+                const N: f32 = 5.0;
+                let spacing = ui.spacing().item_spacing.x;
+                let btn_w = ((ui.available_width() - spacing * (N - 1.0)) / N).max(40.0);
                 let btn = |glyph: &str| {
                     egui::Button::new(crate::draw::icon::icon(glyph).size(18.0))
-                        .min_size(egui::vec2(40.0, 36.0))
+                        .min_size(egui::vec2(btn_w, 36.0))
                 };
                 // skip-to-first
                 if ui

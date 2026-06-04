@@ -20,9 +20,8 @@ use eframe::egui;
 use crate::draw::theme;
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{
-    GameReviewMoment, GameReviewView, InterventionAction, InterventionPanelKind,
-    InterventionPanelView, MoveListView, ReviewMomentKind, ReviewVerdictTier, SidePanelBody,
-    SidePanelView,
+    GameReviewView, InterventionAction, InterventionPanelKind, InterventionPanelView, MoveListView,
+    ReviewVerdictTier, SidePanelBody, SidePanelView,
 };
 
 pub(crate) mod cards;
@@ -133,11 +132,14 @@ fn draw_panel_header(
 }
 
 /// The game-review **summary** as an on-demand modal popover: outcome
-/// line, verdict tallies, the eval-over-time graph, and the ranked
-/// significant-moments list. Floats over the board (opened from the
-/// action-bar "Summary" button) so the step-through panel stays put.
-/// Clicking a moment jumps review there and dismisses the popover; the
-/// window's close button dismisses without leaving review.
+/// line, the White/Black verdict table, and the eval-over-time graph.
+/// Floats over the board (opened from the action-bar "Summary" button)
+/// so the step-through panel stays put. The window's close button
+/// dismisses it without leaving review.
+///
+/// No significant-moments list: the move list already flags those moves
+/// (red rating glyph), so the old list was redundant and lived in a
+/// cramped scroll area. Navigation is via the move list and the nav bar.
 pub(crate) fn draw_summary_modal(
     ctx: &egui::Context,
     view: &GameReviewView,
@@ -160,8 +162,9 @@ pub(crate) fn draw_summary_modal(
             ui.separator();
         }
 
-        // Verdict tallies (Best → Blunder).
-        draw_verdict_tallies(ui, &view.tallies, view.user_move_count);
+        // White/Black verdict table (Best → Blunder), the student's
+        // column highlighted.
+        draw_verdict_tallies(ui, &view.tallies, view.user_is_white);
 
         // Eval-over-time graph.
         if view.eval_series.len() >= 2 {
@@ -170,112 +173,9 @@ pub(crate) fn draw_summary_modal(
             ui.add_space(2.0);
             draw_eval_graph(ui, &view.eval_series);
         }
-
-        ui.add_space(8.0);
-        ui.separator();
-
-        // Ranked significant moments — the heart of the popover. Scrolls
-        // within a bounded height so a long list never grows the window
-        // past the board (the old in-panel version hid these below the
-        // fold, which is the bug this popover fixes).
-        ui.label(
-            egui::RichText::new(format!(
-                "{} of {} of your moves flagged.",
-                view.moments.len(),
-                view.user_move_count
-            ))
-            .small()
-            .weak(),
-        );
-        if view.moments.is_empty() {
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(
-                    "No significant moments detected. Either you played clean, the \
-                     retrospective analyses haven't all arrived yet, or the gating \
-                     thresholds skipped your moves. Step through the game with the \
-                     nav controls to review it move-by-move.",
-                )
-                .small()
-                .weak(),
-            );
-        } else {
-            ui.add_space(6.0);
-            egui::ScrollArea::vertical()
-                .id_salt("summary_moments_scroll")
-                .max_height(360.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for moment in &view.moments {
-                        if draw_review_moment(ui, moment) {
-                            events.push(Event::JumpToReviewMoment(moment.history_index));
-                        }
-                        ui.add_space(4.0);
-                    }
-                });
-        }
     });
     if !open {
         events.push(Event::CloseReviewSummary);
-    }
-}
-
-fn draw_review_moment(ui: &mut egui::Ui, moment: &GameReviewMoment) -> bool {
-    let accent = match moment.kind {
-        ReviewMomentKind::Blunder => theme::BAD,
-        ReviewMomentKind::TeachingMoment => theme::CAUTION,
-        ReviewMomentKind::BlunderWithLesson => theme::MISS,
-    };
-    let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 22);
-    let frame_resp = egui::Frame::group(ui.style())
-        .stroke(egui::Stroke::new(1.0, accent))
-        .fill(bg)
-        .inner_margin(egui::Margin::same(8.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}{}",
-                        moment.move_pair_number,
-                        if moment.side_to_move_label == "White" { "." } else { "..." }
-                    ))
-                    .monospace()
-                    .small()
-                    .weak(),
-                );
-                ui.label(
-                    egui::RichText::new(&moment.san)
-                        .monospace()
-                        .strong(),
-                );
-                ui.with_layout(
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new(review_kind_label(moment.kind))
-                                .small()
-                                .color(accent)
-                                .strong(),
-                        );
-                    },
-                );
-            });
-            ui.label(egui::RichText::new(&moment.headline).small());
-        });
-    let rect = frame_resp.response.rect;
-    ui.interact(
-        rect,
-        ui.id().with(("review_moment", moment.history_index)),
-        egui::Sense::click(),
-    )
-    .clicked()
-}
-
-fn review_kind_label(kind: ReviewMomentKind) -> &'static str {
-    match kind {
-        ReviewMomentKind::Blunder => "BLUNDER",
-        ReviewMomentKind::TeachingMoment => "LESSON",
-        ReviewMomentKind::BlunderWithLesson => "BLUNDER + LESSON",
     }
 }
 

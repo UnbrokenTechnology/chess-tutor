@@ -1,12 +1,15 @@
 //! The mid-game ⚙ settings surface (PLAN build-order step 5,
-//! decision #2): a floating window that edits the same play options as
-//! the pre-game Start screen — Eval Bar, Support, Auto-coach,
-//! Reveal-best-move, Move-feedback depth, search Depth, and the board
-//! overlays — but against the *live* session, so no new game is needed.
+//! decision #2): a floating window that edits the play options that can
+//! change mid-game — Eval Bar, Support, Auto-coach, Reveal-best-move,
+//! Move-feedback depth, and the board overlays — against the *live*
+//! session, so no new game is needed.
 //!
 //! Opponent strength is intentionally absent: changing the bot mid-game
-//! needs a fresh game, so that lives only on the Start screen.
-//! Engine-PV is absent everywhere (review-only, decision #9).
+//! needs a fresh game, so it lives only on the Start screen. That
+//! includes **bot search depth**, which is an opponent-strength lever
+//! (it only affects the bot's move selection — not retrospective or
+//! game review), not a generic live setting. Engine-PV is absent
+//! everywhere (review-only, decision #9).
 //!
 //! Unlike the Start screen (which mutates a form committed on Play),
 //! every control here emits its own intent immediately so the change
@@ -57,16 +60,9 @@ pub(crate) fn draw(ctx: &egui::Context, view: &SettingsView, events: &mut Vec<Ev
 
                 ui.add_space(4.0);
 
-                // ---- Depths ----
-                let mut depth = view.depth;
-                if options::depth_row(
-                    ui,
-                    &mut depth,
-                    "Search depth",
-                    "How deeply the bot searches when choosing its move.",
-                ) {
-                    events.push(Event::ChangeDepth(depth));
-                }
+                // ---- Move-feedback depth ----
+                // Bot search depth is deliberately absent: it's an
+                // opponent-strength lever, fixed per game (Start screen).
                 let mut retro_depth = view.retrospective_depth;
                 if options::depth_row(
                     ui,

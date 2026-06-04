@@ -162,7 +162,9 @@ pub use desperado::{find_desperado, Desperado};
 pub use forcing_check_chain::{forcing_check_chain, ForcingCheckChain, MAX_CHAIN_DEPTH};
 pub use initiative_loss::{detect_initiative_loss, InitiativeLoss, TempoHit, MAX_PV_PAIRS};
 pub use initiative_outcome::{compute_initiative_outcome, InitiativeOutcome};
-pub use king_safety_outcome::{compute_king_safety_outcome, KingSafetyOutcome, KingSafetySnapshot};
+pub use king_safety_outcome::{
+    compute_king_safety_outcome, king_ring_and_attackers, KingSafetyOutcome, KingSafetySnapshot,
+};
 pub use material_outcome::{compute_material_outcome, CaptureEvent, MaterialOutcome};
 pub use mobility_outcome::{compute_mobility_outcome, MobilityOutcome, PieceMobility};
 pub use move_analysis::{analyze_position, MoveAnalysis};
@@ -178,7 +180,10 @@ pub use overlays::{compute_overlays, trapped_cages, OverlayData};
 pub use overloading::{find_overloaded, OverloadedPiece};
 pub use passed_pawns_outcome::{compute_passed_pawns_outcome, PassedPawnsOutcome};
 pub use pawn_structure_outcome::{compute_pawn_structure_outcome, PawnStructureOutcome};
-pub use pieces_positional_outcome::{compute_pieces_positional_outcome, PiecesPositionalOutcome};
+pub use pieces_positional_outcome::{
+    compute_pieces_positional_outcome, minor_behind_pawn_squares, reachable_outpost_squares,
+    PiecesPositionalOutcome,
+};
 pub use silent_sequencing::{
     is_silent_sequencing, DEEP_GAP_MIN_CP, SHALLOW_DEPTH, SHALLOW_GAP_MAX_CP,
 };

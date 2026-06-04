@@ -4,10 +4,11 @@ use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::TopBarView;
 
 /// Slim title bar: app title on the left, then (right-aligned) the
-/// ⚙ settings and flip icon-buttons, a "Live" return-to-current button
-/// while browsing history, and the depth tuner (parked here until it
-/// moves fully into the Options/⚙ surface). The primary play actions —
-/// including Review once the game ends — live in the bottom action bar.
+/// ⚙ settings and flip icon-buttons and a "Live" return-to-current
+/// button while browsing history. The primary play actions — including
+/// Review once the game ends — live in the bottom action bar. (Bot
+/// search depth used to live here as a tuner; it's an opponent-strength
+/// lever now, set per game on the Start screen.)
 pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>) {
     ui.horizontal(|ui| {
         ui.add_space(2.0);
@@ -38,20 +39,6 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &TopBarView, events: &mut Vec<Event>
             if ui.add(flip).on_hover_text("Flip board").clicked() {
                 events.push(Event::FlipBoard);
             }
-
-            ui.separator();
-
-            // --- Interim controls (relocated in later redesign steps) ---
-            // Depth: minimal tuner; its true home is the Options/⚙ surface.
-            let mut depth = view.depth;
-            if ui
-                .add(egui::DragValue::new(&mut depth).range(1..=20))
-                .on_hover_text("Search depth (moves to Options later)")
-                .changed()
-            {
-                events.push(Event::ChangeDepth(depth));
-            }
-            ui.label("Depth:");
 
             ui.separator();
 

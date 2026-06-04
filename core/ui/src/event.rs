@@ -24,15 +24,15 @@ pub enum Event {
     FlipBoard,
     ToggleHint,
     /// Open the settings (⚙) surface — the mid-game config entry point
-    /// (decision #2). Mirrors the pre-game Start/Options screen so the
-    /// same options (eval bar, Support, auto-coach, depths, overlays)
-    /// can be changed without starting a new game.
+    /// (decision #2). Mirrors the pre-game Start/Options screen for the
+    /// options that *can* change mid-game (eval bar, Support, auto-coach,
+    /// move-feedback depth, overlays). Bot search depth is an
+    /// opponent-strength lever, set per game on the Start screen only.
     OpenSettings,
     /// Close the mid-game settings surface.
     CloseSettings,
     /// Jump from "viewing move N" back to live.
     JumpToLive,
-    ChangeDepth(u32),
     /// Set the move-feedback (retrospective) search depth — how deeply
     /// the engine analyses each played move for the backward-looking
     /// feedback zone. Independent of the bot's play `depth`.

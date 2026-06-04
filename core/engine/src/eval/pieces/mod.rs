@@ -209,6 +209,14 @@ fn evaluate_piece_type(
             e.king_attackers_weight[us_idx] += KING_ATTACK_WEIGHT[pt.index()];
             e.king_attacks_count[us_idx] +=
                 (attacks & e.attacked_by[them_idx][PieceType::King.index()]).popcount() as i32;
+            // Opt-in per-attacker bookkeeping: record this piece as an
+            // attacker of the enemy (`them`) king's ring, along with the
+            // ring squares it actually bears on, so the retrospective can
+            // draw an arrow to the ring square under fire (not the king
+            // square, which a slider usually doesn't attack at all).
+            if let Some(vec) = e.per_piece_king_attacker.as_mut() {
+                vec.push((s, them, attacks & their_king_ring));
+            }
         }
 
         // Mobility: number of mobility-area squares this piece attacks.
@@ -281,10 +289,15 @@ fn mobility_bonus(pt: PieceType, mob: usize) -> Score {
 /// Shared knight/bishop bonuses: outpost, reachable outpost (knight only),
 /// minor-behind-pawn, and king-protector distance penalty. Each weight
 /// lands on its own field of `breakdown`.
+///
+/// Takes `&mut Evaluator` only to feed the two opt-in per-piece trackers
+/// ([`Evaluator::per_piece_reachable_outpost`] /
+/// [`Evaluator::per_piece_minor_behind_pawn`]); on the hot search path
+/// both are `None` and the pushes compile to a null check.
 #[allow(clippy::too_many_arguments)]
 fn accumulate_minor_piece_bonuses(
     breakdown: &mut PiecesBreakdown,
-    e: &Evaluator<'_>,
+    e: &mut Evaluator<'_>,
     us: Color,
     pt: PieceType,
     s: Square,
@@ -306,6 +319,13 @@ fn accumulate_minor_piece_bonuses(
         let reachable = outpost_squares & attacks & !pos.pieces_by_color(us);
         if reachable.any() {
             breakdown.reachable_outposts += REACHABLE_OUTPOST;
+            // Opt-in per-piece bookkeeping: record the knight and each
+            // outpost square it can hop to (the route the card draws).
+            if let Some(vec) = e.per_piece_reachable_outpost.as_mut() {
+                for outpost_sq in reachable {
+                    vec.push((s, us, outpost_sq));
+                }
+            }
         }
     }
 
@@ -314,6 +334,14 @@ fn accumulate_minor_piece_bonuses(
     // POV, so a pawn at s + up appears on s after the shift.
     if pos.pieces(PieceType::Pawn).shift(down).contains(s) {
         breakdown.minor_behind_pawn += MINOR_BEHIND_PAWN;
+        // Opt-in per-piece bookkeeping: record the minor and the pawn
+        // directly in front of it (one step toward the enemy = `up`).
+        if let Some(vec) = e.per_piece_minor_behind_pawn.as_mut() {
+            let up = Direction(-down.0);
+            if let Some(pawn_sq) = crate::bitboard::square_bb(s).shift(up).into_iter().next() {
+                vec.push((s, us, pawn_sq));
+            }
+        }
     }
 
     // King-protector: minor that strays from our king pays a small
