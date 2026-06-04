@@ -34,9 +34,10 @@ use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::noise::{self, NoisePick};
 use chess_tutor_engine::opponent::{EvalMask, NoiseProfile};
 use chess_tutor_engine::position::Position;
-use chess_tutor_engine::types::Move;
+use chess_tutor_engine::types::{Move, Value};
 
 use crate::uci;
+use crate::units;
 
 /// Resolved bot configuration for one shim invocation. Built from the
 /// `chess-tutor uci` CLI flags in `main.rs`, mirroring the way the
@@ -139,9 +140,29 @@ pub fn run(cfg: UciConfig) -> Result<()> {
             },
             "go" => {
                 let depth = parse_go_depth(line).unwrap_or(cfg.depth).max(1);
-                let mv = choose_move(&mut engine, &mut pos, depth, &cfg, &history, game_seed, ply);
-                match mv {
-                    Some(m) => writeln!(out, "bestmove {}", uci::format(m))?,
+                match choose_move(&mut engine, &mut pos, depth, &cfg, &history, game_seed, ply) {
+                    Some(choice) => {
+                        // Emit one `info` line so fastchess has a score for
+                        // PGN annotation and eval-based resign/draw
+                        // adjudication (which keeps a long unattended run's
+                        // games short). Score is the chosen move's line, in
+                        // UCI convention: side-to-move-POV, conventional
+                        // cp (pawn = 100) / `mate N`.
+                        let pv: String = choice
+                            .pv
+                            .iter()
+                            .map(|m| uci::format(*m))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        writeln!(
+                            out,
+                            "info depth {} score {} pv {}",
+                            choice.depth,
+                            uci_score(choice.score),
+                            pv,
+                        )?;
+                        writeln!(out, "bestmove {}", uci::format(choice.mv))?;
+                    }
                     // No legal move (terminal). fastchess adjudicates the
                     // result from the position; the null reply is a guard.
                     None => writeln!(out, "bestmove 0000")?,
@@ -158,8 +179,18 @@ pub fn run(cfg: UciConfig) -> Result<()> {
     Ok(())
 }
 
+/// The bot's chosen move plus the score/depth/PV to report over UCI.
+struct MoveChoice {
+    mv: Move,
+    /// Side-to-move-POV engine score of the reported line.
+    score: Value,
+    depth: u32,
+    pv: Vec<Move>,
+}
+
 /// Pick the bot's move for the current root, mirroring the play worker's
-/// search → `noise::pick` → move pipeline.
+/// search → `noise::pick` → move pipeline, and carry back the line's
+/// score/PV for the UCI `info` string.
 fn choose_move(
     engine: &mut Engine,
     pos: &mut Position,
@@ -168,7 +199,7 @@ fn choose_move(
     history: &[u64],
     seed: u64,
     ply: u64,
-) -> Option<Move> {
+) -> Option<MoveChoice> {
     // Wild noise needs the full legal list; generate before searching
     // (movegen leaves the position unchanged), exactly as the worker does.
     let legal = legal_moves_vec(pos);
@@ -185,10 +216,41 @@ fn choose_move(
     };
     let lines = engine.search(pos, params);
     match noise::pick(&cfg.noise, seed, ply, pos, &lines, &legal) {
+        // A ranked-line pick (engine-best / variety / blunder / miss):
+        // report that line's own score and PV.
         NoisePick::Line(idx) | NoisePick::Blunder(idx) | NoisePick::Miss(idx) => {
-            lines.get(idx).and_then(|l| l.pv.first().copied())
+            let line = lines.get(idx).or_else(|| lines.first())?;
+            Some(MoveChoice {
+                mv: *line.pv.first()?,
+                score: line.score,
+                depth: line.depth,
+                pv: line.pv.clone(),
+            })
         }
-        NoisePick::Wild(mv) => Some(mv),
+        // Wild bypasses the ranking, so there's no line for the played
+        // move; report the engine's view of the position (top line) as a
+        // proxy score so adjudication still has a number.
+        NoisePick::Wild(mv) => {
+            let (score, depth) = lines
+                .first()
+                .map(|l| (l.score, l.depth))
+                .unwrap_or((Value(0), depth));
+            Some(MoveChoice { mv, score, depth, pv: vec![mv] })
+        }
+    }
+}
+
+/// Format a side-to-move-POV [`Value`] as a UCI `score` token: `mate N`
+/// (signed full-moves; positive = stm mates) or `cp C` in conventional
+/// centipawns (pawn = 100), converting from our PawnEG=213 engine scale.
+fn uci_score(v: Value) -> String {
+    if units::is_mate_score(v) {
+        let plies = Value::MATE.0 - v.0.abs();
+        let moves = (plies + 1) / 2;
+        let signed = if v.0 >= 0 { moves } else { -moves };
+        format!("mate {signed}")
+    } else {
+        format!("cp {}", units::engine_cp_to_conventional_cp(v).round() as i32)
     }
 }
 

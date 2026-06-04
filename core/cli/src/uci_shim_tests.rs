@@ -72,3 +72,22 @@ fn mix_seed_is_deterministic_and_varies_per_game() {
     assert_ne!(mix_seed(42, 0), mix_seed(42, 1), "game index changes the seed");
     assert_ne!(mix_seed(1, 5), mix_seed(2, 5), "base seed changes the seed");
 }
+
+#[test]
+fn uci_score_renders_cp_in_conventional_scale() {
+    use chess_tutor_engine::types::Value;
+    // PAWN_EG engine-cp == exactly one conventional pawn == 100 cp.
+    assert_eq!(uci_score(Value::PAWN_EG), "cp 100");
+    assert_eq!(uci_score(Value(0)), "cp 0");
+    // Negative (side to move is worse) survives the sign.
+    assert_eq!(uci_score(Value(-Value::PAWN_EG.0)), "cp -100");
+}
+
+#[test]
+fn uci_score_renders_signed_mate() {
+    use chess_tutor_engine::types::Value;
+    // MATE - 3 plies => mate in 2 full moves, stm delivering.
+    assert_eq!(uci_score(Value(Value::MATE.0 - 3)), "mate 2");
+    // Getting mated is negative.
+    assert_eq!(uci_score(Value(-(Value::MATE.0 - 3))), "mate -2");
+}
