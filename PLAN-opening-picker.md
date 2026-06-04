@@ -1,6 +1,9 @@
 # PLAN — Desktop opening picker (allowed-openings GUI)
 
-**Status:** DESIGN LOCKED. Building now.
+**Status:** LANDED (commit `6aef577`, 2026-06-04). Remaining: interactive GUI
+smoke test (open New Game → Openings → Only these → restrict to one opening →
+confirm the bot follows it). Engine/UI logic unit-tested; the egui widget can't
+be verified headlessly.
 **Date:** 2026-06-04.
 
 ## Why
