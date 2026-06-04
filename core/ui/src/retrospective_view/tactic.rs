@@ -619,7 +619,7 @@ mod tests {
             .iter()
             .find(|it| it.heading.starts_with("You allowed"))
             .expect("Qc5+ must surface a walked-into card with the ALLOWED reframe");
-        assert!(walked.detail.contains("swing in the opponent's favour"));
+        assert!(walked.detail.contains("swing in the opponent's favor"));
         assert!(
             walked.detail.to_lowercase().contains("discovered attack"),
             "{}",

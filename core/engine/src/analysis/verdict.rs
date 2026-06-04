@@ -54,6 +54,7 @@
 //! The plain [`classify_move`] keeps its score-only behaviour by
 //! delegating with zero material on both sides.
 
+use super::win_chances;
 use super::MoveAnalysis;
 use crate::types::Value;
 
@@ -125,6 +126,16 @@ const MISTAKE_LOSS_MAX: i32 = 350;
 /// (`BestAvailable`) than "Best" would convey.
 const HOPELESS_SCORE_MAX: i32 = -500;
 
+/// `win_chances` slope at dead-equal, in win-probability units per
+/// engine-cp. Converts a raw cp loss into an equality-equivalent loss
+/// (`scaled = wc_loss / SLOPE`): at equality the two match, so the band
+/// ladder above stays calibrated there; deep in a decided position the
+/// win-probability sigmoid is flatter, so the same gap deflates and an
+/// equivalent alternative no longer reads as a mistake. Analytic value of
+/// d/dv[2/(1+e^(m·v·100/PawnEg)) − 1] at v=0, with m = −0.00368208 and
+/// PawnEg = 213; pinned to the live `win_chances` by a unit test.
+const WIN_CHANCES_SLOPE_AT_EQUAL: f64 = 0.000_864_4;
+
 /// Classify `user_score` against `best_score` and `pre_score` (all
 /// side-to-move POV from the same root position) into a
 /// [`MoveVerdict`]. See module docs for the two-axis design.
@@ -177,53 +188,102 @@ pub fn classify_move_with_material(
     user_net_mg: i32,
     best_net_mg: i32,
 ) -> MoveVerdict {
-    let relative_loss = (best_score.0 - user_score.0).max(0);
     let absolute_swing = user_score.0 - pre_score.0;
     let hopeless = best_score.0 <= HOPELESS_SCORE_MAX;
+    let one_pawn = Value::PAWN_MG.0;
 
-    if relative_loss <= BEST_LOSS_MAX {
-        return if hopeless {
+    // Equality-equivalent eval loss. A given centipawn gap matters far less
+    // when the eval is already decided (the win-probability sigmoid is flat
+    // out there), so deflate the raw loss by how saturated the position is.
+    // At / near equality `scaled_loss == relative_loss`, so the band ladder
+    // — and every near-equal verdict — is unchanged; deep in a won (or lost)
+    // position a small gap shrinks below the Inaccuracy band, so an
+    // equivalent alternative move no longer reads as a mistake. The
+    // load-bearing fix: a ~0.3-pawn gap at +7.9 is not an "Inaccuracy".
+    let wc_loss = (win_chances(best_score) - win_chances(user_score)).max(0.0);
+    let scaled_loss = (wc_loss / WIN_CHANCES_SLOPE_AT_EQUAL).round() as i32;
+
+    // Material-loss floor. Win-probability saturation must NEVER launder a
+    // dropped piece into a soft verdict — a rook hung while up a queen is
+    // still a blunder, and we will not teach otherwise. Fires only when the
+    // position actually worsened; a sound sacrifice that held or improved
+    // the eval (`absolute_swing >= 0`) is exempt and owned by the swing
+    // guard / Best band below.
+    let material_floor = if absolute_swing < 0 && user_net_mg <= -one_pawn {
+        Some(if user_net_mg <= -3 * one_pawn {
+            MoveVerdict::Blunder
+        } else {
+            MoveVerdict::Mistake
+        })
+    } else {
+        None
+    };
+
+    // The eval-only band, on the deflated loss.
+    let eval_band = if scaled_loss <= BEST_LOSS_MAX {
+        if hopeless {
             MoveVerdict::BestAvailable
         } else {
             MoveVerdict::Best
+        }
+    } else if scaled_loss <= GOOD_LOSS_MAX {
+        MoveVerdict::Good
+    } else if scaled_loss <= INACCURACY_LOSS_MAX {
+        MoveVerdict::Inaccuracy
+    } else {
+        let band = if scaled_loss <= MISTAKE_LOSS_MAX {
+            MoveVerdict::Mistake
+        } else {
+            MoveVerdict::Blunder
         };
-    }
-    if relative_loss <= GOOD_LOSS_MAX {
-        return MoveVerdict::Good;
-    }
-    if relative_loss <= INACCURACY_LOSS_MAX {
-        return MoveVerdict::Inaccuracy;
-    }
+        // Swing guard: a move that improved or held the position is never a
+        // Mistake / Blunder, however much more was on offer. Cap at the top
+        // of the Inaccuracy band so the headline still flags a better move.
+        if absolute_swing >= 0 {
+            MoveVerdict::Inaccuracy
+        } else {
+            band
+        }
+    };
 
-    // Below: the band would land at Mistake or Blunder.
-    let one_pawn = Value::PAWN_MG.0;
+    // Miss: a forced material win declined without hanging our own and
+    // without improving the eval — reported distinctly from a hang. Mutually
+    // exclusive with the material floor (a Miss did NOT lose material), so it
+    // returns directly.
     let user_lost_material = user_net_mg <= -one_pawn;
     let best_wins_material = best_net_mg >= one_pawn;
-
-    // Miss: a forced material win was declined without hanging our own,
-    // and the move didn't actively improve the position. Fires even
-    // when the swing guard would otherwise quiet the move (a held eval
-    // that left a free piece on the board is still a Miss); a move that
-    // *improved* the eval is never a Miss, no matter how much more was
-    // available (that path falls through to the swing guard → Inaccuracy).
     if best_wins_material && !user_lost_material && absolute_swing <= 0 {
         return MoveVerdict::Miss;
     }
 
-    // Apply the swing guard before committing to Mistake / Blunder.
-    let band = if relative_loss <= MISTAKE_LOSS_MAX {
-        MoveVerdict::Mistake
+    // The verdict is the more severe of the deflated eval band and the
+    // material-loss floor.
+    match material_floor {
+        Some(floor) => verdict_max(eval_band, floor),
+        None => eval_band,
+    }
+}
+
+/// Severity rank used to take the worse of two independently-derived
+/// verdicts (the deflated eval band vs. the material-loss floor).
+/// `Best` / `BestAvailable` are gentlest, `Blunder` harshest; `Miss` ranks
+/// with `Mistake` (a missed win is serious but not a self-inflicted loss).
+fn verdict_severity(v: MoveVerdict) -> u8 {
+    match v {
+        MoveVerdict::Best | MoveVerdict::BestAvailable => 0,
+        MoveVerdict::Good => 1,
+        MoveVerdict::Inaccuracy => 2,
+        MoveVerdict::Miss | MoveVerdict::Mistake => 3,
+        MoveVerdict::Blunder => 4,
+    }
+}
+
+/// The more severe (worse) of two verdicts.
+fn verdict_max(a: MoveVerdict, b: MoveVerdict) -> MoveVerdict {
+    if verdict_severity(a) >= verdict_severity(b) {
+        a
     } else {
-        MoveVerdict::Blunder
-    };
-    if absolute_swing >= 0 {
-        // The position improved or held — refuse to call this a
-        // Mistake / Blunder no matter how much was missed. Cap at the
-        // top of the Inaccuracy band so the headline still flags that
-        // a stronger move existed.
-        MoveVerdict::Inaccuracy
-    } else {
-        band
+        b
     }
 }
 
@@ -502,5 +562,51 @@ mod tests {
         let direct = classify_move(a.score, a.score, a.pre_score);
         let via = a.classify(a.score);
         assert_eq!(direct, via);
+    }
+
+    // ---- win%-deflated bands: small gaps in decided positions -------
+
+    /// The Rhg1 case: a ~70-cp gap is an Inaccuracy near equality (the
+    /// calibration point) but NOT in a won position — there the
+    /// win-probability sigmoid is flat, so the same gap deflates below the
+    /// Best band and the move reads as an equivalent alternative.
+    #[test]
+    fn small_gap_in_won_position_is_not_an_inaccuracy() {
+        // ~70 cp gap near equality -> Inaccuracy.
+        assert_eq!(classify(30, 100), MoveVerdict::Inaccuracy);
+        // The same ~70 cp gap at ~+7.5 pawns -> gentle (Best/Good).
+        let v = classify_move(Value(1600), Value(1670), Value(1670));
+        assert!(
+            matches!(v, MoveVerdict::Best | MoveVerdict::Good),
+            "expected Best/Good for a 70cp gap at +7.5, got {v:?}"
+        );
+    }
+
+    /// Saturation must never launder a hang: dropping a rook while up a
+    /// queen stays a Blunder even though the win% barely moves. The eval
+    /// band deflates to ~nothing, but the material floor holds it.
+    #[test]
+    fn material_floor_keeps_a_hang_a_blunder_even_when_winning() {
+        let v = classify_move_with_material(
+            Value(2130), // user +10 pawns
+            Value(3195), // best +15 pawns
+            Value(3195), // pre +15 (the move worsened the position)
+            -5 * PAWN,   // user hung a rook
+            0,
+        );
+        assert_eq!(v, MoveVerdict::Blunder);
+    }
+
+    /// The deflation constant tracks the real `win_chances` slope at
+    /// equality (guards the analytic constant against drifting from the
+    /// sigmoid it approximates).
+    #[test]
+    fn slope_constant_matches_win_chances() {
+        let measured = (win_chances(Value(100)) - win_chances(Value(0))) / 100.0;
+        let rel_err = (measured - WIN_CHANCES_SLOPE_AT_EQUAL).abs() / WIN_CHANCES_SLOPE_AT_EQUAL;
+        assert!(
+            rel_err < 0.05,
+            "slope const {WIN_CHANCES_SLOPE_AT_EQUAL} vs measured {measured}"
+        );
     }
 }

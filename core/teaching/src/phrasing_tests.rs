@@ -449,7 +449,7 @@ fn tactic_allowed_reframe_leads_swing_both_perspectives() {
     let player = phrase(&c, &ctx(Perspective::Player));
     assert_eq!(player.summary, "You allowed a fork");
     let pd = player.detail.unwrap();
-    assert!(pd.contains("3.3-pawn swing in the opponent's favour"), "{pd}");
+    assert!(pd.contains("3.3-pawn swing in the opponent's favor"), "{pd}");
     assert!(pd.contains("Qc5+ Kf7"), "{pd}");
     let swing_at = pd.find("3.3-pawn").unwrap();
     let lesson_at = pd.find("fork is one piece").unwrap();
@@ -1528,7 +1528,7 @@ fn positional_win_opponent_reframes_to_their_sacrifice() {
     // From the player's POV the opponent found the sacrifice: "they give
     // up …", and the term swings in *their* favour.
     assert!(o.summary.starts_with("Worth it for them: they give up a pawn"), "{}", o.summary);
-    assert!(o.summary.contains("their favour"), "{}", o.summary);
+    assert!(o.summary.contains("their favor"), "{}", o.summary);
     // Never says "you give up" in the opponent reframe.
     assert!(!o.summary.contains("you give up"), "{}", o.summary);
 }
@@ -1569,7 +1569,7 @@ fn missed_prophylaxis_player_names_defence_and_punisher() {
     // Player wording leads with the defence they needed and the move it
     // stops, then the term that collapses.
     assert!(
-        p.summary.starts_with("You needed Ra8 to stop Rxe7+"),
+        p.summary.starts_with("You needed Ra8") && p.summary.contains("Rxe7+"),
         "{}",
         p.summary
     );
@@ -1586,7 +1586,7 @@ fn missed_prophylaxis_opponent_is_opportunity_reframe() {
     // From the player's POV the opponent skipped the defence, so the
     // punisher is now *your* winning move.
     assert!(
-        o.summary.starts_with("Your opponent skipped Ra8; Rxe7+ now wins"),
+        o.summary.starts_with("Your opponent skipped Ra8") && o.summary.contains("Rxe7+"),
         "{}",
         o.summary
     );
@@ -1602,5 +1602,5 @@ fn missed_prophylaxis_reveal_off_teaches_concept_without_naming_move() {
     // but the punisher (the teaching) still is.
     assert!(!p.summary.contains("Ra8"), "{}", p.summary);
     assert!(p.summary.contains("Rxe7+"), "{}", p.summary);
-    assert!(p.summary.contains("quiet move"), "{}", p.summary);
+    assert!(p.summary.contains("quiet defense"), "{}", p.summary);
 }

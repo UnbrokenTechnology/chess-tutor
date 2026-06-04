@@ -639,7 +639,7 @@ fn tactic_detail(
 fn allowed_swing_line(perspective: Perspective, r: &AllowedReframe) -> String {
     match perspective {
         Perspective::Player => format!(
-            "eval {:+.2} → {:+.2} (your POV) — a {:.1}-pawn swing in the opponent's favour. \
+            "eval {:+.2} → {:+.2} (your POV) — a {:.1}-pawn swing in the opponent's favor. \
              Your move didn't lose to a better move you missed; it ALLOWED the opponent a \
              strong reply you didn't address.",
             r.best_pawns, r.played_pawns, r.swing_pawns,
@@ -1825,8 +1825,8 @@ fn phrase_override_note(
     };
 
     let summary = format!(
-        "The term breakdown is misleading here — it favours {mover_poss} move (~{static_pawns:.1}), \
-         but the search favours the other (~{search_pawns:.1})."
+        "The term breakdown is misleading here — it favors {mover_poss} move (~{static_pawns:.1}), \
+         but the search favors the other (~{search_pawns:.1})."
     );
     let detail = format!(
         "Read the term breakdown alone and it would tell you the opposite — {mover_poss} move keeps \
@@ -2032,13 +2032,14 @@ fn phrase_positional_win(
         Perspective::Player => "your",
         Perspective::Opponent => "their",
     };
-    let summary = format!(
-        "{lead}: {subject} {material}, but {term} swings hard in {possessive} favour."
-    );
-    // Detail: the pre→post swing of the dominant term, in pawns. Never
-    // the raw search number — the static term diff is the teaching point.
+    let summary =
+        format!("{lead}: {subject} {material} for the attack it opens — {term} swings hard in {possessive} favor.");
+    // Detail: the pre→post swing of the dominant term, in pawns, made
+    // explicit as the END of the forcing line (not an instant change — the
+    // compensation materialises as the attack plays out). Never the raw
+    // search number — the static term diff is the teaching point.
     let detail = Some(format!(
-        "{} goes {} → {} (positional compensation, excluding any material won back).",
+        "By the end of the forcing line, {} goes {} → {} — positional compensation, excluding any material won back.",
         capitalize(term),
         format_delta_pawns(term_pre_cp),
         format_delta_pawns(term_post_cp),
@@ -2070,31 +2071,32 @@ fn phrase_missed_prophylaxis(
     let summary = match ctx.perspective {
         Perspective::Player => match prophylactic_san {
             Some(prophy) => {
-                format!("You needed {prophy} to stop {punisher_san} — otherwise {term} collapses.")
+                format!("You needed {prophy} here — without it, {punisher_san} breaks through and {term} collapses.")
             }
             None => {
-                format!("You needed a quiet move to stop {punisher_san} — otherwise {term} collapses.")
+                format!("You needed a quiet defense here — without it, {punisher_san} breaks through and {term} collapses.")
             }
         },
         // Opponent perspective is the *opportunity* reframe: the opponent
-        // skipped the defence, so the punisher is now *your* winning move.
+        // skipped the defense, so the punisher now breaks through for you.
         Perspective::Opponent => match prophylactic_san {
             Some(prophy) => {
-                format!("Your opponent skipped {prophy}; {punisher_san} now wins — {term}.")
+                format!("Your opponent skipped {prophy}; now {punisher_san} breaks through — {term}.")
             }
             None => {
-                format!("Your opponent skipped the defence; {punisher_san} now wins — {term}.")
+                format!("Your opponent skipped the defense; now {punisher_san} breaks through — {term}.")
             }
         },
     };
-    // Detail: name the lesson — prophylaxis is "stop their move," not
-    // "build your own." Short and concrete; the punisher is the receipt.
+    // Detail: name the lesson precisely — the defence isn't "stopping a
+    // single move," it's removing the basis for the opponent's whole
+    // forcing line. The punisher is the head of that line (and the receipt).
     let detail = Some(match ctx.perspective {
         Perspective::Player => format!(
-            "{punisher_san} was the move to prevent — a quiet defence removes it; this move left it on."
+            "{punisher_san} starts a forcing line a quiet defense would have taken the sting out of; this move left it open."
         ),
         Perspective::Opponent => format!(
-            "{punisher_san} was theirs to stop — they left it on, so it's yours to play."
+            "{punisher_san} starts a forcing line they no longer have a defense to — it's yours to play."
         ),
     });
     Phrasing { summary, detail }
