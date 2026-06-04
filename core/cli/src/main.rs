@@ -27,6 +27,7 @@ mod summary;
 mod tactics_view;
 mod threats_view;
 mod uci;
+mod uci_shim;
 mod units;
 
 use std::time::Duration;
@@ -1344,6 +1345,73 @@ fn main() -> Result<()> {
                 explain_best: !no_explain_best,
                 show_fens,
                 threads: threads.max(1),
+            })?;
+        }
+        Command::Uci {
+            depth,
+            threads,
+            seed,
+            disable_eval,
+            avg_move_rank,
+            blunder_chance,
+            blunder_min_material,
+            blunder_max_material,
+            miss_chance,
+            guaranteed_mate_in,
+            wild_chance,
+        } => {
+            use chess_tutor_engine::opponent::{EvalCategory, EvalMask, NoiseProfile};
+            // Same dial validation as `play` — keep the two in sync.
+            if !(0.0..=1.0).contains(&blunder_chance) {
+                anyhow::bail!("--blunder-chance must be in [0.0, 1.0], got {blunder_chance}");
+            }
+            if !(0.0..=1.0).contains(&wild_chance) {
+                anyhow::bail!("--wild-chance must be in [0.0, 1.0], got {wild_chance}");
+            }
+            if !(0.0..=1.0).contains(&miss_chance) {
+                anyhow::bail!("--miss-chance must be in [0.0, 1.0], got {miss_chance}");
+            }
+            if avg_move_rank < 1.0 {
+                anyhow::bail!("--avg-move-rank must be at least 1.0, got {avg_move_rank}");
+            }
+            if blunder_min_material < 0.0 || blunder_max_material < blunder_min_material {
+                anyhow::bail!(
+                    "--blunder-min-material / --blunder-max-material must be 0 <= min <= max (got min={blunder_min_material}, max={blunder_max_material})",
+                );
+            }
+            let mut eval_mask = EvalMask::EMPTY;
+            if let Some(list) = disable_eval {
+                for token in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let cat = EvalCategory::from_slug(token).with_context(|| {
+                        format!(
+                            "unknown eval category {:?} (try one of: pawn-structure, pieces, mobility, king-safety, threats, passed-pawns, space, initiative)",
+                            token,
+                        )
+                    })?;
+                    eval_mask.disable(cat);
+                }
+            }
+            // Default to a random base seed when none is given, matching
+            // OpponentProfile::new_random so unseeded runs still vary.
+            let base_seed = match seed {
+                Some(s) => s,
+                None => chess_tutor_engine::opponent::OpponentProfile::new_random().seed,
+            };
+            let noise = NoiseProfile {
+                avg_move_rank,
+                blunder_chance,
+                blunder_min_material_cp: (blunder_min_material * 100.0) as i32,
+                blunder_max_material_cp: (blunder_max_material * 100.0) as i32,
+                miss_chance,
+                guaranteed_mate_in,
+                wild_chance,
+            };
+            uci_shim::run(uci_shim::UciConfig {
+                depth,
+                threads: threads.max(1),
+                base_seed,
+                eval_mask,
+                noise,
             })?;
         }
     }

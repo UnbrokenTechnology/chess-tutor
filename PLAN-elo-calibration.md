@@ -1,7 +1,42 @@
 # PLAN — ELO-slider calibration harness
 
-**Status:** RESEARCHED + SKETCHED. Not implemented. This doc is for review/iteration before any code.
+**Status:** BUILD STARTED 2026-06-04. The UCI shim (Component 1) is landed; external
+tooling + orchestration are next. Earlier status (RESEARCHED + SKETCHED) preserved below.
 **Date:** 2026-06-04. Source: deep-research run (workflow `w9xeyh5e2`), findings folded in below.
+
+## Decisions locked (2026-06-04, with the user)
+
+- **Experimental design = hybrid characterization.** Gather broad data *first* to learn each
+  dial's effect and ceilings; the user then sets Elo-banded **bands** (e.g. blunder 10–20% at
+  1200) and **forced binaries** (e.g. wild=0 above ~1000, king-safety-mask on/off) as solve-time
+  constraints, and a solver fills the free dials. The regression is pure *measurement*; the
+  human-realism policy is the user's editable constraint layer (cleaner than a pre-committed
+  backbone — the data dictates the shape, the user dictates the policy, and both stay editable).
+  Three measurable jobs: **(1) marginal curves** (sweep each dial alone), **(2) ceilings** (toggle
+  each eval-mask category + combos at full strength), **(3) interactions** (big Latin-hypercube).
+- **Pilot first.** Validate the harness end-to-end + eyeball PGNs for human-likeness + confirm a
+  monotone curve before committing the multi-day runs.
+- **Extremes (below 1100 / above 1900) via self-play connectivity + extrapolation.** No external
+  sub-1000 anchor exists that's human-calibrated; the weak/strong configs tie to the Maia-anchored
+  scale transitively through intermediate configs. Sub-1000 numbers are extrapolated, validated by
+  hand. (Optional later: our own zero-noise engine as a >2000 ceiling reference.)
+
+## Component status
+
+- ✅ **Dials** — all exist in the engine (`opponent.rs` / `noise.rs`): depth, avg-move-rank,
+  blunder chance/min/max, miss, wild, guaranteed-mate-in, eval-mask (8 categories), per-game seed.
+- ✅ **Prerequisite** — allowed-openings selector landed (`6aef577`). (Note: the *measurement* uses
+  fastchess's external balanced book fed to both engines, not our internal book — so neither side's
+  book knowledge skews strength. The internal book is a product feature, orthogonal to measurement.)
+- ✅ **Component 1 — UCI shim** — landed as the `chess-tutor uci` subcommand (NOT a separate crate;
+  reuses every `play` dial flag + the `worker.rs` search→`noise::pick`→bestmove path). Always
+  searches to `--depth` (ignores TC tokens → reproducible per-config strength). Per-game seed =
+  `--seed` mixed with a `ucinewgame` counter → one base seed replays a whole run, games still vary.
+  Threads repetition history so threefold is handled. `core/cli/src/uci_shim.rs` (+ sibling tests).
+- ⬜ **Component 2 — external tooling** (downloads): fastchess, Ordo, lc0, 9 Maia nets, balanced book.
+- ⬜ **Component 3 — orchestration + fit**: config generator → fastchess gauntlets → Ordo (`-A`
+  anchored to measured Maia ratings) → monotone-aware model fit → constrained solver honoring the
+  user's bands/binaries.
 
 ## Goal
 

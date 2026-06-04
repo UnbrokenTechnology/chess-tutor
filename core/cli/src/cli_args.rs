@@ -478,6 +478,67 @@ pub enum Command {
         #[arg(long = "wild-chance", value_name = "P", default_value_t = 0.0)]
         wild_chance: f32,
     },
+    /// Expose a dial-configured bot as a UCI engine on stdin/stdout.
+    /// **Measurement/test only** — the bridge the offline ELO-calibration
+    /// harness (fastchess gauntlets vs Maia) uses to drive our engine;
+    /// the product never enters this path. Takes the same weakening /
+    /// variety dials as `play`, but speaks the minimal UCI protocol
+    /// (`uci` / `isready` / `ucinewgame` / `position` / `go` / `quit`)
+    /// instead of the interactive REPL. Always searches to `--depth`
+    /// (time-control tokens on `go` are ignored), keeping per-config
+    /// strength reproducible; per-game randomness is seeded from `--seed`
+    /// mixed with a `ucinewgame` counter so a whole run replays exactly.
+    Uci {
+        /// Iterative-deepening depth the bot searches to per move. The
+        /// engine-strength *floor* dial; the noise dials below do the
+        /// human-like move-distribution reshaping.
+        #[arg(long, default_value_t = 10)]
+        depth: u32,
+        /// Lazy-SMP threads. Default 1 keeps each move bit-deterministic
+        /// so a `--seed` replay is exact; raise only for raw speed.
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
+        /// Base seed for per-game randomness. Default: random per
+        /// process (logged to stderr). Pass a fixed value to make an
+        /// entire harness run reproducible.
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Comma-separated evaluation categories the bot is blind to
+        /// (knowledge-gap dial): pawn-structure | pieces | mobility |
+        /// king-safety | threats | passed-pawns | space | initiative.
+        #[arg(long = "disable-eval", value_name = "CATEGORY[,CATEGORY...]")]
+        disable_eval: Option<String>,
+        /// Average *rank* of the move the bot plays, 1.0 (always the
+        /// engine's #1) up to ~10.0. Widens the search to 10 lines when
+        /// > 1.0.
+        #[arg(long = "avg-move-rank", value_name = "RANK", default_value_t = 1.0)]
+        avg_move_rank: f32,
+        /// Per-move probability of a deliberate material-losing blunder
+        /// (0.0–1.0). Default 0.0 (off).
+        #[arg(long = "blunder-chance", value_name = "P", default_value_t = 0.0)]
+        blunder_chance: f32,
+        /// Smallest material loss (points; pawn = 1.0) counting as an
+        /// in-band blunder. Default 1.0.
+        #[arg(long = "blunder-min-material", value_name = "PTS", default_value_t = 1.0)]
+        blunder_min_material: f32,
+        /// Largest material loss (points; pawn = 1.0) counting as an
+        /// in-band blunder. Default 4.0.
+        #[arg(long = "blunder-max-material", value_name = "PTS", default_value_t = 4.0)]
+        blunder_max_material: f32,
+        /// Per-move probability of a "miss" — declining a forced
+        /// material win (0.0–1.0). Default 0.0 (off).
+        #[arg(long = "miss-chance", value_name = "P", default_value_t = 0.0)]
+        miss_chance: f32,
+        /// Shortest mate the bot is guaranteed to convert (blunders /
+        /// wild / miss suppressed at or within this depth). Default 1.
+        #[arg(long = "guaranteed-mate-in", value_name = "N", default_value_t = 1)]
+        guaranteed_mate_in: u32,
+        /// Per-move probability of picking uniformly from ALL legal
+        /// moves, bypassing the engine ranking (0.0–1.0). The
+        /// beginner-bot branch. Default 0.0 (off).
+        #[arg(long = "wild-chance", value_name = "P", default_value_t = 0.0)]
+        wild_chance: f32,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
