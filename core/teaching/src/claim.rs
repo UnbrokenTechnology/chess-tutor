@@ -2704,16 +2704,20 @@ fn punisher_refuted_by_best(
                 break;
             };
             opp_idx += 1;
-            let forcing =
-                board.in_check() || board.is_capture(intended) || board.gives_check(intended);
-            if !forcing {
-                break;
-            }
+            // Validate legality on THIS (divergent) board BEFORE probing the
+            // move. The mover answered with its own eval-best reply rather
+            // than the user PV, so `intended`'s origin square may be empty
+            // here — and `gives_check`/`is_capture` panic on an empty origin
+            // (`moved_piece` expects a piece on the from-square).
             let Some(mv) = legal_matching(&mut board, intended) else {
                 // The best move made the opponent's intended forcing move
                 // illegal — the punishment is structurally gone.
                 return true;
             };
+            let forcing = board.in_check() || board.is_capture(mv) || board.gives_check(mv);
+            if !forcing {
+                break;
+            }
             board.do_move(mv);
         }
     }

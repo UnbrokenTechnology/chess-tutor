@@ -291,4 +291,43 @@ mod tests {
             "a deferred own-tactic must not misfire the prophylaxis card"
         );
     }
+
+    /// Regression: a deep forcing king-walk must not panic the replay test.
+    /// After `Rxe7+ Kxe7 Re1+`, Black is in check and the user plays `…Kd8`.
+    /// The replay/disambiguation test walks the punisher line on a
+    /// *divergent* board (the mover answers with its own eval-best reply,
+    /// not the user PV), so a user-PV move's origin square can be empty
+    /// there. `gives_check`/`is_capture` must not be probed before the move
+    /// is re-validated as legal, or they panic ("moved_piece: no piece on
+    /// from-square"). This only asserts the card builds without panicking —
+    /// whether it fires is a separate tuning concern.
+    #[test]
+    fn deep_forcing_kingwalk_does_not_panic() {
+        let fen = "5b1Q/rp1bkp2/p2p2p1/8/8/3P4/PP3K1P/4R3 b - - 0 1";
+        let mut pos = Position::from_fen(fen).unwrap();
+        let root_stm = pos.side_to_move();
+        let mut pre = Position::from_fen(fen).unwrap();
+        let kd8 = san::parse(&mut pre, "Kd8").unwrap();
+        let pre = Position::from_fen(fen).unwrap();
+
+        let mut engine = Engine::default();
+        let analyses = chess_tutor_engine::analysis::analyze_position(
+            &mut engine,
+            &mut pos,
+            SearchParams {
+                max_depth: 12,
+                multi_pv: 2,
+                force_include: vec![kd8],
+                ..SearchParams::default()
+            },
+        );
+        let best = &analyses[0];
+        let user = analyses
+            .iter()
+            .find(|a| a.mv == kd8)
+            .expect("force-included Kd8 must be present");
+        // Must complete without panicking on the divergent replay board.
+        let _ =
+            build_missed_prophylaxis_item(&pre, best, user, root_stm, true, Perspective::Player);
+    }
 }
