@@ -33,57 +33,38 @@ pub enum ColorChoice {
 }
 
 /// Which openings the bot may play, in editable form for the New Game
-/// dialog. Converts to/from the engine's [`BookSelection`] at the
-/// session boundary. The `allowed` set is only consulted in
-/// [`OpeningMode::Only`]; the other modes ignore it (so a user can flip
-/// to Any/None and back without losing their picks).
-#[derive(Clone, Debug)]
+/// dialog. Converts to/from the engine's [`BookSelection`] at the session
+/// boundary. The picker always shows the full opening tree; a fresh game
+/// starts with everything in `allowed` (the full book), and the user
+/// narrows it. An **empty** selection *is* "no book" — the bot plays from
+/// move 1 (the engine treats `Allowed([])` as `None`), so there is no
+/// separate "no book" flag.
+#[derive(Clone, Debug, Default)]
 pub struct OpeningSelection {
-    pub mode: OpeningMode,
     pub allowed: std::collections::HashSet<OpeningId>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OpeningMode {
-    /// Bot may play any theoretical opening (full book).
-    Any,
-    /// Bot may only play the lines in `allowed`.
-    Only,
-    /// No book — bot plays from move 1 by search.
-    None,
-}
-
 impl OpeningSelection {
-    /// Default for a fresh game: full book (matches prior GUI behavior).
+    /// Default for a fresh game: the full book (every line selected).
     pub fn any() -> Self {
-        Self { mode: OpeningMode::Any, allowed: std::collections::HashSet::new() }
+        Self { allowed: chess_tutor_engine::book::all_ids().into_iter().collect() }
     }
 
     /// Recover an editable selection from a committed [`BookSelection`].
-    /// An `Allowed` set the size of the whole book is treated as `Any`.
     pub fn from_book(book: &BookSelection) -> Self {
         match book {
-            BookSelection::None => {
-                Self { mode: OpeningMode::None, allowed: std::collections::HashSet::new() }
-            }
-            BookSelection::Allowed(ids) => {
-                if ids.len() == chess_tutor_engine::book::all_ids().len() {
-                    Self::any()
-                } else {
-                    Self { mode: OpeningMode::Only, allowed: ids.iter().copied().collect() }
-                }
-            }
+            BookSelection::None => Self::default(),
+            BookSelection::Allowed(ids) => Self { allowed: ids.iter().copied().collect() },
         }
     }
 
-    /// Commit to the engine's [`BookSelection`]. `Only` with an empty
-    /// set maps to `Allowed([])`, which the engine treats as "no book"
-    /// — the same as `None`.
+    /// Commit to the engine's [`BookSelection`]. An empty selection maps
+    /// to `None` (no book — play from move 1).
     pub fn to_book(&self) -> BookSelection {
-        match self.mode {
-            OpeningMode::Any => BookSelection::Allowed(chess_tutor_engine::book::all_ids()),
-            OpeningMode::None => BookSelection::None,
-            OpeningMode::Only => BookSelection::Allowed(self.allowed.iter().copied().collect()),
+        if self.allowed.is_empty() {
+            BookSelection::None
+        } else {
+            BookSelection::Allowed(self.allowed.iter().copied().collect())
         }
     }
 }

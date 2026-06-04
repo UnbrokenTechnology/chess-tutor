@@ -69,24 +69,27 @@ pub(crate) fn draw(
                 ui.add_space(12.0);
                 ui.separator();
 
-                // ---- Options ----
-                ui.heading("Options");
-                draw_play_options(ui, form);
-
-                ui.add_space(8.0);
-                egui::CollapsingHeader::new("Board overlays")
+                // ---- Options (collapsible to keep the dialog short) ----
+                egui::CollapsingHeader::new("Options")
                     .default_open(false)
                     .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(
-                                "Persistent highlights painted on the board — space, \
-                                 pins, trapped pieces, attack heatmap, and more.",
-                            )
-                            .small()
-                            .weak(),
-                        );
-                        ui.add_space(4.0);
-                        options::overlay_toggles(ui, &mut form.active_overlays);
+                        draw_play_options(ui, form);
+
+                        ui.add_space(8.0);
+                        egui::CollapsingHeader::new("Board overlays")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Persistent highlights painted on the board — space, \
+                                         pins, trapped pieces, attack heatmap, and more.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                                ui.add_space(4.0);
+                                options::overlay_toggles(ui, &mut form.active_overlays);
+                            });
                     });
 
                 ui.add_space(12.0);
@@ -111,11 +114,23 @@ pub(crate) fn draw(
                 draw_strength_controls(ui, &mut form.depth, &mut form.noise);
 
                 ui.add_space(8.0);
-                egui::CollapsingHeader::new("Openings — which lines the bot may play")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        super::opening_picker::draw(ui, &mut form.book);
-                    });
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(super::icon::icon_label(
+                            egui_phosphor::regular::BOOK_OPEN,
+                            "Openings…",
+                            14.0,
+                        ))
+                        .on_hover_text("Choose which openings the bot may play")
+                        .clicked()
+                    {
+                        super::opening_picker::open(ui.ctx());
+                    }
+                    ui.label(
+                        egui::RichText::new(super::opening_picker::summary(&form.book))
+                            .color(crate::draw::theme::TEXT_MUTED),
+                    );
+                });
 
                 ui.add_space(8.0);
                 ui.collapsing("Eval mask (advanced) — categories the bot is blind to", |ui| {
@@ -161,6 +176,13 @@ pub(crate) fn draw(
                 }
             });
         });
+
+    // The opening picker is its own top-level window (drawn outside the
+    // auto-sizing New Game modal so it can't balloon the modal off-screen).
+    super::opening_picker::draw_window(ctx, &mut form.book);
+    if start || cancel {
+        super::opening_picker::close(ctx);
+    }
 
     if reset_bot {
         events.push(Event::ResetBotForm);

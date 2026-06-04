@@ -58,6 +58,42 @@ fn kings_pawn_is_first_and_irregular_last() {
 }
 
 #[test]
+fn every_level_is_sorted_by_line_count_descending() {
+    let t = tree();
+    // Groups: non-increasing count, ignoring the pinned-last Irregular.
+    let groups: Vec<_> = t
+        .openings
+        .iter()
+        .filter(|g| g.label != "Irregular / Other")
+        .collect();
+    for w in groups.windows(2) {
+        assert!(
+            w[0].ids.len() >= w[1].ids.len(),
+            "openings out of count order: {} ({}) before {} ({})",
+            w[0].label,
+            w[0].ids.len(),
+            w[1].label,
+            w[1].ids.len(),
+        );
+    }
+    // King's Pawn's most-catalogued defense is the Sicilian.
+    let kp = &t.openings[0];
+    assert_eq!(kp.label, "King's Pawn (1.e4)");
+    assert_eq!(kp.families.first().map(|f| f.name.as_str()), Some("Sicilian Defense"));
+    // Families and variations: non-increasing count throughout.
+    for g in &t.openings {
+        for w in g.families.windows(2) {
+            assert!(w[0].ids.len() >= w[1].ids.len(), "families out of order in {}", g.label);
+        }
+        for f in &g.families {
+            for w in f.variations.windows(2) {
+                assert!(w[0].ids.len() >= w[1].ids.len(), "variations out of order in {}", f.name);
+            }
+        }
+    }
+}
+
+#[test]
 fn sicilian_nests_under_kings_pawn_with_a_najdorf_leaf() {
     let t = tree();
     let kp = t

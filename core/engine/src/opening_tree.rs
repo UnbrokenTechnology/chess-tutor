@@ -132,7 +132,11 @@ fn build_tree() -> OpeningTree {
         leaf.ids.push(entry.id);
     }
 
-    // Aggregate ids bottom-up and order Level-1 groups canonically.
+    // Aggregate ids bottom-up, then sort every level by line count
+    // (descending) — a good proxy for how commonly a line is played, so
+    // the mainstream openings/defenses (Sicilian 380, Caro-Kann 106) sort
+    // above rarities (Zukertort, KIA). "Irregular / Other" is pinned last
+    // regardless of count.
     for group in &mut groups {
         for family in &mut group.families {
             family.ids = family
@@ -140,14 +144,16 @@ fn build_tree() -> OpeningTree {
                 .iter()
                 .flat_map(|v| v.ids.iter().copied())
                 .collect();
+            family.variations.sort_by_key(|v| std::cmp::Reverse(v.ids.len()));
         }
         group.ids = group
             .families
             .iter()
             .flat_map(|f| f.ids.iter().copied())
             .collect();
+        group.families.sort_by_key(|f| std::cmp::Reverse(f.ids.len()));
     }
-    groups.sort_by_key(|g| level1_rank(&g.label));
+    groups.sort_by_key(|g| (g.label == "Irregular / Other", std::cmp::Reverse(g.ids.len())));
 
     OpeningTree { openings: groups }
 }
@@ -169,24 +175,6 @@ fn level1_label(first_san: Option<&str>) -> String {
         _ => "Irregular / Other",
     };
     label.to_string()
-}
-
-/// Canonical display rank for a Level-1 label (mains first, Irregular
-/// last). Anything unranked sorts just before Irregular.
-fn level1_rank(label: &str) -> u8 {
-    match label {
-        "King's Pawn (1.e4)" => 0,
-        "Queen's Pawn (1.d4)" => 1,
-        "English (1.c4)" => 2,
-        "Réti (1.Nf3)" => 3,
-        "Bird's (1.f4)" => 4,
-        "Nimzo-Larsen (1.b3)" => 5,
-        "Polish (1.b4)" => 6,
-        "Dunst (1.Nc3)" => 7,
-        "King's Fianchetto (1.g3)" => 8,
-        "Irregular / Other" => 10,
-        _ => 9,
-    }
 }
 
 /// Split a TSV opening name into (family, variation). Family is the part
