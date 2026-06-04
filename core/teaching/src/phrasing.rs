@@ -217,6 +217,18 @@ pub fn phrase(claim: &Claim, ctx: &PhrasingContext) -> Phrasing {
             term_pre_cp,
             term_post_cp,
         } => phrase_positional_win(ctx, *sacrificed_points, *dominant_term, *term_pre_cp, *term_post_cp),
+        Claim::MissedProphylaxis {
+            mover: _,
+            prophylactic_san,
+            punisher_san,
+            exploded_term,
+            swing_cp: _,
+        } => phrase_missed_prophylaxis(
+            ctx,
+            prophylactic_san.as_deref(),
+            punisher_san,
+            *exploded_term,
+        ),
     }
 }
 
@@ -1983,6 +1995,60 @@ fn phrase_positional_win(
         format_delta_pawns(term_pre_cp),
         format_delta_pawns(term_post_cp),
     ));
+    Phrasing { summary, detail }
+}
+
+/// Phrase a [`Claim::MissedProphylaxis`] — the user's move allowed a deep
+/// punishing line the engine's best move would have prevented. Names the
+/// punisher (that IS the teaching — see it coming), the static term that
+/// collapses, and the prophylactic move when `reveal_moves` is on.
+///
+/// | perspective | wording                                                       |
+/// |-------------|---------------------------------------------------------------|
+/// | Player      | "You needed to stop {punisher} — otherwise {term} collapses." |
+/// | Opponent    | "Your opponent left {punisher} on — now it wins ({term})."    |
+///
+/// `prophylactic_san` is `Some` only when the caller opted into the
+/// best-move reveal; when present, the Player wording names the move
+/// ("You needed Ra8 to stop Rxe7+"), otherwise it teaches the concept
+/// without spoiling the move.
+fn phrase_missed_prophylaxis(
+    ctx: &PhrasingContext,
+    prophylactic_san: Option<&str>,
+    punisher_san: &str,
+    exploded_term: TermId,
+) -> Phrasing {
+    let term = exploded_term.pretty_label();
+    let summary = match ctx.perspective {
+        Perspective::Player => match prophylactic_san {
+            Some(prophy) => {
+                format!("You needed {prophy} to stop {punisher_san} — otherwise {term} collapses.")
+            }
+            None => {
+                format!("You needed a quiet move to stop {punisher_san} — otherwise {term} collapses.")
+            }
+        },
+        // Opponent perspective is the *opportunity* reframe: the opponent
+        // skipped the defence, so the punisher is now *your* winning move.
+        Perspective::Opponent => match prophylactic_san {
+            Some(prophy) => {
+                format!("Your opponent skipped {prophy}; {punisher_san} now wins — {term}.")
+            }
+            None => {
+                format!("Your opponent skipped the defence; {punisher_san} now wins — {term}.")
+            }
+        },
+    };
+    // Detail: name the lesson — prophylaxis is "stop their move," not
+    // "build your own." Short and concrete; the punisher is the receipt.
+    let detail = Some(match ctx.perspective {
+        Perspective::Player => format!(
+            "{punisher_san} was the move to prevent — a quiet defence removes it; this move left it on."
+        ),
+        Perspective::Opponent => format!(
+            "{punisher_san} was theirs to stop — they left it on, so it's yours to play."
+        ),
+    });
     Phrasing { summary, detail }
 }
 

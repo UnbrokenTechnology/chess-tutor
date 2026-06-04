@@ -54,6 +54,14 @@ use crate::view::{
 /// the student-POV sentiment / chip sign: under `Opponent` the mover is
 /// the opponent, so a played tactic hurts the student and a missed /
 /// walked-into one is the student's chance — all signs flip.
+///
+/// `suppress_allowed_reframe` strips the ALLOWED-not-MISSED reframe from a
+/// walked-into card when a [`super::build_missed_prophylaxis_item`] card
+/// already narrates the same swing (the missed-prophylaxis card supersedes
+/// the bare reframe — they'd otherwise lead with the identical "you let
+/// them do X" swing). The card degrades to a plain "you walked into
+/// {pattern}" warning, keeping the named-tactic info without the duplicate
+/// reframe.
 pub(super) fn build_tactic_items(
     pre_move_pos: &Position,
     best: &MoveAnalysis,
@@ -62,6 +70,7 @@ pub(super) fn build_tactic_items(
     prior_move: Option<PriorMove>,
     reveal_best_moves: bool,
     perspective: Perspective,
+    suppress_allowed_reframe: bool,
 ) -> Vec<RetrospectiveItem> {
     let ctx = PhrasingContext {
         perspective,
@@ -70,11 +79,24 @@ pub(super) fn build_tactic_items(
         reveal_moves: reveal_best_moves,
     };
     tactic_claims(pre_move_pos, best, user, root_stm, prior_move)
-        .iter()
-        .map(|claim| {
-            let pin_rear = pin_rear_king(pre_move_pos, best, user, claim);
-            let attacker = discovery_attacker(pre_move_pos, best, user, claim);
-            tactic_item(claim, &ctx, reveal_best_moves, pin_rear, attacker)
+        .into_iter()
+        .map(|mut claim| {
+            // Supersede a bare ALLOWED reframe: when the missed-prophylaxis
+            // card owns the swing story, drop the reframe from the
+            // walked-into tactic so the two don't duplicate the lead.
+            if suppress_allowed_reframe {
+                if let Claim::Tactic {
+                    role: TacticRole::WalkedInto,
+                    allowed,
+                    ..
+                } = &mut claim
+                {
+                    *allowed = None;
+                }
+            }
+            let pin_rear = pin_rear_king(pre_move_pos, best, user, &claim);
+            let attacker = discovery_attacker(pre_move_pos, best, user, &claim);
+            tactic_item(&claim, &ctx, reveal_best_moves, pin_rear, attacker)
         })
         .collect()
 }
@@ -592,7 +614,7 @@ mod tests {
             term_deltas: Vec::new(),
         };
         let items =
-            build_tactic_items(&pre, &best, &user, Color::White, None, false, Perspective::Player);
+            build_tactic_items(&pre, &best, &user, Color::White, None, false, Perspective::Player, false);
         let walked = items
             .iter()
             .find(|it| it.heading.starts_with("You allowed"))
@@ -645,7 +667,7 @@ mod tests {
         let best = make(user_pv);
 
         let items =
-            build_tactic_items(&pre, &best, &user, Color::White, None, false, Perspective::Player);
+            build_tactic_items(&pre, &best, &user, Color::White, None, false, Perspective::Player, false);
         let pin = items
             .iter()
             .find(|it| it.heading.to_lowercase().contains("pin"))
@@ -720,7 +742,7 @@ mod tests {
         let best = ma(vec![Move::normal(Square::C7, Square::A7)], -100); // Qa7 holds
 
         let items =
-            build_tactic_items(&pre, &best, &user, Color::Black, None, false, Perspective::Player);
+            build_tactic_items(&pre, &best, &user, Color::Black, None, false, Perspective::Player, false);
         let card = items
             .iter()
             .find(|it| it.heading.to_lowercase().contains("discovered"))

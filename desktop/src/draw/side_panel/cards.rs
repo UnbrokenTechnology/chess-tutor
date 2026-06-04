@@ -331,6 +331,10 @@ pub(crate) fn category_glyph(category: RetrospectiveCategory) -> &'static str {
         // Flame for a sound positional sacrifice — "burning a piece to
         // light up the enemy king." Distinct from the tactic star.
         RetrospectiveCategory::PositionalWin => "♛",
+        // Shield for missed prophylaxis — the defensive move you needed to
+        // stop the opponent's punishing line. Reads as "defence," distinct
+        // from the offensive tactic star / sacrifice queen.
+        RetrospectiveCategory::MissedProphylaxis => "⛨",
         RetrospectiveCategory::Secondary => "…",
     }
 }

@@ -1486,3 +1486,60 @@ fn positional_win_multi_point_sacrifice_reads_as_points() {
     assert!(p.summary.contains("you give up 2 points"), "{}", p.summary);
     assert!(p.summary.contains("trapped rook"), "{}", p.summary);
 }
+
+// ---- MissedProphylaxis: the defence you needed -----------------------
+
+/// Build a `Claim::MissedProphylaxis` modelling the case study: Black (the
+/// mover) skipped `Ra8`, allowing White's `Rxe7+`; king safety collapses.
+/// `reveal` controls whether the prophylactic move is named.
+fn missed_prophylaxis(reveal: bool) -> Claim {
+    Claim::MissedProphylaxis {
+        mover: Color::Black,
+        prophylactic_san: reveal.then(|| "Ra8".to_string()),
+        punisher_san: "Rxe7+".to_string(),
+        exploded_term: TermId::KingDanger,
+        swing_cp: 380,
+    }
+}
+
+#[test]
+fn missed_prophylaxis_player_names_defence_and_punisher() {
+    let p = phrase(&missed_prophylaxis(true), &ctx(Perspective::Player));
+    // Player wording leads with the defence they needed and the move it
+    // stops, then the term that collapses.
+    assert!(
+        p.summary.starts_with("You needed Ra8 to stop Rxe7+"),
+        "{}",
+        p.summary
+    );
+    assert!(p.summary.contains("king safety"), "{}", p.summary);
+    // Never says "they" in the player frame.
+    assert!(!p.summary.contains("opponent"), "{}", p.summary);
+    let detail = p.detail.expect("a detail line naming the punisher");
+    assert!(detail.contains("Rxe7+"), "{}", detail);
+}
+
+#[test]
+fn missed_prophylaxis_opponent_is_opportunity_reframe() {
+    let o = phrase(&missed_prophylaxis(true), &ctx(Perspective::Opponent));
+    // From the player's POV the opponent skipped the defence, so the
+    // punisher is now *your* winning move.
+    assert!(
+        o.summary.starts_with("Your opponent skipped Ra8; Rxe7+ now wins"),
+        "{}",
+        o.summary
+    );
+    assert!(o.summary.contains("king safety"), "{}", o.summary);
+    // Never scolds the user ("you needed") in the opponent reframe.
+    assert!(!o.summary.contains("You needed"), "{}", o.summary);
+}
+
+#[test]
+fn missed_prophylaxis_reveal_off_teaches_concept_without_naming_move() {
+    let p = phrase(&missed_prophylaxis(false), &ctx(Perspective::Player));
+    // No prophylactic SAN ⇒ the concept is taught, the defence not named,
+    // but the punisher (the teaching) still is.
+    assert!(!p.summary.contains("Ra8"), "{}", p.summary);
+    assert!(p.summary.contains("Rxe7+"), "{}", p.summary);
+    assert!(p.summary.contains("quiet move"), "{}", p.summary);
+}

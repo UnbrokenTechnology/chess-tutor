@@ -22,6 +22,7 @@ mod helpers;
 mod initiative;
 mod king_safety;
 mod material;
+mod missed_prophylaxis;
 mod mobility;
 mod override_note;
 mod passed_pawns;
@@ -61,6 +62,7 @@ use initiative::*;
 use override_note::*;
 use king_safety::*;
 use material::*;
+use missed_prophylaxis::*;
 use mobility::*;
 use passed_pawns::*;
 use pawn_structure::*;
@@ -245,11 +247,37 @@ pub fn build_retrospective_view(
         items.push(it);
     }
 
+    // Missed-prophylaxis card (Feature 2): when the user's move allowed a
+    // deep punishing line the engine's best move would have *prevented*,
+    // name what they needed to stop and why — "you needed Ra8 to stop
+    // Rxe7+; otherwise king safety collapses." Built before the tactic
+    // cards so it can *supersede* a bare ALLOWED reframe (the two would
+    // otherwise lead with the identical swing). A tactic-grade card; it
+    // sits in the top group right before the tactic cards. Consume the
+    // exploded term so the Secondary builder doesn't double-render it.
+    let prophylaxis = build_missed_prophylaxis_item(
+        pre_move_pos,
+        best,
+        user,
+        root_stm,
+        reveal_best_moves,
+        perspective,
+    );
+    let suppress_allowed_reframe = prophylaxis.is_some();
+    if let Some(it) = prophylaxis {
+        items.push(it);
+        // The exploded term is mover-signed king danger / flank attacks in
+        // the case study; consume the king terms so the "Other shifts" row
+        // doesn't repeat the collapse the card already explained.
+        consumed_terms.extend_from_slice(&[TermId::KingDanger, TermId::KingFlankAttacks]);
+    }
+
     // Tactic cards: played / missed / walked-into named patterns
     // (fork, pin, free piece, …). Compute-tactic-outcome handles
     // the three-slot dispatch internally; we forward `prior_move`
     // so the hanging-capture recapture guard fires when history
-    // exists.
+    // exists. `suppress_allowed_reframe` drops the duplicate ALLOWED
+    // lead when the missed-prophylaxis card already owns the swing.
     for it in build_tactic_items(
         pre_move_pos,
         best,
@@ -258,6 +286,7 @@ pub fn build_retrospective_view(
         prior_move,
         reveal_best_moves,
         perspective,
+        suppress_allowed_reframe,
     ) {
         items.push(it);
     }

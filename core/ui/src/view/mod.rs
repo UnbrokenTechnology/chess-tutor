@@ -400,6 +400,11 @@ pub enum RetrospectiveCategory {
     /// a frozen rook, …) pays for it. A tactic-grade card (top group, not
     /// quiet-positional). Drives the "down material, still winning" lesson.
     PositionalWin,
+    /// A missed-prophylaxis lesson — the user's move allowed a deep
+    /// punishing line the engine's best move would have prevented. Names
+    /// the prophylactic move and the punisher it would have stopped. A
+    /// tactic-grade card (top group); supersedes a bare ALLOWED reframe.
+    MissedProphylaxis,
     /// Secondary / fallback eval-term shifts (the old "Helped" /
     /// "Hurt" lines).
     Secondary,

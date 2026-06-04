@@ -17,20 +17,21 @@
 //! are filled in their own migration step.
 
 use chess_tutor_engine::analysis::{
-    compute_tactic_outcome, cumulative_prefix, find_desperado, gave_away_advantage,
-    is_sacrifice, is_silent_sequencing, list_hanging, list_see_losing, BlockedCenterOutcome,
-    CaptureEvent, CastlingOutcome, EscapeKind, HangingPiece, InitiativeOutcome, KingSafetyOutcome,
-    MaterialOutcome, MobilityOutcome, MoveAnalysis, MoveVerdict, PassedPawnsOutcome,
-    PawnStructureOutcome, PieceLocation, PiecesPositionalOutcome, PressureKind, PressuredPiece,
-    win_chances, PriorMove, SpaceOutcome, SurpriseKind, TacticEscape, TacticHit, TacticsOutcome,
-    ThreatsOutcome, TermId,
+    compute_tactic_outcome, cumulative_prefix, find_desperado,
+    gave_away_advantage, is_sacrifice, is_silent_sequencing, list_hanging, list_see_losing,
+    BlockedCenterOutcome, CaptureEvent, CastlingOutcome, EscapeKind, HangingPiece,
+    InitiativeOutcome, KingSafetyOutcome, MaterialOutcome, MobilityOutcome, MoveAnalysis,
+    MoveVerdict, PassedPawnsOutcome, PawnStructureOutcome, PieceLocation, PiecesPositionalOutcome,
+    PressureKind, PressuredPiece, win_chances, PriorMove, SpaceOutcome, SurpriseKind, TacticEscape,
+    TacticHit, TacticsOutcome, ThreatsOutcome, TermId,
 };
 use chess_tutor_engine::eval::{
-    MobilityBreakdown, PassedBreakdown, PawnsBreakdown, PiecesBreakdown,
+    evaluate, EvalTrace, MobilityBreakdown, PassedBreakdown, PawnsBreakdown, PiecesBreakdown,
 };
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
+use chess_tutor_engine::search::stm_after_ply;
 use chess_tutor_engine::types::{Color, Move, PieceType, Score, Value};
 
 /// One salient teaching point about a played move, in mover-relative terms.
@@ -360,6 +361,38 @@ pub enum Claim {
         dominant_term: TermId,
         term_pre_cp: i32,
         term_post_cp: i32,
+    },
+
+    /// The missed-prophylaxis lesson — the user's move allowed a deep
+    /// punishing line that the engine's best move would have **prevented**.
+    /// Surfaces *what they needed to stop and why*: "you needed `Ra8` to
+    /// stop `Rxe7+` — otherwise king safety collapses." Reframes the flat
+    /// "ALLOWED, NOT MISSED" detection into a teachable lesson by naming
+    /// the prophylactic move, the punisher, and the static term that
+    /// explodes along the user's PV.
+    ///
+    /// By construction `user.mv != best.mv` and the best line does *not*
+    /// explode — confirmed by a replay/disambiguation test (apply the best
+    /// move, then re-try the punisher: it must now fail; if it still works
+    /// the best move was a *deferred own-tactic*, not prophylaxis, and this
+    /// claim is not built).
+    ///
+    /// Mover-relative: `mover` is the side that played the sub-optimal move,
+    /// `prophylactic_san` the best move (pre-resolved to SAN by the builder,
+    /// honouring `reveal_moves`), `punisher_san` the opponent reply that
+    /// explodes the user's line, `exploded_term` the static term that
+    /// worsened at the explosion, `swing_cp` the mover-POV cp lost across it
+    /// (sentiment input, not necessarily shown). `phrase` applies the "you"
+    /// / "they" reframe — under `Opponent` it is the *opportunity* reframe
+    /// ("your opponent skipped {prophylactic}; {punisher} now wins").
+    MissedProphylaxis {
+        mover: Color,
+        /// Best move SAN, or `None` when `reveal_moves` is off (the prose
+        /// then teaches the concept without naming the move).
+        prophylactic_san: Option<String>,
+        punisher_san: String,
+        exploded_term: TermId,
+        swing_cp: i32,
     },
 }
 
@@ -2197,6 +2230,427 @@ fn material_diff_points_pov(pos: &Position, color: Color) -> i32 {
         .iter()
         .map(|&(pt, v)| (pos.count(color, pt) as i32 - pos.count(!color, pt) as i32) * v)
         .sum()
+}
+
+/// Mover-POV cp drop (relative to the line's starting level) that counts
+/// as an "explosion" along a PV — the ply where the static eval lurches
+/// against the side that played the sub-optimal move. ~0.85 pawn on the
+/// PawnEG≈213 scale: above the per-ply tapered-rescoring wobble, below the
+/// case study's `Qxf8` king-danger eruption. The plan's "≥150–200 cp"
+/// band, expressed on the engine scale.
+pub const PROPHYLAXIS_EXPLOSION_CP: i32 = 180;
+
+/// Mover-POV cp the *best* line is allowed to drift before it no longer
+/// counts as "stays roughly level." Half the explosion floor — the best
+/// line must hold the position while the user's line collapses, but a
+/// small honest drift (the engine's pick isn't always perfectly flat)
+/// shouldn't disqualify a real prophylaxis lesson.
+const PROPHYLAXIS_BEST_LEVEL_CP: i32 = PROPHYLAXIS_EXPLOSION_CP / 2;
+
+/// How much the punisher must *fail to* explode the position after the
+/// best (prophylactic) move for the replay test to confirm prophylaxis.
+/// The replay applies `best.mv` then the punisher and reads the static
+/// mover-POV eval: if it no longer drops by at least this much (vs the
+/// explosion the user's line suffered), the best move *removed* the
+/// tactic — that's prophylaxis, not a deferred own-tactic. Same scale as
+/// the explosion floor; we require the refuted line to recover to within
+/// the best-level band.
+const PROPHYLAXIS_REFUTED_CP: i32 = PROPHYLAXIS_EXPLOSION_CP / 2;
+
+/// Build the missed-prophylaxis claim for the user's sub-optimal move, or
+/// `None` when the gate doesn't hold.
+///
+/// Fires when ALL of:
+/// - `user.mv != best.mv` (the whole mechanism is "the user's PV explodes
+///   where the best PV doesn't"; a correctly-played prophylactic move has
+///   no exploding line to show and is out of scope), AND
+/// - the move genuinely gave away the advantage
+///   ([`gave_away_advantage`] — the same eval-delta gate the headline /
+///   ALLOWED reframe already uses; no absolute-level gate), AND
+/// - the **user's line explodes**: walking `user.ply_traces` by mover-POV
+///   static eval, some ply `k ≥ 1` drops ≥ [`PROPHYLAXIS_EXPLOSION_CP`]
+///   below ply 0. `user.pv[k]` is the punisher (the opponent's move), AND
+/// - the **best line does NOT explode**: `best.ply_traces` stays within
+///   [`PROPHYLAXIS_BEST_LEVEL_CP`] of its start (the best move prevents
+///   the disaster — distinguishing prophylaxis from "everything loses"),
+///   AND
+/// - the **replay/disambiguation test** passes: apply `best.mv` to a clone
+///   of `pre_move_pos`, then re-try the punisher (same `from → to`). If it
+///   is now illegal, or its static aftermath no longer explodes (recovers
+///   to within [`PROPHYLAXIS_REFUTED_CP`] of level), the best move
+///   *removed* the tactic ⇒ prophylaxis. If the punisher still works, the
+///   best move was a *deferred own-tactic* (Feature 1's framing) ⇒ `None`.
+///
+/// The exploded term is the dominant non-material term that worsened (in
+/// mover-POV) at the explosion ply — the human-legible "why," read off the
+/// STATIC term diff (`TermId::ALL`, excluding `Material*`) exactly as
+/// Feature 1 does. `reveal_moves` gates whether the prophylactic move's
+/// SAN is carried (same posture as [`Claim::Verdict`]'s `best_san`).
+pub fn missed_prophylaxis_claim(
+    pre_move_pos: &Position,
+    best: &MoveAnalysis,
+    user: &MoveAnalysis,
+    root_stm: Color,
+    reveal_moves: bool,
+) -> Option<Claim> {
+    // Gate 1: structural — the user's move differs from the engine's pick.
+    if user.mv == best.mv {
+        return None;
+    }
+    // Gate 2: the move genuinely gave away the advantage (the existing
+    // eval-delta gate — no absolute-level reasoning).
+    if !gave_away_advantage(best.score, user.score) {
+        return None;
+    }
+
+    // Gate 3: the user's line explodes. The opponent has a *forcing*
+    // punishing reply (the punisher) whose forcing tail drives the
+    // mover-POV static eval down by ≥ the floor by the time it quiesces.
+    // Measuring at the tail's endpoint — not the first ply — is what skips
+    // the mid-exchange recapture bounce (a sac's ply-1 trace shows the
+    // attacker temporarily up before the recapture restores parity). See
+    // the case-study doc's "comparison endpoints" note.
+    let explosion = prophylaxis_explosion(pre_move_pos, user, root_stm)?;
+    let ProphylaxisExplosion {
+        punisher_ply,
+        endpoint_ply,
+        swing_cp,
+    } = explosion;
+    let punisher = *user.pv.get(punisher_ply)?;
+
+    // Gate 4: the best line does NOT explode — it holds the position. This
+    // is what separates "the best move prevents it" from "everything
+    // loses." Measure the worst sustained drop the same way (the forcing
+    // tail of the best line, mover-POV); it must stay within the level band.
+    if let Some(best_drop) = best_line_worst_drop(pre_move_pos, best, root_stm) {
+        if best_drop >= PROPHYLAXIS_BEST_LEVEL_CP {
+            return None;
+        }
+    }
+
+    // Gate 5: replay/disambiguation — apply the best move, then replay the
+    // punisher's forcing line with the mover defending best. Prophylaxis ⇒
+    // it now fails (the best move removed the tactic); deferred own-tactic
+    // ⇒ it still collapses (and belongs to Feature 1's framing, not here).
+    let _ = punisher; // squares carried by the SAN; the replay uses the PV
+    if !punisher_refuted_by_best(pre_move_pos, best.mv, &user.pv, punisher_ply, root_stm) {
+        return None;
+    }
+
+    // The exploded term: the dominant non-material term that worsened (in
+    // mover-POV) from the level baseline to the explosion endpoint. Same
+    // TermId::ALL diff Feature 1 uses, excluding Material* (the recapture
+    // filter — the lesson is the positional collapse, not regained
+    // material).
+    let pre_trace = best.pre_move_trace; // a level baseline; the explosion is read against it
+    let climax = user.ply_traces.get(endpoint_ply)?;
+    let exploded_term = dominant_worsened_term(&pre_trace, climax, root_stm)?;
+
+    let prophylactic_san = reveal_moves.then(|| san::format(pre_move_pos, best.mv));
+
+    Some(Claim::MissedProphylaxis {
+        mover: root_stm,
+        prophylactic_san,
+        punisher_san: punisher_san(pre_move_pos, &user.pv, punisher_ply),
+        exploded_term,
+        swing_cp,
+    })
+}
+
+/// The result of the explosion scan on the user's punished line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProphylaxisExplosion {
+    /// The ply of the opponent's *forcing* reply that springs the
+    /// punishment — the move the prophylaxis needed to stop. This is what
+    /// the card names ("you needed Ra8 to stop **Rxe7+**").
+    pub punisher_ply: usize,
+    /// The ply at which the mover-POV static eval has fully collapsed —
+    /// the end of the punisher's forcing tail, where the static terms
+    /// (king danger, …) are read. Skips the mid-exchange recapture bounce.
+    pub endpoint_ply: usize,
+    /// Mover-POV cp lost from ply 0 to the endpoint (always ≥
+    /// [`PROPHYLAXIS_EXPLOSION_CP`] when `Some`).
+    pub swing_cp: i32,
+}
+
+/// Detect the punisher + explosion endpoint for `user`'s line, or `None`
+/// when the line isn't a forcing-punishment shape that collapses the
+/// mover-POV static eval.
+///
+/// The punisher is the opponent's first reply (ply 1) **only when it is
+/// forcing** (a check or capture) — a quiet ply-1 reply isn't a punishing
+/// tactic the prophylaxis "stops." The endpoint is the end of that reply's
+/// forcing tail (the contiguous run of checks / captures / forced replies),
+/// where the static eval has resolved past the recapture bounce. Fires when
+/// the mover-POV eval at the endpoint is ≥ [`PROPHYLAXIS_EXPLOSION_CP`]
+/// below ply 0.
+///
+/// Public so the retrospective UI builder can recover the punisher move's
+/// squares for its trigger arrow without re-implementing the scan.
+pub fn prophylaxis_explosion(
+    pre_move_pos: &Position,
+    user: &MoveAnalysis,
+    root_stm: Color,
+) -> Option<ProphylaxisExplosion> {
+    let pov = ply_pov_values(&user.ply_traces, root_stm);
+    if pov.len() < 2 || user.pv.len() < 2 {
+        return None;
+    }
+
+    // The punisher is the opponent's reply at ply 1; it must be forcing.
+    let mut board = pre_move_pos.clone();
+    board.do_move(user.pv[0]);
+    let punisher_mv = user.pv[1];
+    let punisher_forcing =
+        board.in_check() || board.is_capture(punisher_mv) || board.gives_check(punisher_mv);
+    if !punisher_forcing {
+        return None;
+    }
+
+    // Walk the forcing tail from the punisher (ply 1): the contiguous run of
+    // checks / captures / forced replies. The last such ply is the endpoint
+    // where the collapse has resolved.
+    let mut endpoint_ply = 1usize;
+    for (i, &mv) in user.pv.iter().enumerate().skip(1) {
+        let forcing = board.in_check() || board.is_capture(mv) || board.gives_check(mv);
+        board.do_move(mv);
+        if forcing {
+            endpoint_ply = i;
+        } else {
+            break;
+        }
+    }
+    let endpoint_ply = endpoint_ply.min(pov.len() - 1);
+
+    let swing_cp = pov[0] - pov[endpoint_ply];
+    if swing_cp < PROPHYLAXIS_EXPLOSION_CP {
+        return None;
+    }
+
+    Some(ProphylaxisExplosion {
+        punisher_ply: 1,
+        endpoint_ply,
+        swing_cp,
+    })
+}
+
+/// The punisher move (and the ply it lands on) for `user`'s exploding
+/// line, or `None` when no explosion is present. The UI builder uses this
+/// to arrow the punisher on the board; the same scan the claim builder
+/// gates on, exposed so the annotation and the prose agree on the move.
+pub fn prophylaxis_punisher_move(
+    pre_move_pos: &Position,
+    user: &MoveAnalysis,
+    root_stm: Color,
+) -> Option<(usize, Move)> {
+    let e = prophylaxis_explosion(pre_move_pos, user, root_stm)?;
+    user.pv.get(e.punisher_ply).copied().map(|m| (e.punisher_ply, m))
+}
+
+/// The worst sustained mover-POV drop along the *best* line's forcing
+/// tail, measured the same way as the user line — so Gate 4 compares
+/// like-for-like (the recapture-bounce-resistant endpoint, not a transient
+/// dip). `None` when the best line is too short. A best line whose forcing
+/// tail still collapses the mover's eval means "everything loses," not
+/// "the best move prevents it" — that disqualifies the prophylaxis card.
+fn best_line_worst_drop(
+    pre_move_pos: &Position,
+    best: &MoveAnalysis,
+    root_stm: Color,
+) -> Option<i32> {
+    let pov = ply_pov_values(&best.ply_traces, root_stm);
+    if pov.len() < 2 {
+        return None;
+    }
+    // Walk the best line's forcing tail from ply 0 and take the eval at its
+    // resolved endpoint, the same recapture-resistant point the user-line
+    // scan uses.
+    let mut board = pre_move_pos.clone();
+    let mut endpoint = 0usize;
+    for (i, &mv) in best.pv.iter().enumerate() {
+        let forcing = board.in_check() || board.is_capture(mv) || board.gives_check(mv);
+        board.do_move(mv);
+        if forcing {
+            endpoint = i;
+        } else {
+            break;
+        }
+    }
+    let endpoint = endpoint.min(pov.len() - 1);
+    Some(pov[0] - pov[endpoint])
+}
+
+/// Per-ply mover-POV (root-STM POV) static eval values along a PV's
+/// `ply_traces`. `ply_traces[i]` is evaluated at the position after
+/// `pv[0..=i]`; [`stm_after_ply`] gives the side to move there, and
+/// `white_pov_value` strips tempo + the side flip, leaving a white-POV
+/// number we re-sign to the mover.
+fn ply_pov_values(traces: &[EvalTrace], root_stm: Color) -> Vec<i32> {
+    let sign = if root_stm == Color::White { 1 } else { -1 };
+    traces
+        .iter()
+        .enumerate()
+        .map(|(i, t)| sign * t.white_pov_value(stm_after_ply(root_stm, i)).0)
+        .collect()
+}
+
+/// Render the punisher move (the explosion-ply move) to SAN from the
+/// position it is played in — `pre_move_pos` advanced through the user's
+/// PV up to (not including) the explosion ply.
+fn punisher_san(pre_move_pos: &Position, user_pv: &[Move], explosion_ply: usize) -> String {
+    let mut board = pre_move_pos.clone();
+    for &mv in user_pv.iter().take(explosion_ply) {
+        board.do_move(mv);
+    }
+    san::format(&board, user_pv[explosion_ply])
+}
+
+/// The dominant non-material term that *worsened* in the mover's POV from
+/// `baseline` to `climax`. Mirrors Feature 1's compensation scan but in
+/// reverse: the most mover-*un*favourable tapered delta (excluding the
+/// `Material*` recapture terms). `None` when nothing actually worsened.
+fn dominant_worsened_term(
+    baseline: &EvalTrace,
+    climax: &EvalTrace,
+    root_stm: Color,
+) -> Option<TermId> {
+    let sign = if root_stm == Color::White { 1 } else { -1 };
+    let mut worst: Option<(TermId, i32)> = None; // (term, delta) — most negative
+    for &term in &TermId::ALL {
+        if is_material_term(term) {
+            continue;
+        }
+        let pre = sign * tapered_cp(term.net_score(baseline), climax.phase, climax.scale_factor);
+        let post = sign * tapered_cp(term.net_score(climax), climax.phase, climax.scale_factor);
+        let delta = post - pre;
+        if worst.map_or(true, |(_, d)| delta < d) {
+            worst = Some((term, delta));
+        }
+    }
+    let (term, delta) = worst?;
+    (delta < 0).then_some(term)
+}
+
+/// How many plies of the punisher's forcing line the replay test walks.
+/// Long enough to reach the case-study refutation (`Rxe7+ Kxe7 Re1+ Kd7
+/// Qxf8 Rxf8` — 6 plies) with headroom, short enough to stay cheap (no
+/// search; one greedy static-eval pick per ply).
+const PROPHYLAXIS_REPLAY_PLIES: usize = 8;
+
+/// The replay/disambiguation test: does playing `best_mv` *refute* the
+/// punishing line? Apply `best_mv` to a clone of `pre_move_pos`, then
+/// replay the punisher's forcing tail — but on the **new** position, where
+/// `best_mv` may have changed the defence.
+///
+/// The replay is a tiny greedy walk, not a blind PV replay: the opponent
+/// plays its forcing punisher moves (taken from the user's PV while they
+/// stay legal — the same checks / captures that exploded the original
+/// line), and the **mover plays its static-eval-best legal reply each
+/// turn**. That is what lets `best_mv`'s contribution show: in the case
+/// study `Ra8` puts a rook on the 8th rank, so when the line reaches
+/// `Qxf8+` the mover's best reply is now `Rxf8` — capturing the queen and
+/// refuting the sac. A blind PV replay would force the original `…Kc7` and
+/// miss it.
+///
+/// Refuted (⇒ prophylaxis) when, after the walk, the mover-POV static eval
+/// no longer collapsed — it holds within [`PROPHYLAXIS_REFUTED_CP`] of the
+/// post-`best_mv` level, i.e. the punisher's swing has been answered. NOT
+/// refuted (⇒ deferred own-tactic, Feature 1's framing) when the eval still
+/// collapses despite the mover's best defence.
+fn punisher_refuted_by_best(
+    pre_move_pos: &Position,
+    best_mv: Move,
+    user_pv: &[Move],
+    punisher_ply: usize,
+    root_stm: Color,
+) -> bool {
+    let mut board = pre_move_pos.clone();
+    board.do_move(best_mv);
+    // Level baseline from the mover's POV after the best move (opponent to
+    // move). `evaluate` is side-to-move POV; re-sign to the mover.
+    let level = mover_pov_eval(&board, root_stm);
+
+    // Greedy forcing replay. The opponent's intended forcing moves come
+    // from the user PV (from `punisher_ply` onward); the mover answers with
+    // its eval-best legal reply. Stop when the line goes quiet (the
+    // opponent's intended move is no longer forcing / not legal) or after
+    // the ply budget.
+    let mut opp_idx = punisher_ply;
+    for _ in 0..PROPHYLAXIS_REPLAY_PLIES {
+        if board.side_to_move() == root_stm {
+            // Mover's turn: pick its static-eval-best legal reply (the
+            // defence). This is where `best_mv`'s resource — e.g. the a8
+            // rook capturing on f8 — gets to fire.
+            let Some(reply) = mover_best_reply(&mut board, root_stm) else {
+                break; // no legal move (mate / stalemate) — leave eval as is
+            };
+            board.do_move(reply);
+        } else {
+            // Opponent's turn: replay its intended forcing punisher move
+            // while it stays legal *and* forcing; otherwise the punishment
+            // has run out of forcing steam, so stop.
+            let Some(&intended) = user_pv.get(opp_idx) else {
+                break;
+            };
+            opp_idx += 1;
+            let forcing =
+                board.in_check() || board.is_capture(intended) || board.gives_check(intended);
+            if !forcing {
+                break;
+            }
+            let Some(mv) = legal_matching(&mut board, intended) else {
+                // The best move made the opponent's intended forcing move
+                // illegal — the punishment is structurally gone.
+                return true;
+            };
+            board.do_move(mv);
+        }
+    }
+
+    // After the greedy defence, did the mover hold? Read the mover-POV
+    // static eval (re-signed). If it never collapsed past the level, the
+    // best move refuted the punisher ⇒ prophylaxis.
+    let held = mover_pov_eval(&board, root_stm);
+    level - held < PROPHYLAXIS_REFUTED_CP
+}
+
+/// The mover's static-eval-best legal reply in `pos` (a one-ply greedy
+/// pick, no search), or `None` when there are no legal moves. Used by the
+/// replay test so the defender gets to play its refuting resource (the
+/// capture `best_mv` enabled) rather than a blindly-replayed PV move.
+fn mover_best_reply(pos: &mut Position, mover: Color) -> Option<Move> {
+    legal_moves_vec(pos)
+        .into_iter()
+        .map(|mv| {
+            let mut after = pos.clone();
+            after.do_move(mv);
+            // After the mover's reply it's the opponent's turn; re-sign the
+            // side-to-move eval to the mover's POV.
+            (mv, mover_pov_eval(&after, mover))
+        })
+        .max_by_key(|&(_, v)| v)
+        .map(|(mv, _)| mv)
+}
+
+/// `pos`'s static eval in `mover` (root-STM) POV. `evaluate` returns a
+/// side-to-move-POV value; flip it when the side to move isn't the mover.
+fn mover_pov_eval(pos: &Position, mover: Color) -> i32 {
+    let v = evaluate(pos).0;
+    if pos.side_to_move() == mover {
+        v
+    } else {
+        -v
+    }
+}
+
+/// Find the legal move matching `wanted`'s `from → to` in `pos`, if any.
+/// The punisher recovered from a PV carries its full encoding; re-matching
+/// against freshly generated legal moves confirms it is still playable
+/// after the best move (and picks up the correct flags, e.g. promotion).
+fn legal_matching(pos: &mut Position, wanted: Move) -> Option<Move> {
+    legal_moves_vec(pos)
+        .into_iter()
+        .find(|m| m.from() == wanted.from() && m.to() == wanted.to())
 }
 
 /// Taper a packed `(mg, eg)` [`Score`] to engine-cp at `phase` +
