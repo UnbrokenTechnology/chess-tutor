@@ -37,7 +37,11 @@
 //! the chess.com distinction (and our own opponent bot's
 //! `miss_chance` / `blunder_chance` knobs in `noise.rs`):
 //!
-//! - **Blunder** — the move loses *your own* material.
+//! - **Blunder** — the move loses *your own* material, measured
+//!   relative to the engine's best line (`user_net − best_net`). The
+//!   relative baseline matters: a loss that's baked into the position
+//!   (a trapped piece that falls in *every* line) is not something the
+//!   move dropped, and must not floor an otherwise-best move.
 //! - **Miss** — the move fails to *win* material that was on offer:
 //!   the engine's best line wins material by force and your move
 //!   neither grabs it nor hangs your own.
@@ -205,12 +209,19 @@ pub fn classify_move_with_material(
 
     // Material-loss floor. Win-probability saturation must NEVER launder a
     // dropped piece into a soft verdict — a rook hung while up a queen is
-    // still a blunder, and we will not teach otherwise. Fires only when the
+    // still a blunder, and we will not teach otherwise. Measured as material
+    // conceded *relative to the best line*, not the user's absolute net:
+    // when a loss is already baked into the position (a trapped piece falls
+    // in every line, including the engine's best), the user's move didn't
+    // drop anything — flooring it would grade the *position*, not the move,
+    // and in a hopeless position it would floor every legal move to
+    // Mistake/Blunder with no `BestAvailable` escape. Fires only when the
     // position actually worsened; a sound sacrifice that held or improved
     // the eval (`absolute_swing >= 0`) is exempt and owned by the swing
     // guard / Best band below.
-    let material_floor = if absolute_swing < 0 && user_net_mg <= -one_pawn {
-        Some(if user_net_mg <= -3 * one_pawn {
+    let conceded_mg = user_net_mg - best_net_mg;
+    let material_floor = if absolute_swing < 0 && conceded_mg <= -one_pawn {
+        Some(if conceded_mg <= -3 * one_pawn {
             MoveVerdict::Blunder
         } else {
             MoveVerdict::Mistake
@@ -580,6 +591,43 @@ mod tests {
             matches!(v, MoveVerdict::Best | MoveVerdict::Good),
             "expected Best/Good for a 70cp gap at +7.5, got {v:?}"
         );
+    }
+
+    /// The trapped-knight-on-a8 case: a piece is lost in EVERY line,
+    /// including the engine's best, so the material loss is baked into the
+    /// position rather than caused by the move. The engine's own #1 move in
+    /// a hopeless position must read `BestAvailable`, not get floored to
+    /// Mistake/Blunder by material the player never had a way to keep.
+    /// (Real game: every one of 28 legal moves was graded Mistake/Blunder
+    /// because the a8 knight fell in every PV.)
+    #[test]
+    fn baked_in_material_loss_does_not_floor_the_best_available_move() {
+        // Engine's #1 move: static pre −1295, searched −1413 (deeper search
+        // sees more of the rot, so the swing is slightly negative), both
+        // lines lose the trapped knight net ~−1 pawn after pawn trades.
+        let v = classify_move_with_material(
+            Value(-1413), // user == best move's searched score
+            Value(-1413),
+            Value(-1295),
+            -PAWN, // user's PV loses the trapped piece (net, after trades)
+            -PAWN, // ...and so does the best line: nothing was conceded
+        );
+        assert_eq!(v, MoveVerdict::BestAvailable);
+    }
+
+    /// In the same hopeless position, a move that loses MORE material than
+    /// the baked-in loss still trips the floor — relative measurement keeps
+    /// the floor alive for genuine extra hangs.
+    #[test]
+    fn extra_material_conceded_beyond_baked_in_loss_still_floors() {
+        let v = classify_move_with_material(
+            Value(-2200),
+            Value(-1413),
+            Value(-1295),
+            -PAWN - 6 * PAWN, // baked-in knight loss PLUS a hung rook
+            -PAWN,            // best line only loses the trapped piece
+        );
+        assert_eq!(v, MoveVerdict::Blunder);
     }
 
     /// Saturation must never launder a hang: dropping a rook while up a
