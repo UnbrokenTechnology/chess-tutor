@@ -6,7 +6,7 @@ use std::sync::mpsc::{self};
 use std::thread;
 
 use chess_tutor_engine::book::BookCursor;
-use chess_tutor_engine::opponent::{EvalMask, NoiseProfile, OpponentProfile};
+use chess_tutor_engine::opponent::{BookSelection, EvalMask, NoiseProfile, OpponentProfile};
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, Move, MoveKind, PieceType};
 
@@ -218,6 +218,7 @@ impl Session {
         &self.start_position
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_new_game(
         &mut self,
         position: Position,
@@ -225,6 +226,7 @@ impl Session {
         depth: u32,
         noise: NoiseProfile,
         eval_mask: EvalMask,
+        book: BookSelection,
     ) {
         self.gen = self.gen.wrapping_add(1);
         self.engine_thinking = false;
@@ -236,11 +238,12 @@ impl Session {
         self.viewing_index = None;
         self.engine_plays = engine_plays;
         self.depth = depth;
-        // Fresh seed + curated book for the new game; carry over the
-        // noise + eval-mask settings the user picked in the dialog.
+        // Fresh seed for the new game; carry over the noise, eval-mask,
+        // and opening-book selections the user picked in the dialog.
         self.opponent = OpponentProfile::new_random();
         self.opponent.noise = noise;
         self.opponent.eval_mask = eval_mask;
+        self.opponent.book = book;
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
         self.book_out_announced = false;
         self.pending_trap = None;
@@ -303,6 +306,7 @@ impl Session {
         let depth = form.depth;
         let noise = form.noise.clone();
         let eval_mask = form.eval_mask;
+        let book = form.book.to_book();
         // The Start screen is the true home of these options (PLAN
         // step 5): commit them onto the session before the game starts.
         // `start_new_game` deliberately doesn't reset them, so applying
@@ -317,6 +321,6 @@ impl Session {
         self.active_overlays = active_overlays;
         self.show_eval_bar = show_eval_bar;
         self.retrospective_depth = retrospective_depth;
-        self.start_new_game(position, engine_plays, depth, noise, eval_mask);
+        self.start_new_game(position, engine_plays, depth, noise, eval_mask, book);
     }
 }

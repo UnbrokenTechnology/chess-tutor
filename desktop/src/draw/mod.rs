@@ -13,6 +13,7 @@ pub(crate) mod dialog;
 pub(crate) mod eval_bar;
 pub(crate) mod hint_popover;
 pub(crate) mod icon;
+pub(crate) mod opening_picker;
 pub(crate) mod options;
 pub(crate) mod player_strip;
 pub(crate) mod settings;

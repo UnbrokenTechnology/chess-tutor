@@ -19,6 +19,7 @@ pub mod material;
 pub mod movegen;
 pub mod movepick;
 pub mod noise;
+pub mod opening_tree;
 pub mod openings;
 pub mod opponent;
 pub mod pawns;

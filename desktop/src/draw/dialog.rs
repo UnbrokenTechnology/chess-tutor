@@ -111,6 +111,13 @@ pub(crate) fn draw(
                 draw_strength_controls(ui, &mut form.depth, &mut form.noise);
 
                 ui.add_space(8.0);
+                egui::CollapsingHeader::new("Openings — which lines the bot may play")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        super::opening_picker::draw(ui, &mut form.book);
+                    });
+
+                ui.add_space(8.0);
                 ui.collapsing("Eval mask (advanced) — categories the bot is blind to", |ui| {
                     ui.label(
                         egui::RichText::new(

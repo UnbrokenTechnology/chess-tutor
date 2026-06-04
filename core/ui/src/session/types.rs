@@ -5,7 +5,8 @@
 use super::*;
 use std::time::Duration;
 
-use chess_tutor_engine::opponent::{EvalMask, NoiseProfile};
+use chess_tutor_engine::openings::OpeningId;
+use chess_tutor_engine::opponent::{BookSelection, EvalMask, NoiseProfile};
 use chess_tutor_engine::position::{Position, StateInfo};
 use chess_tutor_engine::traps::{PendingTrap, TrapEvent, TrapHit};
 use chess_tutor_engine::types::{Color, Move, Square, Value};
@@ -31,6 +32,62 @@ pub enum ColorChoice {
     Both,
 }
 
+/// Which openings the bot may play, in editable form for the New Game
+/// dialog. Converts to/from the engine's [`BookSelection`] at the
+/// session boundary. The `allowed` set is only consulted in
+/// [`OpeningMode::Only`]; the other modes ignore it (so a user can flip
+/// to Any/None and back without losing their picks).
+#[derive(Clone, Debug)]
+pub struct OpeningSelection {
+    pub mode: OpeningMode,
+    pub allowed: std::collections::HashSet<OpeningId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpeningMode {
+    /// Bot may play any theoretical opening (full book).
+    Any,
+    /// Bot may only play the lines in `allowed`.
+    Only,
+    /// No book — bot plays from move 1 by search.
+    None,
+}
+
+impl OpeningSelection {
+    /// Default for a fresh game: full book (matches prior GUI behavior).
+    pub fn any() -> Self {
+        Self { mode: OpeningMode::Any, allowed: std::collections::HashSet::new() }
+    }
+
+    /// Recover an editable selection from a committed [`BookSelection`].
+    /// An `Allowed` set the size of the whole book is treated as `Any`.
+    pub fn from_book(book: &BookSelection) -> Self {
+        match book {
+            BookSelection::None => {
+                Self { mode: OpeningMode::None, allowed: std::collections::HashSet::new() }
+            }
+            BookSelection::Allowed(ids) => {
+                if ids.len() == chess_tutor_engine::book::all_ids().len() {
+                    Self::any()
+                } else {
+                    Self { mode: OpeningMode::Only, allowed: ids.iter().copied().collect() }
+                }
+            }
+        }
+    }
+
+    /// Commit to the engine's [`BookSelection`]. `Only` with an empty
+    /// set maps to `Allowed([])`, which the engine treats as "no book"
+    /// — the same as `None`.
+    pub fn to_book(&self) -> BookSelection {
+        match self.mode {
+            OpeningMode::Any => BookSelection::Allowed(chess_tutor_engine::book::all_ids()),
+            OpeningMode::None => BookSelection::None,
+            OpeningMode::Only => BookSelection::Allowed(self.allowed.iter().copied().collect()),
+        }
+    }
+}
+
 pub struct NewGameForm {
     pub color: ColorChoice,
     pub fen: String,
@@ -45,6 +102,9 @@ pub struct NewGameForm {
     pub noise: NoiseProfile,
     /// Eval categories the bot is blind to. Same persistence rule.
     pub eval_mask: EvalMask,
+    /// Which openings the bot may play. Persists across New Game clicks
+    /// like the other knobs.
+    pub book: OpeningSelection,
     /// Learning-mode preferences set up on the Start screen — the
     /// Support intervention pause, auto-coach, and best-move reveal.
     /// This screen is their true home (PLAN build-order step 5); the
@@ -79,6 +139,7 @@ impl NewGameForm {
             retrospective_depth: session.retrospective_depth,
             noise: session.opponent.noise.clone(),
             eval_mask: session.opponent.eval_mask,
+            book: OpeningSelection::from_book(&session.opponent.book),
             learning: session.learning,
             active_overlays: session.active_overlays.clone(),
             show_eval_bar: session.show_eval_bar,
@@ -97,6 +158,7 @@ impl NewGameForm {
             retrospective_depth: ANALYTICAL_DEPTH,
             noise: NoiseProfile::default(),
             eval_mask: EvalMask::EMPTY,
+            book: OpeningSelection::any(),
             learning: crate::learning_mode::LearningPreferences::default(),
             active_overlays: std::collections::HashSet::new(),
             show_eval_bar: true,
@@ -198,4 +260,8 @@ pub(crate) struct PendingPromotion {
     /// is Q, R, B, N to match the on-screen stack.
     pub(crate) candidates: [Move; 4],
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod tests;
 
