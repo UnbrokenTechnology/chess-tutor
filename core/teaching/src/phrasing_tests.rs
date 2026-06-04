@@ -1433,3 +1433,56 @@ fn castling_loss_opponent_side_reframes_by_perspective() {
     );
     assert!(opponent.summary.starts_with("You forfeited castling"), "{}", opponent.summary);
 }
+
+// ---- PositionalWin: sound-sacrifice justification --------------------
+
+/// Build a `Claim::PositionalWin` modelling the case study: White down a
+/// point of material, king-danger swings hard.
+fn positional_win() -> Claim {
+    Claim::PositionalWin {
+        mover: Color::White,
+        sacrificed_points: -1, // down a point
+        dominant_term: TermId::KingDanger,
+        term_pre_cp: 286,
+        term_post_cp: 3211,
+    }
+}
+
+#[test]
+fn positional_win_player_played_is_praise_leading_with_material_cost() {
+    let p = phrase(&positional_win(), &ctx(Perspective::Player));
+    // Leads with the material cost ("you give up a pawn"), then names the
+    // compensating term. No raw search cp in the summary.
+    assert!(p.summary.starts_with("Worth it: you give up a pawn"), "{}", p.summary);
+    assert!(p.summary.contains("king safety"), "{}", p.summary);
+    // The detail shows the pre→post swing in pawns, never engine cp.
+    let detail = p.detail.expect("a detail line with the term swing");
+    assert!(detail.contains("King safety goes"), "{}", detail);
+    assert!(detail.contains("→"), "{}", detail);
+}
+
+#[test]
+fn positional_win_opponent_reframes_to_their_sacrifice() {
+    let o = phrase(&positional_win(), &ctx(Perspective::Opponent));
+    // From the player's POV the opponent found the sacrifice: "they give
+    // up …", and the term swings in *their* favour.
+    assert!(o.summary.starts_with("Worth it for them: they give up a pawn"), "{}", o.summary);
+    assert!(o.summary.contains("their favour"), "{}", o.summary);
+    // Never says "you give up" in the opponent reframe.
+    assert!(!o.summary.contains("you give up"), "{}", o.summary);
+}
+
+#[test]
+fn positional_win_multi_point_sacrifice_reads_as_points() {
+    // A two-point sacrifice (e.g. rook for bishop) reads "N points".
+    let claim = Claim::PositionalWin {
+        mover: Color::Black,
+        sacrificed_points: -2,
+        dominant_term: TermId::PiecesTrappedRook,
+        term_pre_cp: 0,
+        term_post_cp: 104,
+    };
+    let p = phrase(&claim, &ctx(Perspective::Player));
+    assert!(p.summary.contains("you give up 2 points"), "{}", p.summary);
+    assert!(p.summary.contains("trapped rook"), "{}", p.summary);
+}

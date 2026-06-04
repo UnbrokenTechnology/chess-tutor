@@ -395,6 +395,11 @@ pub enum RetrospectiveCategory {
     /// Walked-into tactics surface as a separate forced-consequences
     /// card and don't use this category.
     Tactic,
+    /// A sound-sacrifice justification — the engine's best move is down
+    /// material yet at least equal, and a positional term (king danger,
+    /// a frozen rook, …) pays for it. A tactic-grade card (top group, not
+    /// quiet-positional). Drives the "down material, still winning" lesson.
+    PositionalWin,
     /// Secondary / fallback eval-term shifts (the old "Helped" /
     /// "Hurt" lines).
     Secondary,

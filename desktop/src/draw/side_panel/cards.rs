@@ -328,6 +328,9 @@ pub(crate) fn category_glyph(category: RetrospectiveCategory) -> &'static str {
         // from Threats' crossed-swords glyph so the two cards read as
         // different concepts in a glance.
         RetrospectiveCategory::Tactic => "★",
+        // Flame for a sound positional sacrifice — "burning a piece to
+        // light up the enemy king." Distinct from the tactic star.
+        RetrospectiveCategory::PositionalWin => "♛",
         RetrospectiveCategory::Secondary => "…",
     }
 }

@@ -22,8 +22,8 @@ use chess_tutor_engine::analysis::{
     CaptureEvent, CastlingOutcome, EscapeKind, HangingPiece, InitiativeOutcome, KingSafetyOutcome,
     MaterialOutcome, MobilityOutcome, MoveAnalysis, MoveVerdict, PassedPawnsOutcome,
     PawnStructureOutcome, PieceLocation, PiecesPositionalOutcome, PressureKind, PressuredPiece,
-    PriorMove, SpaceOutcome, SurpriseKind, TacticEscape, TacticHit, TacticsOutcome, ThreatsOutcome,
-    TermId,
+    win_chances, PriorMove, SpaceOutcome, SurpriseKind, TacticEscape, TacticHit, TacticsOutcome,
+    ThreatsOutcome, TermId,
 };
 use chess_tutor_engine::eval::{
     MobilityBreakdown, PassedBreakdown, PawnsBreakdown, PiecesBreakdown,
@@ -31,7 +31,7 @@ use chess_tutor_engine::eval::{
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
-use chess_tutor_engine::types::{Color, Move, PieceType, Value};
+use chess_tutor_engine::types::{Color, Move, PieceType, Score, Value};
 
 /// One salient teaching point about a played move, in mover-relative terms.
 ///
@@ -338,6 +338,28 @@ pub enum Claim {
     /// reframe). `phrase` applies the "you" / "they" flip.
     CastlingLoss {
         side: CastleSide,
+    },
+
+    /// The sound-sacrifice justification — the engine's best move ends
+    /// **down material** yet the search rates it at least equal, because
+    /// a purely *positional* term (king danger, a frozen enemy rook, …)
+    /// swings hard in the mover's favour across the forcing tail. The
+    /// "you're down a point but it's worth it" lesson, driven off the
+    /// STATIC eval term diff (the search under-sells these), explicitly
+    /// **excluding** any regained material so the compensation is honest.
+    ///
+    /// Mover-relative: `sacrificed_points` is the mover's material
+    /// balance at the climax minus the baseline (negative = down
+    /// material), `dominant_term` the non-material term that carries the
+    /// compensation, `term_pre_cp` / `term_post_cp` its mover-POV tapered
+    /// engine-cp at the baseline and climax. `phrase` applies the "you" /
+    /// "they" reframe (played = praise, missed = "you had this").
+    PositionalWin {
+        mover: Color,
+        sacrificed_points: i32,
+        dominant_term: TermId,
+        term_pre_cp: i32,
+        term_post_cp: i32,
     },
 }
 
@@ -2009,6 +2031,186 @@ pub fn castling_claims(outcome: &CastlingOutcome) -> Vec<Claim> {
         });
     }
     claims
+}
+
+/// Magnitude floor (engine-cp at the climax phase) the dominant
+/// non-material term must clear for a [`Claim::PositionalWin`] to fire.
+/// ~0.7 of a pawn on the PawnEG≈213 scale — well above the 1-2 cp
+/// tapered-rescoring wobble, comfortably below the case study's
+/// king-danger swing (`Rxe7+`: +286 → +3211 mover-POV mg, hundreds of cp
+/// even after the phase discount). Tuned so the card only fires when a
+/// *real* positional return is paying for the sacrificed material.
+pub const POSITIONAL_WIN_TERM_FLOOR_CP: i32 = 150;
+
+/// Build the sound-sacrifice justification claim for the engine's best
+/// move, or `None` when the gate doesn't hold.
+///
+/// Fires when ALL of:
+/// - `best.pv` is a [`is_sacrifice`] for `root_stm` (down ≥ 2 points of
+///   material by the mover's 2nd move), AND
+/// - the line is sound — [`win_chances`] of `best.score` ≥ 0 (at least
+///   equal), AND
+/// - a dominant **non-material** term swings ≥ [`POSITIONAL_WIN_TERM_FLOOR_CP`]
+///   in the mover's favour from the baseline trace to the climax trace.
+///
+/// The compensation is computed by diffing `best.pre_move_trace`
+/// (baseline) against `best.ply_traces[settled_ply]` (climax) over
+/// [`TermId::ALL`] **excluding every `Material*` variant** — the
+/// material-recapture filter that keeps the card honest (it must justify
+/// the sacrifice *without* counting regained material). Each candidate
+/// term's `(mg, eg)` delta is tapered at the climax phase + scale factor,
+/// signed to the mover's POV; the largest mover-favourable one wins.
+///
+/// `sacrificed_points` is the mover's material balance at the climax
+/// minus the baseline (negative = down material), read from piece counts
+/// — the same shape [`is_sacrifice`] gates on.
+pub fn positional_win_claim(best: &MoveAnalysis, pre_move_pos: &Position, root_stm: Color) -> Option<Claim> {
+    // Gate 1: the best line is a sacrifice for the mover.
+    if !is_sacrifice(pre_move_pos, &best.pv, root_stm) {
+        return None;
+    }
+    // Gate 2: the line is sound — search rates it at least equal.
+    if win_chances(best.score) < 0.0 {
+        return None;
+    }
+    // The mover's POV sign for net (white − black) term scores.
+    let sign = if root_stm == Color::White { 1 } else { -1 };
+
+    let baseline = &best.pre_move_trace;
+    // Climax = the end of the *forcing tail*, NOT the settled ply. The
+    // settled ply walks all the way to where the search score quiesces —
+    // by then the attack has been *converted into material* and the
+    // game has thinned into an endgame (phase → 0), which discounts the
+    // very middlegame king-danger term that is the lesson. The forcing
+    // tail (the contiguous run of checks / captures / forced replies from
+    // the root) is where the sacrifice is paid and the positional
+    // compensation peaks while the mover is still down material — exactly
+    // the case study's Position 3 (after `…Qxf8`, down a point, phase 22,
+    // king danger raging). See the case-study doc's "comparison endpoints"
+    // note.
+    let climax_idx = forcing_tail_climax(pre_move_pos, &best.pv).min(best.ply_traces.len().saturating_sub(1));
+    let climax = best.ply_traces.get(climax_idx)?;
+
+    // Gate 3 + compensation: the dominant non-material term. Diff every
+    // TermId except the Material* variants (the recapture filter),
+    // tapered at the climax phase, signed to the mover. Largest
+    // mover-favourable delta wins; require it to clear the floor.
+    let mut best_term: Option<(TermId, i32, i32, i32)> = None; // (term, delta, pre, post)
+    for &term in &TermId::ALL {
+        if is_material_term(term) {
+            continue;
+        }
+        let pre_cp = sign * tapered_cp(term.net_score(baseline), climax.phase, climax.scale_factor);
+        let post_cp = sign * tapered_cp(term.net_score(climax), climax.phase, climax.scale_factor);
+        let delta = post_cp - pre_cp;
+        if best_term.map_or(true, |(_, d, _, _)| delta > d) {
+            best_term = Some((term, delta, pre_cp, post_cp));
+        }
+    }
+    let (dominant_term, delta, term_pre_cp, term_post_cp) = best_term?;
+    if delta < POSITIONAL_WIN_TERM_FLOOR_CP {
+        return None;
+    }
+
+    // Sacrificed material = mover's point balance at the climax minus the
+    // baseline (negative = down material). Read from the climax position
+    // (apply the climax PV prefix to a clone of pre_move_pos) vs the
+    // pre-move balance — the same shape `is_sacrifice` gates on.
+    let baseline_pts = material_diff_points_pov(pre_move_pos, root_stm);
+    let mut scratch = pre_move_pos.clone();
+    for &mv in best.pv.iter().take(climax_idx + 1) {
+        scratch.do_move(mv);
+    }
+    let climax_pts = material_diff_points_pov(&scratch, root_stm);
+    let sacrificed_points = climax_pts - baseline_pts;
+
+    Some(Claim::PositionalWin {
+        mover: root_stm,
+        sacrificed_points,
+        dominant_term,
+        term_pre_cp,
+        term_post_cp,
+    })
+}
+
+/// The ply index that ends the *forcing tail* of `pv` from `root` — the
+/// last ply of the contiguous prefix of forcing moves. A move counts as
+/// forcing when the side to move was already in check (a forced reply),
+/// the move is a capture, or it gives check. The first move that is none
+/// of these (a genuinely quiet, optional move) ends the tail.
+///
+/// This is the natural "after the forcing sequence quiesces" endpoint the
+/// sacrifice-justification card reads its static compensation at — the
+/// king hunt's climax, before the attack gets converted into material and
+/// the position thins into an endgame. Clamped to ≥ 0 (ply 0 is always
+/// the sacrifice itself, by construction a capture or check).
+///
+/// Public so the retrospective UI builder can paint its king-ring /
+/// trapped-rook annotations on the *same* climax board the claim's
+/// compensation was read from.
+pub fn forcing_tail_climax(root: &Position, pv: &[Move]) -> usize {
+    let mut pos = root.clone();
+    let mut last_forcing = 0usize;
+    for (i, &mv) in pv.iter().enumerate() {
+        let forcing = pos.in_check() || pos.is_capture(mv) || pos.gives_check(mv);
+        pos.do_move(mv);
+        if forcing {
+            last_forcing = i;
+        } else {
+            break;
+        }
+    }
+    last_forcing
+}
+
+/// Whether `term` is a material-derived term — the recapture filter for
+/// [`positional_win_claim`]. Covers the two `Material*` variants (raw
+/// piece values + the PSQ positional half) **and `Imbalance`**: the
+/// imbalance polynomial is a non-linear function of piece *counts*
+/// (bishop pair, rook redundancy, …), so it shifts purely because
+/// material left the board. Counting it as "compensation" would let the
+/// card justify a sacrifice with the very material it spent — exactly the
+/// double-count the filter exists to prevent (the case study's `Rxe7+`
+/// swings Imbalance just from the exchange, while the *teachable* story is
+/// king danger). Matched by enum identity so a new material sub-term is a
+/// compile-time prompt.
+fn is_material_term(term: TermId) -> bool {
+    matches!(
+        term,
+        TermId::MaterialPieceValue | TermId::MaterialPsqPositional | TermId::Imbalance
+    )
+}
+
+/// `color`'s material balance in lichess point units (P1 N3 B3 R5 Q9),
+/// mover-POV (positive = `color` ahead). Mirrors the engine-private
+/// `material_diff_points`; lives here because the climax balance is read
+/// from a UI-side position walk.
+fn material_diff_points_pov(pos: &Position, color: Color) -> i32 {
+    const VALUES: [(PieceType, i32); 5] = [
+        (PieceType::Pawn, 1),
+        (PieceType::Knight, 3),
+        (PieceType::Bishop, 3),
+        (PieceType::Rook, 5),
+        (PieceType::Queen, 9),
+    ];
+    VALUES
+        .iter()
+        .map(|&(pt, v)| (pos.count(color, pt) as i32 - pos.count(!color, pt) as i32) * v)
+        .sum()
+}
+
+/// Taper a packed `(mg, eg)` [`Score`] to engine-cp at `phase` +
+/// `scale_factor`, matching the evaluator's blend formula (the same one
+/// `analysis::term_delta::tapered_cp` applies). Replicated here because
+/// that function is engine-private and the positional-win card needs to
+/// taper individual net term scores at the *climax* phase, not the ply-1
+/// phase the precomputed `term_deltas` use.
+fn tapered_cp(score: Score, phase: i32, scale_factor: i32) -> i32 {
+    const PHASE_MAX: i32 = 128;
+    const SCALE_NORMAL: i32 = 64;
+    let mg_part = score.mg().0 * phase;
+    let eg_part = score.eg().0 * (PHASE_MAX - phase) * scale_factor / SCALE_NORMAL;
+    (mg_part + eg_part) / PHASE_MAX
 }
 
 #[cfg(test)]

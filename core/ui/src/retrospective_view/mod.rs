@@ -27,6 +27,7 @@ mod override_note;
 mod passed_pawns;
 mod pawn_structure;
 mod pieces;
+mod positional_win;
 mod secondary;
 mod space;
 mod tactic;
@@ -64,6 +65,7 @@ use mobility::*;
 use passed_pawns::*;
 use pawn_structure::*;
 use pieces::*;
+use positional_win::*;
 use secondary::*;
 use space::*;
 use tactic::*;
@@ -258,6 +260,20 @@ pub fn build_retrospective_view(
         perspective,
     ) {
         items.push(it);
+    }
+
+    // Positional-win card (Feature 1): when the engine's best move is a
+    // *sound sacrifice* (down material, search-positive), explain the
+    // positional compensation off the STATIC term diff — "down a point,
+    // but king safety swings hard in your favour." A tactic-grade card,
+    // so it sits in the top group with the tactic cards. Consume its
+    // dominant term so the Secondary "Other shifts" builder doesn't
+    // double-render the same swing.
+    if let Some((it, dominant_term)) =
+        build_positional_win_item(best, pre_move_pos, root_stm, perspective)
+    {
+        items.push(it);
+        consumed_terms.push(dominant_term);
     }
 
     // Desperado-aware material narration (PLAN §4): when a doomed piece

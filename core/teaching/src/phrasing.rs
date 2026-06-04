@@ -210,6 +210,13 @@ pub fn phrase(claim: &Claim, ctx: &PhrasingContext) -> Phrasing {
         } => phrase_surprise(ctx, *verdict, *kind),
         Claim::CenterStructure { mover: _, kind } => phrase_center_structure(ctx, *kind),
         Claim::CastlingLoss { side } => phrase_castling_loss(ctx, *side),
+        Claim::PositionalWin {
+            mover: _,
+            sacrificed_points,
+            dominant_term,
+            term_pre_cp,
+            term_post_cp,
+        } => phrase_positional_win(ctx, *sacrificed_points, *dominant_term, *term_pre_cp, *term_post_cp),
     }
 }
 
@@ -1929,6 +1936,73 @@ fn phrase_castling_loss(ctx: &PhrasingContext, side: CastleSide) -> Phrasing {
     Phrasing {
         summary,
         detail: None,
+    }
+}
+
+/// Phrase a [`Claim::PositionalWin`] — the sound-sacrifice justification.
+/// Leads with the material cost, then names the compensating positional
+/// term; the pre→post term swing (in pawns) goes in the detail. No raw
+/// search cp ever appears.
+///
+/// | perspective | wording                                            |
+/// |-------------|----------------------------------------------------|
+/// | Player      | "Worth it: you give up {material}, but {term} …"   |
+/// | Opponent    | "Worth it for them: they give up {material}, …"    |
+///
+/// `sacrificed_points` is mover-POV (negative = down material); the card
+/// only fires on a real sacrifice, so it's negative here.
+fn phrase_positional_win(
+    ctx: &PhrasingContext,
+    sacrificed_points: i32,
+    dominant_term: TermId,
+    term_pre_cp: i32,
+    term_post_cp: i32,
+) -> Phrasing {
+    let material = describe_points_lost(-sacrificed_points);
+    let term = dominant_term.pretty_label();
+    let subject = match ctx.perspective {
+        Perspective::Player => "you give up",
+        Perspective::Opponent => "they give up",
+    };
+    let lead = match ctx.perspective {
+        Perspective::Player => "Worth it",
+        Perspective::Opponent => "Worth it for them",
+    };
+    let possessive = match ctx.perspective {
+        Perspective::Player => "your",
+        Perspective::Opponent => "their",
+    };
+    let summary = format!(
+        "{lead}: {subject} {material}, but {term} swings hard in {possessive} favour."
+    );
+    // Detail: the pre→post swing of the dominant term, in pawns. Never
+    // the raw search number — the static term diff is the teaching point.
+    let detail = Some(format!(
+        "{} goes {} → {} (positional compensation, excluding any material won back).",
+        capitalize(term),
+        format_delta_pawns(term_pre_cp),
+        format_delta_pawns(term_post_cp),
+    ));
+    Phrasing { summary, detail }
+}
+
+/// Describe a material deficit of `points` (always ≥ 0 here) as a short
+/// human phrase — "a pawn" for 1, "N points" otherwise. Mirrors the
+/// material card's terse point bookkeeping without a captured-piece
+/// ledger (the sacrifice card doesn't have the per-piece events).
+fn describe_points_lost(points: i32) -> String {
+    match points {
+        n if n <= 1 => "a pawn".to_string(),
+        n => format!("{n} points"),
+    }
+}
+
+/// Capitalize the first character of a label for sentence-leading prose.
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
