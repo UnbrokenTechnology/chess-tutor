@@ -1,0 +1,13 @@
+# External tooling, neural-net weights, and opening books for the
+# ELO-calibration harness. Downloaded by fetch-tools.sh; NEVER committed
+# — they are large, externally licensed (Maia is GPLv3, lc0/fastchess/Ordo
+# their own), and never shipped in the product. Only our own scripts +
+# docs + generated experiment data live in git.
+tools/
+nets/
+books/
+
+# Generated experiment artifacts (PGNs, rating tables, fits) — large and
+# reproducible from the scripts. Track summaries by hand if useful.
+runs/
+*.pgn
