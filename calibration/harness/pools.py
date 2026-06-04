@@ -1,0 +1,51 @@
+"""Fixed opponent pools for the grid runs.
+
+A grid config (seed) is rated by playing a GAUNTLET against a fixed
+opponent pool — never the full O(n^2) round-robin among thousands of
+configs. The pool has two parts:
+
+* **Maia ladder** (9 nets) — the human-scale anchors.
+* **Reference bots** — a spread of OUR configs from ~sub-600 to ~2400,
+  so every grid config (however weak or strong) has *some* near-level
+  opponents. Without these, configs below maia-1100 (~1565) or above
+  maia-1900 would only play saturated (≈100% one-sided) pairings and get
+  poorly-estimated Elo. They are the self-play-connectivity rungs the
+  design called for, and they get precisely rated themselves (every seed
+  plays them).
+
+Ratings (anchored on the measured Maia points) come from one Ordo pass
+over all games; the whole graph is connected because every seed plays
+every pool member.
+"""
+
+from __future__ import annotations
+
+from .engines import BotConfig, MaiaEngine, Player
+
+# Approx pilot-measured Elos in the comments are coarse (single-anchor)
+# guides for range coverage, not ground truth.
+REFERENCE_BOTS: list[BotConfig] = [
+    BotConfig("ref-d2-w80", depth=2, wild_chance=0.8),    # ~ <600
+    BotConfig("ref-d4-w60", depth=4, wild_chance=0.6),    # ~ 600
+    BotConfig("ref-d4-w40", depth=4, wild_chance=0.4),    # ~1040
+    BotConfig("ref-d4-b70", depth=4, blunder_chance=0.7), # ~1245
+    BotConfig("ref-d4-w20", depth=4, wild_chance=0.2),    # ~1335
+    BotConfig("ref-d1", depth=1),                          # ~1750
+    BotConfig("ref-d4", depth=4),                          # ~2100
+    BotConfig("ref-d6", depth=6),                          # ~2435
+    # Ceiling: stronger than any grid config (grid depth caps at 8) so the
+    # grid's strongest no-noise configs aren't all-wins. It will itself be
+    # all-wins and get excluded from the rating pass — that's fine, its job
+    # is purely to give the grid's top a beatable-by-nobody-else opponent
+    # to lose to.
+    BotConfig("ref-d10", depth=10),                        # ~2600 ceiling
+]
+
+
+def maia_ladder() -> list[MaiaEngine]:
+    return [MaiaEngine(r) for r in range(1100, 2000, 100)]
+
+
+def opponent_pool() -> list[Player]:
+    """Non-seed pool: Maia anchors + reference rungs."""
+    return [*maia_ladder(), *REFERENCE_BOTS]

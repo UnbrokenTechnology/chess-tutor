@@ -66,7 +66,10 @@ def build_command(spec: TournamentSpec, pgn_path) -> list[str]:
         f"score={spec.draw_score}",
         "-maxmoves", str(spec.maxmoves),
         "-concurrency", str(spec.concurrency),
-        "-pgnout", f"file={pgn_path}", "notation=san",
+        # append=false so re-running an incomplete batch overwrites it
+        # cleanly (the grid runner's resume is batch-level skip-if-complete,
+        # not fastchess intra-run resume — which this alpha lacks as a flag).
+        "-pgnout", f"file={pgn_path}", "notation=san", "append=false",
         "-recover",
         "-autosaveinterval", "50",
     ]
@@ -74,9 +77,15 @@ def build_command(spec: TournamentSpec, pgn_path) -> list[str]:
     return cmd
 
 
-def run(spec: TournamentSpec):
-    """Run the tournament; stream fastchess output live. Returns the PGN path."""
-    pgn_path = paths.runs_dir() / f"{spec.pgn_name}.pgn"
+def run(spec: TournamentSpec, pgn_path=None):
+    """Run the tournament; stream fastchess output live. Returns the PGN path.
+
+    Pass ``pgn_path`` to control the output file (the grid runner uses this
+    to write one PGN per batch); otherwise defaults to
+    ``runs/<pgn_name>.pgn``.
+    """
+    if pgn_path is None:
+        pgn_path = paths.runs_dir() / f"{spec.pgn_name}.pgn"
     cmd = build_command(spec, pgn_path)
     n = len(spec.players)
     print(f"[gauntlet] {spec.tournament}: {n} players, "

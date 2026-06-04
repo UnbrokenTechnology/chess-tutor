@@ -14,6 +14,56 @@ from dataclasses import dataclass
 
 from . import paths
 
+_TAG = re.compile(r'^\[(White|Black|Result)\s+"(.*)"\]')
+
+
+def perfect_players(pgn_path) -> set[str]:
+    """Names with all-wins or all-losses (no draws either) — unratable by
+    Ordo (infinite MLE). Computed iteratively: removing a dominant player
+    can leave the next one perfect among the survivors, so we repeat until
+    stable. These get excluded from the rating pass and reported as off
+    the top/bottom of the measurable range.
+    """
+    games: list[tuple[str, str, str]] = []
+    white = black = None
+    for line in pgn_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        m = _TAG.match(line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2)
+        if key == "White":
+            white = val
+        elif key == "Black":
+            black = val
+        elif key == "Result" and white and black:
+            games.append((white, black, val))
+            white = black = None
+
+    excluded: set[str] = set()
+    while True:
+        wins: dict[str, int] = {}
+        draws: dict[str, int] = {}
+        losses: dict[str, int] = {}
+        for w, b, res in games:
+            if w in excluded or b in excluded:
+                continue
+            for p in (w, b):
+                wins.setdefault(p, 0); draws.setdefault(p, 0); losses.setdefault(p, 0)
+            if res == "1-0":
+                wins[w] += 1; losses[b] += 1
+            elif res == "0-1":
+                wins[b] += 1; losses[w] += 1
+            elif res == "1/2-1/2":
+                draws[w] += 1; draws[b] += 1
+        newly = {
+            p for p in wins
+            if (draws[p] == 0 and losses[p] == 0 and wins[p] > 0)  # all wins
+            or (draws[p] == 0 and wins[p] == 0 and losses[p] > 0)  # all losses
+        }
+        if not newly:
+            return excluded
+        excluded |= newly
+
 
 @dataclass
 class Rating:
@@ -41,6 +91,7 @@ def rate(
     loose_anchors: dict[str, int] | None = None,
     loose_uncertainty: int = 50,
     sims: int = 200,
+    exclude_perfect: bool = True,
     out_name: str = "ratings",
 ) -> dict[str, Rating]:
     """Rate a PGN. Provide EXACTLY ONE anchoring mode:
@@ -66,6 +117,15 @@ def rate(
         "-o", str(out_txt),
         "-c", str(out_csv),
     ]
+    if exclude_perfect:
+        perfect = perfect_players(pgn_path)
+        if perfect:
+            print(f"[rate] excluding {len(perfect)} unratable (all-win/all-loss) "
+                  f"player(s): {', '.join(sorted(perfect))}")
+            exclude_file = runs / f"{out_name}_exclude.txt"
+            exclude_file.write_text("\n".join(sorted(perfect)) + "\n", encoding="utf-8")
+            cmd += ["-x", str(exclude_file)]
+
     if anchor is not None:
         cmd += ["-a", str(anchor[1]), "-A", anchor[0]]
     else:
