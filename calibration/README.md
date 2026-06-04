@@ -5,6 +5,40 @@ fitting a dials→Elo model. See [`../PLAN-elo-calibration.md`](../PLAN-elo-cali
 for the full design; this file is the **vetted download list** (for sign-off
 before `fetch-tools.sh` runs) plus the anchor findings.
 
+## Pilot results (2026-06-04) — methodology validated
+
+Round-robin, 13 players (5-net Maia ladder + 8 configs), 240 games/player,
+single hard anchor on `maia-1500 = 1680`:
+
+| Config | Elo | | Config | Elo |
+|---|---|---|---|---|
+| ct-d6 (no noise) | 2437 | | maia-1100 | 1584 |
+| maia-1900 | 1784 | | ct-d4 blunder 0.40 | 1480 |
+| **ct-d1 (no noise)** | **1751** | | ct-d4 wild 0.20 | 1336 |
+| maia-1700 | 1731 | | ct-d4 blunder 0.70 | 1246 |
+| maia-1500 (anchor) | 1680 | | ct-d4 wild 0.40 | 1038 |
+| maia-1300 | 1652 | | ct-d4 wild 0.60 | 613 |
+| | | | ct-d4 rank 8 | 70 |
+
+**Takeaways driving the real runs:**
+
+1. **Methodology sound; Maia ladder monotone.** With 1500 pinned, the ladder
+   places in correct order. Anchor cross-check: maia-1100 +19, **maia-1900 −71**.
+2. **Pool scale is COMPRESSED vs the human measured scale**, more at the top
+   (our pool spans ~200 Elo across maia-1100→1900; measured spans ~290). A
+   single anchor therefore *understates* human Elo away from 1500. **Fix:
+   production uses loose multi-anchoring** (`rate(loose_anchors=...)`, already
+   built) to stretch the pool onto all three measured points. Residual: some
+   of the gap is the genuine engine-pool-vs-human-pool width difference.
+3. **Depth is a high floor** (d1 ≈ 1751, d6 ≈ 2437) — confirmed. The
+   weakening dials carry the human range:
+   * **wild** is the strongest smooth axis: 0.20→1336, 0.40→1038, 0.60→613.
+   * **blunder**: 0.40→1480, 0.70→1246.
+   * **avg-move-rank** is brutal at high centres (8→70) — a wide-but-noisy axis.
+4. **The dials comfortably cover 600–1900+**, monotone — so a single primary
+   continuous axis (wild or blunder) plus depth-floor banking is viable, as
+   the design assumed.
+
 Everything here is a **one-time download**; the harness then runs fully
 offline. Binaries / nets / books are git-ignored (large, externally
 licensed, never shipped) — only our scripts + docs + summaries are tracked.

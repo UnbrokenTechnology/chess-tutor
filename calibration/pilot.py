@@ -38,17 +38,23 @@ def build_players(quick: bool, base_depth: int) -> list[Player]:
         return [*maia, *bots]
 
     # Fuller pilot: 5-net ladder (includes the 3 measured anchors) + a
-    # spread of configs probing depth and three noise dials.
+    # spread of configs. The quick pilot already showed no-noise depth is
+    # a high floor (d1 ~1875), so this probe focuses on how hard the
+    # move-distribution dials pull DOWN toward the human range — sweeping
+    # wild / blunder / rank heavily, with two no-noise depth brackets.
     maia = [MaiaEngine(r) for r in (1100, 1300, 1500, 1700, 1900)]
     bots = [
-        BotConfig("ct-d1", depth=1),
-        BotConfig("ct-d2", depth=2),
-        BotConfig("ct-d4", depth=4),
-        BotConfig(f"ct-d{base_depth}", depth=base_depth),
-        BotConfig(f"ct-d{base_depth}-rank3", depth=base_depth, avg_move_rank=3.0),
-        BotConfig(f"ct-d{base_depth}-rank6", depth=base_depth, avg_move_rank=6.0),
-        BotConfig(f"ct-d{base_depth}-blunder30", depth=base_depth, blunder_chance=0.3),
-        BotConfig(f"ct-d{base_depth}-wild20", depth=base_depth, wild_chance=0.2),
+        BotConfig("ct-d1", depth=1),              # weak no-noise bracket
+        BotConfig("ct-d6", depth=6),              # strong no-noise bracket
+        # Wild sweep (uniform-random moves — the strongest weakener) at d4.
+        BotConfig("ct-d4-wild20", depth=4, wild_chance=0.2),
+        BotConfig("ct-d4-wild40", depth=4, wild_chance=0.4),
+        BotConfig("ct-d4-wild60", depth=4, wild_chance=0.6),
+        # Blunder sweep (force material-losing moves) at d4.
+        BotConfig("ct-d4-blunder40", depth=4, blunder_chance=0.4),
+        BotConfig("ct-d4-blunder70", depth=4, blunder_chance=0.7),
+        # Variety (play a worse-ranked engine move) — weak dial, high centre.
+        BotConfig("ct-d4-rank8", depth=4, avg_move_rank=8.0),
     ]
     return [*maia, *bots]
 
