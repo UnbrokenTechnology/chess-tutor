@@ -598,7 +598,7 @@ fn threats_pressured_picks_pattern_verb() {
 
 // ---- King safety -----------------------------------------------------
 
-use crate::claim::{CountShift, KingSide, SafetyDirection, ShelterShift};
+use crate::claim::{CountShift, KingSide, PressureShift, SafetyDirection, ShelterShift};
 
 fn king_safety(
     side: KingSide,
@@ -612,6 +612,25 @@ fn king_safety(
         direction,
         attackers,
         shield,
+        pressure: None,
+        king_sq,
+    }
+}
+
+/// Build a pressure-only king-safety claim (count flat, no shield) for
+/// the "more pressure" wording tests.
+fn king_safety_pressure(
+    side: KingSide,
+    direction: SafetyDirection,
+    pressure: PressureShift,
+    king_sq: Square,
+) -> Claim {
+    Claim::KingSafety {
+        side,
+        direction,
+        attackers: None,
+        shield: None,
+        pressure: Some(pressure),
         king_sq,
     }
 }
@@ -724,6 +743,48 @@ fn king_safety_detail_has_pre_post_numbers() {
     let detail = phrase(&c, &ctx(Perspective::Player)).detail.expect("detail");
     assert!(detail.contains("Attackers on the king ring: 1 → 3."), "{detail}");
     assert!(detail.contains("Pawn shield: +0.80 → +0.30."), "{detail}");
+}
+
+/// A pressure-only shift (attacker count flat) gets the number-free
+/// "under more pressure" heading, perspective-flipped, with the
+/// adjacent-attack numbers tucked into the expandable detail.
+#[test]
+fn king_safety_pressure_only_is_number_free_heading() {
+    let c = king_safety_pressure(
+        KingSide::Opponent,
+        SafetyDirection::MoreExposed,
+        PressureShift { pre: 2, post: 4 },
+        Square::E8,
+    );
+    // The opponent's king under more pressure → from the player's POV
+    // that's the player applying it (the chess.com reframe).
+    let player = phrase(&c, &ctx(Perspective::Player));
+    assert_eq!(
+        player.summary,
+        "You pile more pressure on the opponent's king."
+    );
+    assert_eq!(
+        player.detail.as_deref(),
+        Some("Attacks next to the king: 2 → 4.")
+    );
+    // From the opponent's POV the pressured king is their own.
+    let opp = phrase(&c, &ctx(Perspective::Opponent));
+    assert_eq!(opp.summary, "Your king is under more pressure.");
+}
+
+/// A danger-driven pressure shift can fire with a flat adjacent-attack
+/// count; the heading still appears but the "2 → 2" detail is suppressed.
+#[test]
+fn king_safety_pressure_flat_adjacent_count_has_no_detail() {
+    let c = king_safety_pressure(
+        KingSide::Mover,
+        SafetyDirection::MoreExposed,
+        PressureShift { pre: 2, post: 2 },
+        Square::G1,
+    );
+    let player = phrase(&c, &ctx(Perspective::Player));
+    assert_eq!(player.summary, "Your king is under more pressure.");
+    assert_eq!(player.detail, None);
 }
 
 // ---- Mobility --------------------------------------------------------

@@ -25,14 +25,8 @@ pub use panels::*;
 /// Review / Live stay here for now — they're relocated to the
 /// post-game review surface in a later redesign step; keeping them on
 /// the title bar avoids losing the functionality in the interim.
-///
-/// `depth` is parked here as a minimal control: its true home is the
-/// Options/⚙ surface (a later step), but with no settings screen yet
-/// it stays minimally accessible on the title bar so depth tuning
-/// isn't lost.
 pub struct TopBarView {
     pub viewing_live: bool,
-    pub depth: u32,
     pub engine_thinking: bool,
     pub game_outcome: Option<&'static str>,
 }
@@ -215,6 +209,28 @@ pub enum AnnotationKind {
     Attacker,
     /// A defender piece pointing at the piece it covers. Arrow kind.
     Defender,
+    /// A king-ring attacker ray that the move *fully* neutralized —
+    /// blocked, captured, or left behind by moving the king — pointing
+    /// from the old attacker square to the ring square it used to attack
+    /// but no longer does at all. Arrow kind, green: "look what you
+    /// stopped." Paired with a "your king is safer" card.
+    NeutralizedAttacker,
+    /// A king-ring attacker ray the move *partially* mitigated — the
+    /// piece still bears on the ring along this line but reaches fewer
+    /// squares now (a blocker shortened it). Arrow kind, yellow, pointing
+    /// to the new farthest square it still attacks; paired with
+    /// [`Self::FreedSquare`] highlights on the squares it gave up.
+    MitigatedAttacker,
+    /// A ring square that was under attack before the move but isn't
+    /// after — the escape squares a "safer" move freed up. Green square
+    /// highlight, the square-level counterpart to
+    /// [`Self::NeutralizedAttacker`] / [`Self::MitigatedAttacker`] arrows.
+    FreedSquare,
+    /// A friendly pawn forming the king's shelter. Blue square highlight,
+    /// shown on a "your king is safer" card whose *only* change was the
+    /// pawn shield (no attacker removed) — so the card isn't left without
+    /// any board annotation to explain it.
+    ShieldPawn,
     /// The king's ring of nearby squares (king-safety narration).
     KingRing,
     /// A piece the narrator considers active / well-placed. Green-ish

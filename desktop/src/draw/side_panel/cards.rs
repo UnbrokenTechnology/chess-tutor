@@ -8,7 +8,7 @@ use crate::draw::theme;
 use chess_tutor_ui::event::Event;
 use chess_tutor_ui::view::{
     RetrospectiveBody, RetrospectiveCategory, RetrospectiveHeadline, RetrospectiveItem,
-    RetrospectiveKind, RetrospectivePanelView, ReviewPvLine, RetrospectiveViewModel,
+    RetrospectiveKind, RetrospectivePanelView, RetrospectiveViewModel,
 };
 
 pub(super) fn draw_retrospective(
@@ -57,6 +57,7 @@ pub(super) fn draw_retrospective(
                         *selected_item,
                         view.expanded,
                         view.show_all_signals,
+                        in_review,
                         events,
                     );
                 }
@@ -69,82 +70,49 @@ pub(super) fn draw_retrospective(
             }
         }
     }
-
-    // Engine PV / move-vs-move comparison — review-mode only (the
-    // session leaves `review_pv == None` during live play, decision #9).
-    if let Some(pv) = &view.review_pv {
-        ui.add_space(8.0);
-        draw_review_pv(ui, pv);
-    }
-}
-
-/// The review-only move-vs-move comparison: the user's move beside the
-/// engine's best line. The answer key chess.com shows in review and we
-/// deliberately withhold during play.
-fn draw_review_pv(ui: &mut egui::Ui, pv: &ReviewPvLine) {
-    let accent = theme::REVIEW_PV; // calm green
-    let bg = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 24);
-    egui::Frame::group(ui.style())
-        .stroke(egui::Stroke::new(1.0, accent))
-        .fill(bg)
-        .inner_margin(egui::Margin::same(8.0))
-        .show(ui, |ui| {
-            if pv.user_san == pv.best_san {
-                ui.label(
-                    egui::RichText::new("You found the engine's move.")
-                        .strong()
-                        .color(accent),
-                );
-            } else {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new("You played").small().weak());
-                    ui.label(egui::RichText::new(&pv.user_san).monospace().strong());
-                });
-            }
-            ui.add_space(2.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("Engine line").small().weak());
-                ui.label(
-                    egui::RichText::new(pv.best_line.join(" "))
-                        .monospace()
-                        .strong(),
-                );
-            });
-        });
 }
 
 /// The feedback zone (decision #1): calm by default, deep on demand.
-/// Collapsed shows only the one-line verdict headline plus a "why this
-/// move?" affordance; expanded reveals the full per-term eval breakdown
-/// (the per-signal cards) in place below it.
+/// During live play, collapsed shows only the one-line verdict headline
+/// plus a "show move impact" affordance; expanded reveals the full
+/// per-term eval breakdown (the per-signal cards) in place below it. In
+/// **review mode** the breakdown is the reason you're here, so it's
+/// always shown with no toggle.
 fn draw_retrospective_cards(
     ui: &mut egui::Ui,
     view_model: &RetrospectiveViewModel,
     selected_item: Option<usize>,
     expanded: bool,
     show_all_signals: bool,
+    in_review: bool,
     events: &mut Vec<Event>,
 ) {
     draw_headline_card(ui, &view_model.headline);
     ui.add_space(6.0);
 
     let has_detail = !view_model.items.is_empty();
-    // Inline affordance that swaps the calm one-liner for the full
-    // breakdown. Disabled (greyed) when no per-term signals fired, so the
-    // student isn't promised detail that isn't there. Worded neutrally
-    // ("move impact", not "why this move?") so it reads sensibly whether
-    // the move was best or a blunder.
-    let glyph = if expanded {
-        egui_phosphor::regular::CARET_DOWN
+    // In review mode the breakdown is always on (no toggle). During live
+    // play it's calm-by-default: a one-line headline plus an inline
+    // affordance to expand. Disabled (greyed) when no per-term signals
+    // fired, so the student isn't promised detail that isn't there.
+    // Worded neutrally ("move impact", not "why this move?") so it reads
+    // sensibly whether the move was best or a blunder.
+    let expanded = if in_review {
+        true
     } else {
-        egui_phosphor::regular::CARET_RIGHT
+        let glyph = if expanded {
+            egui_phosphor::regular::CARET_DOWN
+        } else {
+            egui_phosphor::regular::CARET_RIGHT
+        };
+        let verb = if expanded { "Hide" } else { "Show" };
+        let label = crate::draw::icon::icon_label(glyph, &format!("{verb} move impact"), 14.0);
+        let resp = ui.add_enabled(has_detail, egui::Button::new(label).frame(false));
+        if resp.clicked() {
+            events.push(Event::ToggleRetrospectiveDetail);
+        }
+        expanded
     };
-    let verb = if expanded { "Hide" } else { "Show" };
-    let label = crate::draw::icon::icon_label(glyph, &format!("{verb} move impact"), 14.0);
-    let resp = ui.add_enabled(has_detail, egui::Button::new(label).frame(false));
-    if resp.clicked() {
-        events.push(Event::ToggleRetrospectiveDetail);
-    }
     if !has_detail {
         ui.add_space(2.0);
         ui.weak(
@@ -173,13 +141,84 @@ fn draw_retrospective_cards(
     }
     ui.separator();
     ui.add_space(4.0);
-    for (i, item) in view_model.items.iter().enumerate() {
-        let is_selected = selected_item == Some(i);
-        if draw_item_card(ui, item, is_selected) {
+
+    // Tactical-mode demotion (the keystone teaching principle): when a
+    // named tactic drove this move, positional cards are noise until the
+    // tactic is resolved — so they collapse under a "Quiet-position notes"
+    // divider, with the material / threat / tactic / king-safety cards kept
+    // up top. Mirrors the coaching panel's gate. The renderer owns this
+    // fold (HANDOFF-ux "card-fold UX"); the engine just supplies the cards.
+    let tactical = view_model
+        .items
+        .iter()
+        .any(|it| it.category == RetrospectiveCategory::Tactic);
+
+    let mut draw_card = |ui: &mut egui::Ui, i: usize, item: &RetrospectiveItem| {
+        if draw_item_card(ui, item, selected_item == Some(i)) {
             events.push(Event::SelectRetrospectiveItem(i));
         }
         ui.add_space(6.0);
+    };
+
+    if !tactical {
+        for (i, item) in view_model.items.iter().enumerate() {
+            draw_card(ui, i, item);
+        }
+        return;
     }
+
+    // Primary (tactical / material) cards first, in their natural order.
+    for (i, item) in view_model.items.iter().enumerate() {
+        if !is_quiet_positional(item.category) {
+            draw_card(ui, i, item);
+        }
+    }
+    // Positional cards demoted under a collapsed divider.
+    let has_quiet = view_model
+        .items
+        .iter()
+        .any(|it| is_quiet_positional(it.category));
+    if has_quiet {
+        egui::CollapsingHeader::new(
+            egui::RichText::new("Quiet-position notes").strong().size(14.0),
+        )
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Positional play takes a back seat while a tactic is on the \
+                     board — resolve the tactic first.",
+                )
+                .small()
+                .color(theme::TEXT_MUTED),
+            );
+            ui.add_space(4.0);
+            for (i, item) in view_model.items.iter().enumerate() {
+                if is_quiet_positional(item.category) {
+                    draw_card(ui, i, item);
+                }
+            }
+        });
+    }
+}
+
+/// Which retrospective categories are "quiet positional" — demoted under
+/// the "Quiet-position notes" divider when a tactic drove the move. The
+/// tactical/material cards (Material, Threats, Tactic, KingSafety,
+/// Initiative) stay primary; everything structural folds away.
+fn is_quiet_positional(category: RetrospectiveCategory) -> bool {
+    use RetrospectiveCategory as C;
+    matches!(
+        category,
+        C::Mobility
+            | C::Space
+            | C::PassedPawns
+            | C::PiecePlacement
+            | C::PawnStructure
+            | C::BlockedCenter
+            | C::Castling
+            | C::Secondary
+    )
 }
 
 fn draw_headline_card(ui: &mut egui::Ui, h: &RetrospectiveHeadline) {
@@ -191,6 +230,10 @@ fn draw_headline_card(ui: &mut egui::Ui, h: &RetrospectiveHeadline) {
         .fill(bg)
         .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
+            // Fill the column so the card spans the feedback zone rather
+            // than shrinking to its content and leaving dead space to the
+            // right.
+            ui.set_min_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(format!("{}{}", h.user_san, h.san_annotation))

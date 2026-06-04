@@ -20,7 +20,8 @@ use chess_tutor_engine::types::{Color, PieceType, Square, Value};
 use crate::claim::{
     AllowedReframe, CastleSide, CenterShift, Claim, CountShift, ForcedConcession,
     InitiativeTemplate, KingSide, MobilitySide, PawnCategory, PawnSide, PlacementCategory,
-    PlacementSide, SafetyDirection, ShelterShift, SpaceDirection, SpaceSide, StructureDirection,
+    PlacementSide, PressureShift, SafetyDirection, ShelterShift, SpaceDirection, SpaceSide,
+    StructureDirection,
     TacticEscapeInfo, TacticRole, ThreatKind, ThreatSide, ThreatTarget,
 };
 use crate::util::{
@@ -150,8 +151,17 @@ pub fn phrase(claim: &Claim, ctx: &PhrasingContext) -> Phrasing {
             direction,
             attackers,
             shield,
+            pressure,
             king_sq,
-        } => phrase_king_safety(ctx, *side, *direction, attackers.as_ref(), shield.as_ref(), *king_sq),
+        } => phrase_king_safety(
+            ctx,
+            *side,
+            *direction,
+            attackers.as_ref(),
+            shield.as_ref(),
+            pressure.as_ref(),
+            *king_sq,
+        ),
         Claim::Mobility {
             side,
             piece,
@@ -1019,6 +1029,7 @@ fn phrase_king_safety(
     direction: SafetyDirection,
     attackers: Option<&CountShift>,
     shield: Option<&ShelterShift>,
+    pressure: Option<&PressureShift>,
     king_sq: Square,
 ) -> Phrasing {
     // The shifted king is the user's when the moving side is the user
@@ -1026,8 +1037,8 @@ fn phrase_king_safety(
     // Opponent). Otherwise it's the opponent's king.
     let king_is_user = (side == KingSide::Mover) == (ctx.perspective == Perspective::Player);
 
-    let summary = king_safety_summary(king_is_user, direction, attackers, shield, king_sq);
-    let detail = king_safety_detail(direction, attackers, shield);
+    let summary = king_safety_summary(king_is_user, direction, attackers, shield, pressure, king_sq);
+    let detail = king_safety_detail(direction, attackers, shield, pressure);
     Phrasing {
         summary,
         detail,
@@ -1041,15 +1052,9 @@ fn king_safety_summary(
     direction: SafetyDirection,
     attackers: Option<&CountShift>,
     shield: Option<&ShelterShift>,
+    pressure: Option<&PressureShift>,
     king_sq: Square,
 ) -> String {
-    let lead = match (direction, king_is_user) {
-        (SafetyDirection::MoreExposed, true) => "Your king is more exposed",
-        (SafetyDirection::MoreExposed, false) => "You expose the opponent's king",
-        (SafetyDirection::Safer, true) => "Your king is safer",
-        (SafetyDirection::Safer, false) => "The opponent's king is safer",
-    };
-
     let mut parts = Vec::new();
     if let Some(c) = attackers {
         parts.push(attackers_clause(direction, c, king_sq));
@@ -1058,10 +1063,40 @@ fn king_safety_summary(
         parts.push(shelter_clause(king_is_user, direction, s));
     }
 
+    // Pressure-only trigger (no count / shield clause): a number-free
+    // "under more pressure" heading. The attacker arrows on the board do
+    // the teaching — they show the pieces closing in on the king — so the
+    // heading deliberately avoids the "N attackers" heuristic.
+    if parts.is_empty() && pressure.is_some() {
+        return format!("{}.", pressure_lead(king_is_user, direction));
+    }
+
+    let lead = match (direction, king_is_user) {
+        (SafetyDirection::MoreExposed, true) => "Your king is more exposed",
+        (SafetyDirection::MoreExposed, false) => "You expose the opponent's king",
+        (SafetyDirection::Safer, true) => "Your king is safer",
+        (SafetyDirection::Safer, false) => "The opponent's king is safer",
+    };
+
     if parts.is_empty() {
         format!("{lead}.")
     } else {
         format!("{lead}: {}.", parts.join(", "))
+    }
+}
+
+/// The number-free heading for a pressure-only shift — the closeness /
+/// intensity of the attack changed without the distinct attacker count
+/// moving. Perspective- and direction-correct, mirroring the four
+/// count-clause leads but framed as "pressure" rather than a count.
+fn pressure_lead(king_is_user: bool, direction: SafetyDirection) -> &'static str {
+    match (direction, king_is_user) {
+        (SafetyDirection::MoreExposed, true) => "Your king is under more pressure",
+        (SafetyDirection::MoreExposed, false) => {
+            "You pile more pressure on the opponent's king"
+        }
+        (SafetyDirection::Safer, true) => "Your king is under less pressure",
+        (SafetyDirection::Safer, false) => "The opponent's king is under less pressure",
     }
 }
 
@@ -1105,6 +1140,7 @@ fn king_safety_detail(
     direction: SafetyDirection,
     attackers: Option<&CountShift>,
     shield: Option<&ShelterShift>,
+    pressure: Option<&PressureShift>,
 ) -> Option<String> {
     let mut lines = Vec::new();
     if let Some(c) = attackers {
@@ -1119,6 +1155,18 @@ fn king_safety_detail(
             format_shelter_pawns(s.pre_mg),
             format_shelter_pawns(s.post_mg),
         ));
+    }
+    // Only surface the adjacent-attack numbers when they actually moved —
+    // a danger-driven pressure shift (attacker weight / weak squares)
+    // can fire with a flat adjacent-attack count, and "2 → 2" reads as
+    // noise. The heading already carries the "more pressure" message.
+    if let Some(p) = pressure {
+        if p.pre != p.post {
+            lines.push(format!(
+                "Attacks next to the king: {} → {}.",
+                p.pre, p.post
+            ));
+        }
     }
     let _ = direction;
     if lines.is_empty() {

@@ -17,13 +17,13 @@
 //! are filled in their own migration step.
 
 use chess_tutor_engine::analysis::{
-    compute_tactic_outcome, cumulative_prefix, find_desperado,
-    gave_away_advantage, is_sacrifice, is_silent_sequencing, list_hanging, list_see_losing,
-    BlockedCenterOutcome, CaptureEvent, CastlingOutcome, EscapeKind, HangingPiece,
-    InitiativeOutcome, KingSafetyOutcome, MaterialOutcome, MobilityOutcome, MoveAnalysis,
-    MoveVerdict, PassedPawnsOutcome, PawnStructureOutcome, PieceLocation, PiecesPositionalOutcome,
-    PressureKind, PressuredPiece, win_chances, PriorMove, SpaceOutcome, SurpriseKind, TacticEscape,
-    TacticHit, TacticsOutcome, ThreatsOutcome, TermId,
+    compute_tactic_outcome, cumulative_prefix, find_desperado, gave_away_advantage,
+    is_sacrifice, is_silent_sequencing, list_hanging, list_see_losing, BlockedCenterOutcome,
+    CaptureEvent, CastlingOutcome, EscapeKind, HangingPiece, InitiativeOutcome, KingSafetyOutcome,
+    MaterialOutcome, MobilityOutcome, MoveAnalysis, MoveVerdict, PassedPawnsOutcome,
+    PawnStructureOutcome, PieceLocation, PiecesPositionalOutcome, PressureKind, PressuredPiece,
+    win_chances, PriorMove, SpaceOutcome, SurpriseKind, TacticEscape, TacticHit, TacticsOutcome,
+    ThreatsOutcome, TermId,
 };
 use chess_tutor_engine::eval::{
     evaluate, EvalTrace, MobilityBreakdown, PassedBreakdown, PawnsBreakdown, PiecesBreakdown,
@@ -101,13 +101,17 @@ pub enum Claim {
     /// already resolved by the builder (which owns the threshold
     /// gating, the exposure-over-safer precedence, and the endgame
     /// shelter suppression). The structured shifts `phrase` reads for
-    /// the clauses live in `attackers` / `shield`; `king_sq` is the
-    /// post-move king square, for the flank-aware wording.
+    /// the clauses live in `attackers` / `shield` / `pressure`;
+    /// `king_sq` is the post-move king square, for the flank-aware
+    /// wording. `pressure` is the fallback signal — set only when the
+    /// distinct attacker count was flat but king-danger rose/fell — and
+    /// drives the number-free "under more pressure" wording.
     KingSafety {
         side: KingSide,
         direction: SafetyDirection,
         attackers: Option<CountShift>,
         shield: Option<ShelterShift>,
+        pressure: Option<PressureShift>,
         king_sq: chess_tutor_engine::types::Square,
     },
 
@@ -667,6 +671,23 @@ pub struct ShelterShift {
     pub post_mg: i32,
 }
 
+/// A king-*pressure* shift — present on a [`Claim::KingSafety`] only
+/// when the **distinct attacker count was flat** but the pressure rose
+/// (or fell): more enemy attacks landing on the squares right next to
+/// the king, and/or a higher aggregate king-danger score. It's the
+/// signal that catches a move which adds a closer, more dangerous
+/// attacker while the bare count stays put (a piece blocks one attacker
+/// just as another takes its place). `pre` / `post` are the counts of
+/// enemy attacks on the king's immediately-adjacent squares — the king's
+/// own escape squares; `phrase` renders them only as an expandable
+/// detail, never the heading (the visual attacker arrows carry the
+/// "pressure" intuition, so the heading stays number-free).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PressureShift {
+    pub pre: i32,
+    pub post: i32,
+}
+
 /// A tactic's defensive/refuting resource, resolved to SAN at build
 /// time. For a played/missed tactic this is the *opponent's* out (the
 /// tactic isn't forced); for a walked-into tactic it is the *mover's*
@@ -1098,6 +1119,22 @@ const KING_SHELTER_DELTA_THRESHOLD_CP: i32 = 25;
 /// kings care about being chased.
 const KING_SHELTER_ENDGAME_PHASE_CUTOFF: i32 = 32;
 
+/// Extra enemy attacks on the king's *adjacent* squares (its escape
+/// squares) needed to call the pressure shift worth a card on its own.
+/// `2` skips the single-square wobble a quiet developing move causes
+/// while catching a real escalation (a knight landing two new attacks
+/// next to the king).
+const KING_PRESSURE_ATTACKS_THRESHOLD: i32 = 2;
+
+/// Aggregate king-danger swing (engine-cp, mg) that independently
+/// triggers a pressure card — the holistic backstop for pressure the
+/// adjacent-attack count misses (attacker-*weight* changes, weak ring
+/// squares two ranks out, new safe checks). ~0.5 of a pawn at the
+/// PawnEG≈213 scale: big enough to mean a real shift in how hard the
+/// king is being hit, small enough to fire on the knight-closing-in
+/// case (the king_danger nearly doubled there).
+const KING_PRESSURE_DANGER_THRESHOLD_CP: i32 = 100;
+
 /// Build the ordered king-safety claims for one analysed move — the
 /// shared salience both the GUI and CLI consume, minus the prose.
 /// Mirrors the old narrator's decision tree:
@@ -1142,8 +1179,17 @@ pub fn king_safety_claims(outcome: &KingSafetyOutcome) -> Vec<Claim> {
 }
 
 /// Resolve one king's safety claim — direction (exposure over safer),
-/// the attacker-count clause, and the threshold-gated shelter clause.
-/// `None` when nothing clears the bar on this side.
+/// the attacker-count clause, the threshold-gated shelter clause, and
+/// the pressure fallback. `None` when nothing clears the bar on this
+/// side.
+///
+/// The **pressure** trigger is what catches the "knight closes in"
+/// case: a move can leave the *distinct attacker count* unchanged (one
+/// attacker gets blocked just as a closer one arrives) while the king is
+/// demonstrably under more fire — more attacks on its escape squares,
+/// and a higher aggregate king-danger score. When the count moved we
+/// keep the precise "N attackers" clause; the pressure clause is the
+/// number-free fallback for when only the closeness/intensity changed.
 fn king_safety_side_claim(
     side: KingSide,
     attackers_delta: i32,
@@ -1154,9 +1200,24 @@ fn king_safety_side_claim(
 ) -> Option<Claim> {
     let shield_moved = shelter_relevant && shield_delta.abs() >= KING_SHELTER_DELTA_THRESHOLD_CP;
 
+    // Pressure: more attacks on the king's own escape squares, and/or a
+    // higher aggregate king-danger score. Either crossing its threshold
+    // counts (adjacent attacks is the explainable headline; king-danger
+    // is the holistic backstop). Only consulted when the attacker count
+    // is flat — a count change is the clearer story and owns the wording.
+    let attacks_delta = post.attacks_count - pre.attacks_count;
+    let danger_delta = post.king_danger_mg - pre.king_danger_mg;
+    let pressure_up = attacks_delta >= KING_PRESSURE_ATTACKS_THRESHOLD
+        || danger_delta >= KING_PRESSURE_DANGER_THRESHOLD_CP;
+    let pressure_down = attacks_delta <= -KING_PRESSURE_ATTACKS_THRESHOLD
+        || danger_delta <= -KING_PRESSURE_DANGER_THRESHOLD_CP;
+    let count_flat = attackers_delta == 0;
+
     // Exposure wins over safer when both could fire.
-    let exposed = attackers_delta > 0 || (shield_moved && shield_delta < 0);
-    let safer = attackers_delta < 0 || (shield_moved && shield_delta > 0);
+    let exposed =
+        attackers_delta > 0 || (shield_moved && shield_delta < 0) || (count_flat && pressure_up);
+    let safer =
+        attackers_delta < 0 || (shield_moved && shield_delta > 0) || (count_flat && pressure_down);
 
     let direction = if exposed {
         SafetyDirection::MoreExposed
@@ -1191,7 +1252,21 @@ fn king_safety_side_claim(
         None
     };
 
-    if attackers.is_none() && shield.is_none() {
+    // Pressure is the fallback clause: only when the count was flat (no
+    // attacker clause) yet pressure moved in the claim's direction.
+    let pressure = if attackers.is_none()
+        && ((direction == SafetyDirection::MoreExposed && pressure_up)
+            || (direction == SafetyDirection::Safer && pressure_down))
+    {
+        Some(PressureShift {
+            pre: pre.attacks_count,
+            post: post.attacks_count,
+        })
+    } else {
+        None
+    };
+
+    if attackers.is_none() && shield.is_none() && pressure.is_none() {
         return None;
     }
 
@@ -1200,6 +1275,7 @@ fn king_safety_side_claim(
         direction,
         attackers,
         shield,
+        pressure,
         king_sq: post.king_sq,
     })
 }
@@ -1807,12 +1883,47 @@ pub fn forced_consequence_claims(
     let before = chess_tutor_engine::pawns::evaluate(&after_user).breakdowns[replier.index()];
     let after = chess_tutor_engine::pawns::evaluate(&after_reply).breakdowns[replier.index()];
 
+    // When the reply is a capture, the opponent may have other ways to
+    // recapture on the same square. A structural concession is only a real
+    // weakness if every *materially-sound* recapture incurs it; if a sound
+    // alternative preserves the structure, assume the opponent plays that
+    // one and stay silent — the search's PV often shows one of several
+    // equal-value recaptures arbitrarily, and we shouldn't claim a weakness
+    // they can simply sidestep. ("Only way to capture" or "the engine's
+    // best/only sound way" → show; otherwise → don't.)
+    let target = reply.to();
+    let reply_is_capture = after_user.piece_on(target).is_some();
+    let alt_breakdowns: Vec<PawnsBreakdown> = if reply_is_capture {
+        let mut scratch = after_user.clone();
+        legal_moves_vec(&mut scratch)
+            .into_iter()
+            // Other recaptures on the same square (target is occupied, so
+            // any move landing there captures), that don't lose material.
+            .filter(|m| *m != reply && m.to() == target && after_user.see_ge(*m, Value::ZERO))
+            .map(|m| {
+                let mut b = after_user.clone();
+                b.do_move(m);
+                chess_tutor_engine::pawns::evaluate(&b).breakdowns[replier.index()]
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut claims = Vec::new();
     for category in ForcedConcession::ALL {
         let delta_mg = category.delta_mg(&before, &after);
         // A concession = the replier's structure getting worse (a
         // more-negative delta past the threshold).
         if delta_mg > -FORCED_CONSEQUENCES_THRESHOLD_CP {
+            continue;
+        }
+        // Suppress if a sound alternative recapture avoids *this*
+        // concession — the opponent isn't forced to damage their structure.
+        let avoidable = alt_breakdowns
+            .iter()
+            .any(|alt| category.delta_mg(&before, alt) > -FORCED_CONSEQUENCES_THRESHOLD_CP);
+        if avoidable {
             continue;
         }
         claims.push(Claim::ForcedConsequence {

@@ -216,7 +216,7 @@ pub fn build_retrospective_view(
     }
 
     let king_safety_outcome = compute_king_safety_outcome(user, pre_move_pos, root_stm);
-    for it in build_king_safety_items(&king_safety_outcome, perspective) {
+    for it in build_king_safety_items(&king_safety_outcome, perspective, pre_move_pos, &post_pos) {
         items.push(it);
         consumed_terms.extend_from_slice(&[
             TermId::KingPawnShield,
@@ -375,7 +375,14 @@ pub fn build_retrospective_view(
     // build_pieces_positional_items can drop misleading KP cards
     // without re-walking events.
     let kp_supp = capture_suppression(&material_outcome, root_stm);
-    for it in build_pieces_positional_items(&pieces_outcome, root_stm, kp_supp, perspective) {
+    for it in build_pieces_positional_items(
+        &pieces_outcome,
+        root_stm,
+        kp_supp,
+        perspective,
+        pre_move_pos,
+        &post_pos,
+    ) {
         items.push(it);
     }
     // Always consume every piece TermId — sub-terms that fired above
@@ -405,7 +412,7 @@ pub fn build_retrospective_view(
         items.push(it);
     }
 
-    if let Some(it) = build_secondary_item(user, root_stm, &consumed_terms, show_all, perspective) {
+    for it in build_secondary_items(user, root_stm, &consumed_terms, show_all, perspective) {
         items.push(it);
     }
 
