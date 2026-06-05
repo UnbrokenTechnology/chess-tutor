@@ -71,24 +71,42 @@ from harness.rate import rate
 # ~1565-1855) and sparsely up high.
 # ---------------------------------------------------------------------------
 CANDIDATES: list[BotConfig] = [
-    # --- basement / sub-1100 (the sparse zone — sample densely) ---
-    BotConfig("d1-q0-r4-m40", depth=1, qsearch_depth=0, avg_move_rank=4.0, miss_chance=0.4),  # ~floor
-    BotConfig("d1-q0-r4", depth=1, qsearch_depth=0, avg_move_rank=4.0),   # ~350?
-    BotConfig("d1-q0-r3", depth=1, qsearch_depth=0, avg_move_rank=3.0),   # ~510
-    BotConfig("d1-q0-r2", depth=1, qsearch_depth=0, avg_move_rank=2.0),   # ~?  the "Martin-ish" candidate
-    BotConfig("d1-q0", depth=1, qsearch_depth=0),                         # ~900-1100
-    # --- low-mid (qsearch's steep climb 1000 -> 1500) ---
-    BotConfig("d1-q1-r2", depth=1, qsearch_depth=1, avg_move_rank=2.0),   # ~1250? (fills the q0->q1 gap)
-    BotConfig("d1-q1", depth=1, qsearch_depth=1),                         # ~1500
-    BotConfig("d2-q0", depth=2, qsearch_depth=0),                         # ~1600
-    BotConfig("d1-q2", depth=1, qsearch_depth=2),                         # ~1666
-    BotConfig("d2-q2", depth=2, qsearch_depth=2),                         # ~1683
-    BotConfig("d4-q0", depth=4, qsearch_depth=0),                         # ~1794
-    # --- upper (above the Maia band ~1855) ---
-    BotConfig("d4-q1", depth=4, qsearch_depth=1),                         # ~1904
-    BotConfig("d4-q2", depth=4, qsearch_depth=2),                         # ~1995
-    BotConfig("d4", depth=4),                                             # ~2008 (full qsearch)
-    BotConfig("d6", depth=6),                                             # ~2376 ceiling
+    # --- rank-response curve on the BLIND base (d1-q0) -------------------
+    # r1..r4 + the new r1.5, so the fit can see HOW rank scales between 1
+    # and 2 (the steepest, most useful stretch). If r1->r2 is one big cliff
+    # the equation can only say "set r to 1 or 2"; the curve shape (linear?
+    # quadratic?) is what lets us fine-tune. (round-1 Elos in comments)
+    BotConfig("d1-q0-r4-m40", depth=1, qsearch_depth=0, avg_move_rank=4.0, miss_chance=0.4),  # -72 floor
+    BotConfig("d1-q0-r4", depth=1, qsearch_depth=0, avg_move_rank=4.0),    # 43
+    BotConfig("d1-q0-r3", depth=1, qsearch_depth=0, avg_move_rank=3.0),    # 271
+    BotConfig("d1-q0-r2", depth=1, qsearch_depth=0, avg_move_rank=2.0),    # 490  "Martin-ish" (lichess)
+    BotConfig("d1-q0-r1.5", depth=1, qsearch_depth=0, avg_move_rank=1.5),  # NEW — between r1 & r2
+    BotConfig("d1-q0", depth=1, qsearch_depth=0),                          # 852  (r1 baseline)
+
+    # --- single-lever study on the SEES-FIRST-CAPTURE base (d1-q1) -------
+    # One point each for rank / miss / blunder / combined, all off the same
+    # ~1612 baseline so the deltas are clean (rank vs miss vs blunder on
+    # identical footing). miss reads more human than blunder; r1.5 here
+    # checks whether the rank curve shape transfers across bases. These
+    # also FILL the 850->1590 gap that rank overshot last run.
+    BotConfig("d1-q1", depth=1, qsearch_depth=1),                         # 1612 (r1 baseline)
+    BotConfig("d1-q1-r1.5", depth=1, qsearch_depth=1, avg_move_rank=1.5),  # NEW
+    BotConfig("d1-q1-r2", depth=1, qsearch_depth=1, avg_move_rank=2.0),   # 920 (rank overshoots)
+    BotConfig("d1-q1-m10", depth=1, qsearch_depth=1, miss_chance=0.1),    # NEW — gentle miss
+    BotConfig("d1-q1-m30", depth=1, qsearch_depth=1, miss_chance=0.3),    # NEW
+    BotConfig("d1-q1-b10", depth=1, qsearch_depth=1, blunder_chance=0.1),  # NEW — gentle blunder
+    BotConfig("d1-q1-b30", depth=1, qsearch_depth=1, blunder_chance=0.3),  # NEW
+    BotConfig("d1-q1-m20-b20", depth=1, qsearch_depth=1, miss_chance=0.2, blunder_chance=0.2),  # NEW — combined
+
+    # --- clean depth-2 / blind baseline (a distinct lever from the d1 rungs) ---
+    BotConfig("d2-q0", depth=2, qsearch_depth=0),                         # 1589
+
+    # --- upper ceiling ladder (above the Maia band ~1800) ---------------
+    # depth > 6 is ~perfect (beats every Maia) so we stop at d6; d5 fills
+    # the 1998->2497 gap so the strongest grid configs aren't all-win.
+    BotConfig("d4", depth=4),                                             # 1998
+    BotConfig("d5", depth=5),                                             # NEW — ~2250
+    BotConfig("d6", depth=6),                                             # 2497 ceiling
 ]
 
 #: Flag adjacent rated rungs farther apart than this (Elo) — a gap a config
