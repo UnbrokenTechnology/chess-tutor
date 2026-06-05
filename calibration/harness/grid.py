@@ -37,7 +37,6 @@ class GridSpec:
     #: (chance, min_material, max_material). chance 0 => no blunder.
     blunder_modes: list[BlunderMode] = field(default_factory=lambda: [(0.0, 1.0, 4.0)])
     miss_chance: list[float] = field(default_factory=lambda: [0.0])
-    wild_chance: list[float] = field(default_factory=lambda: [0.0])
     guaranteed_mate_in: list[int] = field(default_factory=lambda: [1])
     disable_eval: tuple[str, ...] = ()  # fixed across the grid
 
@@ -47,7 +46,6 @@ class GridSpec:
             * len(self.avg_move_rank)
             * len(self.blunder_modes)
             * len(self.miss_chance)
-            * len(self.wild_chance)
             * len(self.guaranteed_mate_in)
         )
 
@@ -63,34 +61,29 @@ def _blunder_label(mode: BlunderMode) -> str:
     return f"b{_pct(chance)}{_SEVERITY.get(hi, str(int(hi)))}"
 
 
-def config_name(depth, rank, mode, miss, wild, mate) -> str:
-    return (
-        f"d{depth}-r{rank:g}-{_blunder_label(mode)}"
-        f"-m{_pct(miss)}-w{_pct(wild)}-g{mate}"
-    )
+def config_name(depth, rank, mode, miss, mate) -> str:
+    return f"d{depth}-r{rank:g}-{_blunder_label(mode)}-m{_pct(miss)}-g{mate}"
 
 
 def build_grid(spec: GridSpec) -> list[BotConfig]:
     configs: list[BotConfig] = []
-    for depth, rank, mode, miss, wild, mate in itertools.product(
+    for depth, rank, mode, miss, mate in itertools.product(
         spec.depth,
         spec.avg_move_rank,
         spec.blunder_modes,
         spec.miss_chance,
-        spec.wild_chance,
         spec.guaranteed_mate_in,
     ):
         chance, lo, hi = mode
         configs.append(
             BotConfig(
-                name=config_name(depth, rank, mode, miss, wild, mate),
+                name=config_name(depth, rank, mode, miss, mate),
                 depth=depth,
                 avg_move_rank=rank,
                 blunder_chance=chance,
                 blunder_min_material=lo,
                 blunder_max_material=hi,
                 miss_chance=miss,
-                wild_chance=wild,
                 guaranteed_mate_in=mate,
                 disable_eval=spec.disable_eval,
             )

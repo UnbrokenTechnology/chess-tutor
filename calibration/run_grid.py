@@ -41,13 +41,17 @@ GRID = GridSpec(
         (0.3, 1.0, 9.0), (0.6, 1.0, 9.0),   # queen
     ],
     miss_chance=[0.0, 0.2, 0.4, 0.6],
-    wild_chance=[0.0, 0.3, 0.6],
     guaranteed_mate_in=[1, 2, 3],
 )
 
-TINY = GridSpec(depth=[2, 4], avg_move_rank=[1.0], wild_chance=[0.0, 0.4])
+TINY = GridSpec(depth=[2, 4], avg_move_rank=[1.0], miss_chance=[0.0, 0.4])
 
 EST_GAMES_PER_SEC = 49  # measured on a depth-1/2/4/6 mix with noise
+
+# NOTE: this grid is the OLD move-quality grid (no qsearch-depth, wild
+# retired). It is superseded by the upcoming qsearch-depth-driven redesign
+# (depth x qsearch-depth as the primary tactical axis); kept runnable in
+# the meantime.
 
 
 def main() -> None:
@@ -83,7 +87,6 @@ def main() -> None:
         w.writerow([
             "name", "kind", "depth", "avg_move_rank", "blunder_chance",
             "blunder_min_material", "blunder_max_material", "miss_chance",
-            "wild_chance", "guaranteed_mate_in", "disable_eval",
             "elo", "elo_error", "games",
         ])
         for name, r in sorted(result.ratings.items(), key=lambda kv: -kv[1].rating):
@@ -95,7 +98,6 @@ def main() -> None:
                 w.writerow([
                     name, kind, c.depth, c.avg_move_rank, c.blunder_chance,
                     c.blunder_min_material, c.blunder_max_material, c.miss_chance,
-                    c.wild_chance, c.guaranteed_mate_in, "|".join(c.disable_eval),
                     f"{r.rating:.1f}", err, r.played,
                 ])
             else:

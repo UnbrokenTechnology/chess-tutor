@@ -40,8 +40,10 @@ class BotConfig:
     blunder_min_material: float = 1.0
     blunder_max_material: float = 4.0
     miss_chance: float = 0.0
-    wild_chance: float = 0.0
     guaranteed_mate_in: int = 1
+    #: Quiescence horizon cap (tactical-vision dial). None = full vision;
+    #: 0 = tactically blind (hangs pieces). Replaces the retired wild dial.
+    qsearch_depth: int | None = None
     disable_eval: tuple[str, ...] = ()
     seed: int | None = None
 
@@ -65,8 +67,8 @@ class BotConfig:
                 args += ["--blunder-max-material", f"{self.blunder_max_material}"]
         if self.miss_chance != 0.0:
             args += ["--miss-chance", f"{self.miss_chance}"]
-        if self.wild_chance != 0.0:
-            args += ["--wild-chance", f"{self.wild_chance}"]
+        if self.qsearch_depth is not None:
+            args += ["--qsearch-depth", str(self.qsearch_depth)]
         if self.guaranteed_mate_in != 1:
             args += ["--guaranteed-mate-in", str(self.guaranteed_mate_in)]
         if self.disable_eval:

@@ -25,15 +25,17 @@ from .engines import BotConfig, MaiaEngine, Player
 # Approx pilot-measured Elos in the comments are coarse (single-anchor)
 # guides for range coverage, not ground truth.
 REFERENCE_BOTS: list[BotConfig] = [
-    # Random floor: with configs no longer playing each other (seed-swap),
-    # the weakest configs need an opponent below them to be ratable. A
-    # 100%-wild bot is weaker than any grid config (all wild <= 0.6).
-    BotConfig("ref-d1-w100", depth=1, wild_chance=1.0),   # ~ floor
-    BotConfig("ref-d2-w80", depth=2, wild_chance=0.8),    # ~ <600
-    BotConfig("ref-d4-w60", depth=4, wild_chance=0.6),    # ~ 600
-    BotConfig("ref-d4-w40", depth=4, wild_chance=0.4),    # ~1040
+    # Tactical-vision floor: with configs no longer playing each other
+    # (seed-swap), the weakest configs need opponents below them to be
+    # ratable. A tactically-blind bot (qsearch_depth 0) hangs pieces and is
+    # weaker than any sane config — the natural, low-variance floor that
+    # replaced the retired wild bots. The qdepth rung gives a spread up to
+    # ~the blunder/depth refs.
+    BotConfig("ref-d1-q0", depth=1, qsearch_depth=0),     # ~ floor (Martin)
+    BotConfig("ref-d2-q0", depth=2, qsearch_depth=0),
+    BotConfig("ref-d4-q1", depth=4, qsearch_depth=1),     # sees initial capture
+    BotConfig("ref-d4-q2", depth=4, qsearch_depth=2),     # sees the recapture
     BotConfig("ref-d4-b70", depth=4, blunder_chance=0.7), # ~1245
-    BotConfig("ref-d4-w20", depth=4, wild_chance=0.2),    # ~1335
     BotConfig("ref-d1", depth=1),                          # ~1750
     BotConfig("ref-d4", depth=4),                          # ~2100
     BotConfig("ref-d6", depth=6),                          # ~2435

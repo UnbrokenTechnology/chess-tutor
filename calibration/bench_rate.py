@@ -14,7 +14,6 @@ from harness.pools import opponent_pool
 seeds = []
 for d in (1, 2, 4, 6):
     seeds.append(BotConfig(f"b-d{d}", depth=d))
-    seeds.append(BotConfig(f"b-d{d}-w40", depth=d, wild_chance=0.4))
     seeds.append(BotConfig(f"b-d{d}-m40", depth=d, miss_chance=0.4))
     seeds.append(BotConfig(f"b-d{d}-r6", depth=d, avg_move_rank=6.0))
 
