@@ -12,3 +12,9 @@ books/
 runs/
 *.pgn
 .venv/
+
+# Python bytecode + fastchess autosave/logs
+__pycache__/
+*.pyc
+config.json
+*.log
