@@ -9,15 +9,16 @@
 #     powershell -ExecutionPolicy Bypass -File calibration\progress.ps1
 # Ctrl-C to stop watching (does NOT stop the run).
 #
-# TOTAL is specific to the current grid (640 configs, batches of 60+40,
-# 18 opponents, 22 games/pair, gauntlet seeds also play each other):
-#   sum over batches of (C(S+18,2) - C(18,2)) * 22  =  660,000.
+# TOTAL is specific to the current grid (4032 configs, seed-swap: 19
+# opponents are the gauntlet seeds, configs are non-seeds and don't play
+# each other, batches of 120, 22 games/pair):
+#   sum over batches of (C(19,2) + 19*K) * 22  =  1,813,284.
 # Re-derive if you change the grid/batch/opponent/games settings.
 
 $ErrorActionPreference = 'SilentlyContinue'
 $gridDir = Join-Path $PSScriptRoot 'runs\grid'
-$total   = 660000
-$refresh = 8   # seconds between samples
+$total   = 1813284
+$refresh = 10   # seconds between samples
 
 $prev = $null; $prevT = $null
 Write-Host "watching $gridDir  (total $total games)  -- Ctrl-C to stop"
