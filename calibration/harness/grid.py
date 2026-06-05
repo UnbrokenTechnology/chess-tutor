@@ -1,14 +1,17 @@
-"""Full-factorial config grid.
+"""Full-factorial config grid over the move-quality dials.
 
-Given per-dial value lists, produce the Cartesian product of every
-combination as :class:`BotConfig` seeds. This is the data-collection
-workhorse: it varies dials *together* so the fitted model can see
-interactions a one-dial-at-a-time sweep would miss.
+Cartesian product of the dial value-lists in :class:`GridSpec`, so dial
+*interactions* are captured. Blunder rate and blunder *severity* are
+combined into enumerated **blunder modes** ``(chance, min_material,
+max_material)`` because severity only matters when a blunder fires
+(severity is conditional on chance > 0, not an independent axis).
 
-Config names compactly encode every varied dial so they are unique
-(required: fastchess engine names must not collide) and human-readable
-in the output CSV: ``d4-r2-b40-m30-w20`` = depth 4, avg-move-rank 2,
-blunder 0.40, miss 0.30, wild 0.20.
+Eval masks are deliberately NOT a grid dimension (2^8 = 256x blowup);
+they are their own experiment (``run_masks.py``).
+
+Config names encode every dial so they are unique and readable in the
+CSV, e.g. ``d4-r2-b60q-m20-w30-g2`` = depth 4, rank 2, blunder 0.60 up to
+a queen, miss 0.20, wild 0.30, guaranteed-mate-in 2.
 """
 
 from __future__ import annotations
@@ -18,28 +21,34 @@ from dataclasses import dataclass, field
 
 from .engines import BotConfig
 
+# A blunder mode: (chance, min_material_pts, max_material_pts).
+BlunderMode = tuple[float, float, float]
+
+# Severity label from the max-material ceiling, for compact config names.
+_SEVERITY = {2.0: "p", 4.0: "mi", 9.0: "q"}  # pawn / minor / queen
+
 
 @dataclass
 class GridSpec:
-    """Per-dial value lists. The grid is their Cartesian product."""
+    """Per-dial value lists; the grid is their Cartesian product."""
 
     depth: list[int] = field(default_factory=lambda: [4])
     avg_move_rank: list[float] = field(default_factory=lambda: [1.0])
-    blunder_chance: list[float] = field(default_factory=lambda: [0.0])
+    #: (chance, min_material, max_material). chance 0 => no blunder.
+    blunder_modes: list[BlunderMode] = field(default_factory=lambda: [(0.0, 1.0, 4.0)])
     miss_chance: list[float] = field(default_factory=lambda: [0.0])
     wild_chance: list[float] = field(default_factory=lambda: [0.0])
-    # Held fixed across the grid by default (combinatorially expensive to
-    # cross; eval-mask is its own "ceiling" experiment).
-    guaranteed_mate_in: int = 1
-    disable_eval: tuple[str, ...] = ()
+    guaranteed_mate_in: list[int] = field(default_factory=lambda: [1])
+    disable_eval: tuple[str, ...] = ()  # fixed across the grid
 
     def count(self) -> int:
         return (
             len(self.depth)
             * len(self.avg_move_rank)
-            * len(self.blunder_chance)
+            * len(self.blunder_modes)
             * len(self.miss_chance)
             * len(self.wild_chance)
+            * len(self.guaranteed_mate_in)
         )
 
 
@@ -47,30 +56,42 @@ def _pct(x: float) -> int:
     return int(round(x * 100))
 
 
-def config_name(depth, rank, blunder, miss, wild) -> str:
-    # rank with :g so 2.0 -> "2" but 1.5 -> "1.5"; chances as percent ints.
-    return f"d{depth}-r{rank:g}-b{_pct(blunder)}-m{_pct(miss)}-w{_pct(wild)}"
+def _blunder_label(mode: BlunderMode) -> str:
+    chance, _lo, hi = mode
+    if chance <= 0.0:
+        return "b0"
+    return f"b{_pct(chance)}{_SEVERITY.get(hi, str(int(hi)))}"
+
+
+def config_name(depth, rank, mode, miss, wild, mate) -> str:
+    return (
+        f"d{depth}-r{rank:g}-{_blunder_label(mode)}"
+        f"-m{_pct(miss)}-w{_pct(wild)}-g{mate}"
+    )
 
 
 def build_grid(spec: GridSpec) -> list[BotConfig]:
     configs: list[BotConfig] = []
-    for depth, rank, blunder, miss, wild in itertools.product(
+    for depth, rank, mode, miss, wild, mate in itertools.product(
         spec.depth,
         spec.avg_move_rank,
-        spec.blunder_chance,
+        spec.blunder_modes,
         spec.miss_chance,
         spec.wild_chance,
+        spec.guaranteed_mate_in,
     ):
-        name = config_name(depth, rank, blunder, miss, wild)
+        chance, lo, hi = mode
         configs.append(
             BotConfig(
-                name=name,
+                name=config_name(depth, rank, mode, miss, wild, mate),
                 depth=depth,
                 avg_move_rank=rank,
-                blunder_chance=blunder,
+                blunder_chance=chance,
+                blunder_min_material=lo,
+                blunder_max_material=hi,
                 miss_chance=miss,
                 wild_chance=wild,
-                guaranteed_mate_in=spec.guaranteed_mate_in,
+                guaranteed_mate_in=mate,
                 disable_eval=spec.disable_eval,
             )
         )

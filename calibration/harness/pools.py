@@ -25,6 +25,10 @@ from .engines import BotConfig, MaiaEngine, Player
 # Approx pilot-measured Elos in the comments are coarse (single-anchor)
 # guides for range coverage, not ground truth.
 REFERENCE_BOTS: list[BotConfig] = [
+    # Random floor: with configs no longer playing each other (seed-swap),
+    # the weakest configs need an opponent below them to be ratable. A
+    # 100%-wild bot is weaker than any grid config (all wild <= 0.6).
+    BotConfig("ref-d1-w100", depth=1, wild_chance=1.0),   # ~ floor
     BotConfig("ref-d2-w80", depth=2, wild_chance=0.8),    # ~ <600
     BotConfig("ref-d4-w60", depth=4, wild_chance=0.6),    # ~ 600
     BotConfig("ref-d4-w40", depth=4, wild_chance=0.4),    # ~1040
@@ -47,5 +51,25 @@ def maia_ladder() -> list[MaiaEngine]:
 
 
 def opponent_pool() -> list[Player]:
-    """Non-seed pool: Maia anchors + reference rungs."""
+    """The fixed gauntlet pool every grid config plays: Maia anchors +
+    reference rungs spanning ~floor..~2600. With the seed-swap (these are
+    the fastchess *seeds*; configs are non-seeds), configs play this pool
+    but not each other, and connect to one another through it."""
     return [*maia_ladder(), *REFERENCE_BOTS]
+
+
+# Eval-mask thematic groups (for the mask experiment). The 8 categories
+# bucketed by chess concept, so a backbone rule can disable a whole theme
+# ("a sub-1200 bot doesn't grasp pawn play") as one unit. Slugs match
+# EvalCategory::slug() in the engine.
+MASK_GROUPS: dict[str, tuple[str, ...]] = {
+    "pawnspace": ("pawn-structure", "passed-pawns", "space"),
+    "activity": ("pieces", "mobility"),
+    "safety": ("king-safety", "threats"),
+    "initiative": ("initiative",),
+}
+
+ALL_MASKS: tuple[str, ...] = (
+    "pawn-structure", "passed-pawns", "space", "pieces",
+    "mobility", "king-safety", "threats", "initiative",
+)
