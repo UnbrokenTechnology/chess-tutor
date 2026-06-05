@@ -113,6 +113,42 @@ pub(crate) fn draw(
                 // up with them.
                 draw_strength_controls(ui, &mut form.depth, &mut form.noise);
 
+                // Tactical-vision lever: how deep the bot resolves captures
+                // (quiescence horizon). The natural low-Elo dial — a blind
+                // bot hangs pieces like a beginner instead of playing
+                // statistically bad moves.
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Tactical vision:").on_hover_text(
+                        "How many capture plies the bot sees before guessing on \
+                         position alone. Full = normal play; lower values hang \
+                         material like a weaker human (0 = blind, doesn't see the \
+                         recapture).",
+                    );
+                    let q = &mut form.qsearch_max_plies;
+                    let label = match q {
+                        None => "Full — sees all tactics",
+                        Some(6) => "Capture sequences (6)",
+                        Some(2) => "Sees the recapture (2)",
+                        Some(1) => "Sees first capture (1)",
+                        Some(0) => "Blind — hangs pieces (0)",
+                        Some(_) => "(custom)",
+                    };
+                    egui::ComboBox::from_id_salt("qsearch_vision")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            for (val, txt) in [
+                                (None, "Full — sees all tactics"),
+                                (Some(6u32), "Capture sequences (6)"),
+                                (Some(2), "Sees the recapture (2)"),
+                                (Some(1), "Sees first capture (1)"),
+                                (Some(0), "Blind — hangs pieces (0)"),
+                            ] {
+                                ui.selectable_value(q, val, txt);
+                            }
+                        });
+                });
+
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui

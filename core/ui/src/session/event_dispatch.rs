@@ -74,6 +74,7 @@ impl Session {
                 if let Some(f) = self.new_game_form.as_mut() {
                     f.noise = NoiseProfile::default();
                     f.eval_mask = EvalMask::EMPTY;
+                    f.qsearch_max_plies = None;
                 }
             }
             Event::ApplyLearningPreset(preset) => {

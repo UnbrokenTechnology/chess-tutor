@@ -226,6 +226,7 @@ impl Session {
         depth: u32,
         noise: NoiseProfile,
         eval_mask: EvalMask,
+        qsearch_max_plies: Option<u32>,
         book: BookSelection,
     ) {
         self.gen = self.gen.wrapping_add(1);
@@ -243,6 +244,7 @@ impl Session {
         self.opponent = OpponentProfile::new_random();
         self.opponent.noise = noise;
         self.opponent.eval_mask = eval_mask;
+        self.opponent.qsearch_max_plies = qsearch_max_plies;
         self.opponent.book = book;
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
         self.book_out_announced = false;
@@ -306,6 +308,7 @@ impl Session {
         let depth = form.depth;
         let noise = form.noise.clone();
         let eval_mask = form.eval_mask;
+        let qsearch_max_plies = form.qsearch_max_plies;
         let book = form.book.to_book();
         // The Start screen is the true home of these options (PLAN
         // step 5): commit them onto the session before the game starts.
@@ -321,6 +324,6 @@ impl Session {
         self.active_overlays = active_overlays;
         self.show_eval_bar = show_eval_bar;
         self.retrospective_depth = retrospective_depth;
-        self.start_new_game(position, engine_plays, depth, noise, eval_mask, book);
+        self.start_new_game(position, engine_plays, depth, noise, eval_mask, qsearch_max_plies, book);
     }
 }

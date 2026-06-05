@@ -83,6 +83,10 @@ pub struct NewGameForm {
     pub noise: NoiseProfile,
     /// Eval categories the bot is blind to. Same persistence rule.
     pub eval_mask: EvalMask,
+    /// Tactical-vision cap (quiescence horizon, in capture plies). `None`
+    /// = full vision; `Some(0)` = tactically blind (hangs pieces). Same
+    /// persistence rule as the other handicaps.
+    pub qsearch_max_plies: Option<u32>,
     /// Which openings the bot may play. Persists across New Game clicks
     /// like the other knobs.
     pub book: OpeningSelection,
@@ -120,6 +124,7 @@ impl NewGameForm {
             retrospective_depth: session.retrospective_depth,
             noise: session.opponent.noise.clone(),
             eval_mask: session.opponent.eval_mask,
+            qsearch_max_plies: session.opponent.qsearch_max_plies,
             book: OpeningSelection::from_book(&session.opponent.book),
             learning: session.learning,
             active_overlays: session.active_overlays.clone(),
@@ -139,6 +144,7 @@ impl NewGameForm {
             retrospective_depth: ANALYTICAL_DEPTH,
             noise: NoiseProfile::default(),
             eval_mask: EvalMask::EMPTY,
+            qsearch_max_plies: None,
             book: OpeningSelection::any(),
             learning: crate::learning_mode::LearningPreferences::default(),
             active_overlays: std::collections::HashSet::new(),
