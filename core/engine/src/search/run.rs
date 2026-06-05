@@ -27,6 +27,10 @@ impl<'a> Search<'a> {
         self.stop_time = params.max_time.map(|d| self.start_time + d);
         self.max_nodes = params.max_nodes;
         self.eval_mask = params.eval_mask;
+        self.qsearch_cap = params
+            .qsearch_max_plies
+            .map(|q| q as i32)
+            .unwrap_or(QSEARCH_UNBOUNDED);
         self.tt_hit_average = TT_HIT_AVERAGE_INIT;
         self.nmp_min_ply = 0;
         self.nmp_color = Color::White;

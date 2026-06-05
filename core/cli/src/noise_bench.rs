@@ -111,6 +111,7 @@ pub fn run(args: NoiseBenchArgs) -> Result<()> {
                 verbose_progress: false,
                 threads: args.threads,
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
+                qsearch_max_plies: None,
             };
             let analyses = analyze_position(&mut engine, &mut pos.clone(), params);
             for a in &analyses {

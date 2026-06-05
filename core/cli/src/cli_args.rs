@@ -214,6 +214,12 @@ pub enum Command {
         /// Maximum iterative-deepening depth (plies).
         #[arg(long, default_value_t = 10)]
         depth: u32,
+        /// Cap quiescence search to this many plies of capture resolution
+        /// (tactical-vision dial). Omit for full vision; `0` = static eval
+        /// at the leaf (tactically blind). Mainly for inspecting how the
+        /// bot's move/eval changes as tactical sight shrinks.
+        #[arg(long = "qsearch-depth", value_name = "PLIES")]
+        qsearch_depth: Option<u32>,
         /// Stop after this many nodes.
         #[arg(long)]
         nodes: Option<u64>,
@@ -498,6 +504,14 @@ pub enum Command {
         /// so a `--seed` replay is exact; raise only for raw speed.
         #[arg(long, default_value_t = 1)]
         threads: usize,
+        /// Tactical-vision dial: cap quiescence search to this many plies
+        /// of capture resolution. Omit for full vision; `0` = tactically
+        /// blind (the bot can't see recaptures, so it hangs pieces like a
+        /// sub-600 human); `2` ≈ basic SEE-level sight. The natural
+        /// low-Elo lever — a weak bot that loses to tactics, not to random
+        /// or statistically-bad moves.
+        #[arg(long = "qsearch-depth", value_name = "PLIES")]
+        qsearch_depth: Option<u32>,
         /// Base seed for per-game randomness. Default: random per
         /// process (logged to stderr). Pass a fixed value to make an
         /// entire harness run reproducible.

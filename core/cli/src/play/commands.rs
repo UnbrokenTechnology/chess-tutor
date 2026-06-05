@@ -62,6 +62,7 @@ fn print_openings_status(
         seed: 0,
         book: allowed.clone(),
         eval_mask: EvalMask::EMPTY,
+        qsearch_max_plies: None,
         noise: NoiseProfile::default(),
     };
     let probe_pos = Position::startpos();

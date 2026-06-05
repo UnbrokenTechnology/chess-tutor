@@ -121,6 +121,19 @@ impl<'a> Search<'a> {
             best_score = -Value::INFINITE;
         }
 
+        // Tactical-horizon cap (play-engine weak-bot lever). qsearch enters
+        // at `depth == 0` and recurses with `depth - 1`, so `-depth` counts
+        // the capture plies resolved so far. Once that reaches the bot's
+        // `qsearch_cap`, stop resolving captures and return the stand-pat
+        // (static) eval — the bot is "blind" past this horizon. `cap == 0`
+        // resolves no captures at all (hangs pieces). Never applied in
+        // check: a forced position must still find its evasions.
+        // [`QSEARCH_UNBOUNDED`] makes `-depth <= -cap` unreachable, so the
+        // full-strength / analytical path is unaffected.
+        if !in_check && depth <= -self.qsearch_cap {
+            return best_score;
+        }
+
         // SF11 qsearch picker depth (search.cpp:1391): always
         // [`Depth::QS_CHECKS`] when in check (we still want to look at
         // evasions); otherwise the *current* recursion depth, which

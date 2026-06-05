@@ -220,6 +220,18 @@ pub(crate) struct Search<'a> {
     /// `evaluate_with_pawn_cache` call inside the search.
     pub(crate) eval_mask: EvalMask,
 
+    /// Quiescence-search horizon cap, in plies of capture resolution.
+    /// [`QSEARCH_UNBOUNDED`] (the default) means qsearch resolves
+    /// captures normally (full tactical vision). A small value limits how
+    /// many capture plies qsearch sees before falling back to the static
+    /// eval — the "tactical horizon" lever for believable weak bots: a
+    /// cap of `0` makes the bot tactically blind (it can't see that its
+    /// queen gets recaptured, so it hangs pieces like a sub-600 human).
+    /// Play-engine-only, exactly like [`eval_mask`](Self::eval_mask): the
+    /// analytical engine must keep full qsearch so teaching feedback
+    /// judges against true best play. Captured from `params` at `run()`.
+    pub(crate) qsearch_cap: i32,
+
     /// SF11's `Thread::ttHitAverage` (search.cpp:699-700): a running
     /// exponential average of TT-hit success, in units of
     /// `TT_HIT_AVERAGE_RESOLUTION`. Updated once per `negamax` node
@@ -287,6 +299,7 @@ impl<'a> Search<'a> {
             verbose_next_tick: 0,
             root_stm: Color::White,
             eval_mask: EvalMask::EMPTY,
+            qsearch_cap: QSEARCH_UNBOUNDED,
             tt_hit_average: TT_HIT_AVERAGE_INIT,
             nmp_min_ply: 0,
             nmp_color: Color::White,

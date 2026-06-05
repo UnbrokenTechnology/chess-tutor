@@ -186,6 +186,7 @@ pub fn find_threat_defusals(
         verbose_progress: false,
         threads: 1,
         eval_mask: crate::opponent::EvalMask::EMPTY,
+        qsearch_max_plies: None,
     };
     let lines = engine.search(pos, params);
     if lines.is_empty() {

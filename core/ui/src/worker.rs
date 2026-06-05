@@ -277,6 +277,7 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                     // Retrospective is analytical — always unbiased
                     // eval, regardless of any mid-game bot mask.
                     eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
+                    qsearch_max_plies: None,
                 };
                 let started = Instant::now();
                 let analyses = analyze_position(&mut analysis_engine, &mut pre_move_pos, params);

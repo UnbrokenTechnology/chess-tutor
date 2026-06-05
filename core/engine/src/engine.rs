@@ -130,6 +130,15 @@ pub struct SearchParams {
     /// must keep this `EMPTY` so the student sees true best play in
     /// the feedback layer.
     pub eval_mask: EvalMask,
+    /// Quiescence-search horizon cap, in plies of capture resolution.
+    /// `None` (default) = full tactical vision (qsearch resolves captures
+    /// normally). `Some(n)` limits the bot to `n` plies of capture
+    /// resolution before falling back to the static eval — the "tactical
+    /// horizon" lever: `Some(0)` makes the bot tactically blind (hangs
+    /// pieces, doesn't see recaptures), modelling a sub-600 human.
+    /// Play-engine-only, like [`Self::eval_mask`]: analytical paths must
+    /// keep this `None` so feedback judges against true best play.
+    pub qsearch_max_plies: Option<u32>,
 }
 
 impl Default for SearchParams {
@@ -144,6 +153,7 @@ impl Default for SearchParams {
             verbose_progress: false,
             threads: 1,
             eval_mask: EvalMask::EMPTY,
+            qsearch_max_plies: None,
         }
     }
 }

@@ -36,6 +36,15 @@ pub struct OpponentProfile {
     pub book: BookSelection,
     pub noise: NoiseProfile,
     pub eval_mask: EvalMask,
+    /// Quiescence-search horizon cap (plies of capture resolution) the
+    /// bot searches with — the "tactical vision" lever. `None` = full
+    /// tactical sight (normal qsearch); `Some(0)` = tactically blind
+    /// (hangs pieces like a sub-600 human, the natural way to make a
+    /// believable weak bot instead of forcing statistically-bad moves).
+    /// Flows to [`crate::engine::SearchParams::qsearch_max_plies`].
+    /// Analytical engines never read it (full vision for true-best-play
+    /// feedback), exactly like [`Self::eval_mask`].
+    pub qsearch_max_plies: Option<u32>,
     /// Seed for any pseudo-randomness this profile drives — opening
     /// line selection in Phase B, move sampling later. Logged at game
     /// start so a varied game can be replayed exactly by passing the
@@ -62,6 +71,7 @@ impl OpponentProfile {
             book: BookSelection::Allowed(crate::book::all_ids()),
             noise: NoiseProfile::default(),
             eval_mask: EvalMask::default(),
+            qsearch_max_plies: None,
             seed,
         }
     }

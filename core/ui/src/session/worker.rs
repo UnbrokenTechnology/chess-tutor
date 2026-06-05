@@ -209,8 +209,9 @@ impl Session {
             threads: 1,
             // Play engine move — apply the opponent's mid-game eval
             // mask so the bot plays as if blind to the masked
-            // categories.
+            // categories, and its tactical-vision (qsearch) horizon.
             eval_mask: self.opponent.eval_mask,
+            qsearch_max_plies: self.opponent.qsearch_max_plies,
         };
         self.engine_thinking = true;
         let _ = self.worker_tx.send(WorkerJob::Search {

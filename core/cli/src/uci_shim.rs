@@ -56,6 +56,9 @@ pub struct UciConfig {
     pub base_seed: u64,
     /// Evaluation categories the bot is blind to (knowledge-gap dial).
     pub eval_mask: EvalMask,
+    /// Quiescence horizon cap (tactical-vision dial). `None` = full
+    /// vision; `Some(0)` = tactically blind (hangs pieces).
+    pub qsearch_max_plies: Option<u32>,
     /// Move-sampling dials (variety / blunder / miss / wild).
     pub noise: NoiseProfile,
 }
@@ -77,8 +80,9 @@ pub fn run(cfg: UciConfig) -> Result<()> {
     // Surface the resolved config on stderr (stdout is the UCI channel)
     // so harness logs record exactly what was measured.
     eprintln!(
-        "uci-shim: depth={} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, blunder={} [{}..{}cp], miss={}, wild={}, guaranteed_mate_in={}}}",
+        "uci-shim: depth={} qsearch_depth={:?} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, blunder={} [{}..{}cp], miss={}, wild={}, guaranteed_mate_in={}}}",
         cfg.depth,
+        cfg.qsearch_max_plies,
         cfg.threads,
         cfg.base_seed,
         cfg.eval_mask
@@ -213,6 +217,7 @@ fn choose_move(
         verbose_progress: false,
         threads: cfg.threads.max(1),
         eval_mask: cfg.eval_mask,
+        qsearch_max_plies: cfg.qsearch_max_plies,
     };
     let lines = engine.search(pos, params);
     match noise::pick(&cfg.noise, seed, ply, pos, &lines, &legal) {

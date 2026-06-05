@@ -570,6 +570,7 @@ fn main() -> Result<()> {
                 verbose_progress: false,
                 threads: 1,
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
+                qsearch_max_plies: None,
             };
             let lines = engine.search(&mut pos, params);
             if lines.is_empty() {
@@ -707,6 +708,7 @@ fn main() -> Result<()> {
                 verbose_progress: false,
                 threads: 1,
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
+                qsearch_max_plies: None,
             };
             let lines = engine.search(&mut pos, search_params);
             let (score_source, headline_score) = if lines.is_empty() {
@@ -881,6 +883,7 @@ fn main() -> Result<()> {
         Command::Search {
             fen,
             depth,
+            qsearch_depth,
             nodes,
             time_ms,
             multi_pv,
@@ -916,6 +919,8 @@ fn main() -> Result<()> {
                 threads: threads.max(1),
                 // One-shot CLI search/analyze — analytical, no bot mask.
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
+                // ...except the explicit tactical-vision dial for inspection.
+                qsearch_max_plies: qsearch_depth,
             };
 
             let orientation = crate::units::Orientation::from_stm_flag(stm_mode);
@@ -1350,6 +1355,7 @@ fn main() -> Result<()> {
         Command::Uci {
             depth,
             threads,
+            qsearch_depth,
             seed,
             disable_eval,
             avg_move_rank,
@@ -1411,6 +1417,7 @@ fn main() -> Result<()> {
                 threads: threads.max(1),
                 base_seed,
                 eval_mask,
+                qsearch_max_plies: qsearch_depth,
                 noise,
             })?;
         }

@@ -37,6 +37,11 @@ pub(crate) type StopFlag = Arc<AtomicBool>;
 /// Maximum search depth / ply. Matches `Value::MAX_PLY`.
 pub const MAX_PLY: usize = Value::MAX_PLY as usize;
 
+/// Sentinel [`Search::qsearch_cap`] value meaning "no quiescence horizon
+/// cap" — qsearch resolves captures normally (full tactical vision). Far
+/// beyond any reachable qsearch ply depth, so the cap check never fires.
+pub(crate) const QSEARCH_UNBOUNDED: i32 = 1 << 20;
+
 /// How often (in nodes) we check the wall clock / node cap for a stop
 /// signal. Keeping this coarse avoids a `now()` syscall per node.
 const STOP_CHECK_INTERVAL: u64 = 4096;
