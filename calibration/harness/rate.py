@@ -74,11 +74,15 @@ class Rating:
     played: int
 
 
-# Ordo table rows: "  1 name : 1500.0 ---- 6.0 10 60"
+# Ordo table rows: "  1 name : 1500.0 ---- 6.0 10 60". The error column is
+# OMITTED entirely when run with `-s 0` (no error-bar simulations), so it
+# is optional here; the unambiguous disambiguator is that POINTS always
+# carries a decimal while PLAYED is a bare integer, so the optional error
+# group backtracks out cleanly when absent.
 _ROW = re.compile(
     r"^\s*\d+\s+(?P<name>.+?)\s*:\s*"
     r"(?P<rating>-?\d+\.\d+)\s+"
-    r"(?P<error>-+|\d+\.\d+)\s+"
+    r"(?:(?P<error>-+|\d+\.\d+)\s+)?"
     r"(?P<points>-?\d+\.\d+)\s+"
     r"(?P<played>\d+)"
 )
