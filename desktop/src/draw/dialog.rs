@@ -111,43 +111,12 @@ pub(crate) fn draw(
                 // game review), so it belongs here. Rendered in the same
                 // grid as the noise knobs so its label/slider columns line
                 // up with them.
-                draw_strength_controls(ui, &mut form.depth, &mut form.noise);
-
-                // Tactical-vision lever: how deep the bot resolves captures
-                // (quiescence horizon). The natural low-Elo dial — a blind
-                // bot hangs pieces like a beginner instead of playing
-                // statistically bad moves.
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label("Tactical vision:").on_hover_text(
-                        "How many capture plies the bot sees before guessing on \
-                         position alone. Full = normal play; lower values hang \
-                         material like a weaker human (0 = blind, doesn't see the \
-                         recapture).",
-                    );
-                    let q = &mut form.qsearch_max_plies;
-                    let label = match q {
-                        None => "Full — sees all tactics",
-                        Some(6) => "Capture sequences (6)",
-                        Some(2) => "Sees the recapture (2)",
-                        Some(1) => "Sees first capture (1)",
-                        Some(0) => "Blind — hangs pieces (0)",
-                        Some(_) => "(custom)",
-                    };
-                    egui::ComboBox::from_id_salt("qsearch_vision")
-                        .selected_text(label)
-                        .show_ui(ui, |ui| {
-                            for (val, txt) in [
-                                (None, "Full — sees all tactics"),
-                                (Some(6u32), "Capture sequences (6)"),
-                                (Some(2), "Sees the recapture (2)"),
-                                (Some(1), "Sees first capture (1)"),
-                                (Some(0), "Blind — hangs pieces (0)"),
-                            ] {
-                                ui.selectable_value(q, val, txt);
-                            }
-                        });
-                });
+                draw_strength_controls(
+                    ui,
+                    &mut form.depth,
+                    &mut form.qsearch_max_plies,
+                    &mut form.noise,
+                );
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -262,7 +231,16 @@ fn draw_play_options(ui: &mut egui::Ui, form: &mut chess_tutor_ui::session::NewG
 /// all in one 2-column grid so the label/slider columns align. Free
 /// function so it can borrow the two form fields disjointly without
 /// fighting the borrow checker over the whole form.
-fn draw_strength_controls(ui: &mut egui::Ui, depth: &mut u32, noise: &mut NoiseProfile) {
+/// Slider position that means "infinite tactical vision" (full quiescence,
+/// the form's `None`). Finite caps occupy 0..9; the far-right notch is ∞.
+const QSEARCH_INF: u32 = 10;
+
+fn draw_strength_controls(
+    ui: &mut egui::Ui,
+    depth: &mut u32,
+    qsearch: &mut Option<u32>,
+    noise: &mut NoiseProfile,
+) {
     egui::Grid::new("bot_strength_grid")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -273,6 +251,36 @@ fn draw_strength_controls(ui: &mut egui::Ui, depth: &mut u32, noise: &mut NoiseP
                  feedback uses its own depth.",
             );
             ui.add(egui::Slider::new(depth, 1..=20));
+            ui.end_row();
+
+            // Tactical vision = the quiescence horizon (how many capture
+            // plies the bot resolves before judging on position alone). A
+            // plain slider like depth: 0 = blind (hangs pieces), and the
+            // far right = ∞ = full tactical sight (the default). `None` on
+            // the form is ∞; finite caps are 0..9.
+            ui.label("Tactical vision:").on_hover_text(
+                "How many capture plies the bot sees before judging on position \
+                 alone. Far right (∞) is full sight — normal play. Lower values \
+                 hang material like a weaker human; 0 = blind, doesn't even see \
+                 the recapture.",
+            );
+            let mut vision: u32 = qsearch.map_or(QSEARCH_INF, |n| n.min(QSEARCH_INF));
+            let resp = ui.add(
+                egui::Slider::new(&mut vision, 0..=QSEARCH_INF).custom_formatter(|v, _| {
+                    if v >= QSEARCH_INF as f64 {
+                        "∞".to_string()
+                    } else {
+                        format!("{}", v as u32)
+                    }
+                }),
+            );
+            if resp.changed() {
+                *qsearch = if vision >= QSEARCH_INF {
+                    None
+                } else {
+                    Some(vision)
+                };
+            }
             ui.end_row();
 
             ui.label("Blunder chance:")
