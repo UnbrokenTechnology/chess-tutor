@@ -39,7 +39,11 @@
 //!    centred on `avg_move_rank` (spread scales with the dial), then
 //!    play that rank. At the `1.0` floor the spread is zero, so it
 //!    returns the engine's #1. This is the "plays the Nth-best move on
-//!    average" weakness dial. See [`sample_rank`].
+//!    average" weakness dial. See [`sample_rank`]. Mate-guarded.
+//!
+//! All three branches respect [`NoiseProfile::guaranteed_mate_in`]: a
+//! forced mate the engine has resolved within that many moves is never
+//! demoted, declined, or blundered away — see [`mate_guarded`].
 //!
 //! When no branch fires, the picker returns [`NoisePick::Line(0)`] —
 //! the engine's best move.
@@ -165,6 +169,17 @@ pub fn pick(
                 return NoisePick::Blunder(idx);
             }
         }
+    }
+
+    // A guaranteed mate within the bot's vision is protected from the
+    // variety branch too — not only miss/blunder. Without this, an
+    // `avg_move_rank > 1` bot samples a rank > 0 and demotes itself off a
+    // mate-in-N (N <= guaranteed_mate_in) that the engine has fully
+    // resolved. (Observed: `guaranteed_mate_in = 1` still played the
+    // 2nd-best move over a mate-in-1.) The protection is the whole point
+    // of the dial — "weak in general, but always finds mate-in-N."
+    if mate_guard {
+        return NoisePick::Line(0);
     }
 
     if lines.len() <= 1 {

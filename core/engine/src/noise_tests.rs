@@ -285,6 +285,47 @@ fn blunder_allowed_for_mate_beyond_guarantee() {
     assert!(saw_blunder, "blunder branch never fired against mate-in-5");
 }
 
+#[test]
+fn variety_suppressed_when_mate_guarded() {
+    // Regression for the reported bug: an `avg_move_rank > 1` bot demoted
+    // itself off a mate-in-1 even with `guaranteed_mate_in = 1`, because
+    // the variety branch wasn't checked against the mate guard. A mate
+    // within the guarantee must always play #0, every ply.
+    let noise = NoiseProfile {
+        avg_move_rank: 4.0,
+        guaranteed_mate_in: 1,
+        ..Default::default()
+    };
+    let root = mat_root();
+    let mate_in_1 = Value::MATE.0 - 1;
+    let lines = vec![line(mate_in_1), line(50), line(40), line(30), line(20)];
+    for ply in 0..30 {
+        assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines), NoisePick::Line(0));
+    }
+}
+
+#[test]
+fn variety_allowed_for_mate_beyond_guarantee() {
+    // A mate deeper than the guarantee is NOT protected — the bot "can't
+    // see that far," so the variety branch may still demote off it.
+    let noise = NoiseProfile {
+        avg_move_rank: 4.0,
+        guaranteed_mate_in: 1,
+        ..Default::default()
+    };
+    let root = mat_root();
+    let mate_in_5 = Value::MATE.0 - 9;
+    let lines = vec![line(mate_in_5), line(50), line(40), line(30), line(20)];
+    let mut saw_demotion = false;
+    for ply in 0..30 {
+        if !matches!(pick(&noise, 0xBEEF, ply, &root, &lines), NoisePick::Line(0)) {
+            saw_demotion = true;
+            break;
+        }
+    }
+    assert!(saw_demotion, "variety never demoted off an unprotected mate-in-5");
+}
+
 // ---- miss branch -------------------------------------------------
 
 #[test]
