@@ -101,10 +101,6 @@ fn format_noise_tag(info: &NoisePickInfo) -> String {
             pick_idx + 1,
             num_lines,
         ),
-        NoisePickInfo::Wild { engine_top, engine_top_score } => format!(
-            "[noise: wild — engine preferred {:?} ({:+})]",
-            engine_top, engine_top_score.0,
-        ),
     }
 }
 
@@ -355,7 +351,7 @@ pub(super) fn print_help(out: &mut io::StdoutLock<'_>) -> io::Result<()> {
     writeln!(out, "                    inspect or edit the opening book (effective next game)")?;
     writeln!(out, "  eval-mask [list | disable CAT | enable CAT | reset]")?;
     writeln!(out, "                    toggle bot's blindness to eval categories")?;
-    writeln!(out, "  noise [show | pool N | temp CP | blunder F | wild F | guarantee N | reset]")?;
+    writeln!(out, "  noise [show | pool N | temp CP | blunder F | guarantee N | reset]")?;
     writeln!(out, "                    bot move-sampling knobs")?;
     writeln!(out, "  undo     take back one ply")?;
     writeln!(out, "  fen      print the current FEN")?;

@@ -302,18 +302,6 @@ fn draw_strength_controls(ui: &mut egui::Ui, depth: &mut u32, noise: &mut NoiseP
             }
             ui.end_row();
 
-            ui.label("Wild move chance:")
-                .on_hover_text(
-                    "Per-move probability of picking uniformly from ALL legal moves, \
-                     bypassing the search ranking. Beginner-bot territory — the only \
-                     branch that can pick moves the engine didn't surface.",
-                );
-            ui.add(
-                egui::Slider::new(&mut noise.wild_chance, 0.0..=1.0)
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-            );
-            ui.end_row();
-
             ui.label("Average move rank:")
                 .on_hover_text(
                     "The bot's variety dial: the average rank of the move it plays. \

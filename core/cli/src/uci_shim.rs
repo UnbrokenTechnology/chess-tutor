@@ -30,7 +30,6 @@ use std::io::{self, BufRead, Write};
 use anyhow::Result;
 
 use chess_tutor_engine::engine::{Engine, SearchParams};
-use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::noise::{self, NoisePick};
 use chess_tutor_engine::opponent::{EvalMask, NoiseProfile};
 use chess_tutor_engine::position::Position;
@@ -80,7 +79,7 @@ pub fn run(cfg: UciConfig) -> Result<()> {
     // Surface the resolved config on stderr (stdout is the UCI channel)
     // so harness logs record exactly what was measured.
     eprintln!(
-        "uci-shim: depth={} qsearch_depth={:?} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, blunder={} [{}..{}cp], miss={}, wild={}, guaranteed_mate_in={}}}",
+        "uci-shim: depth={} qsearch_depth={:?} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, blunder={} [{}..{}cp], miss={}, guaranteed_mate_in={}}}",
         cfg.depth,
         cfg.qsearch_max_plies,
         cfg.threads,
@@ -95,7 +94,6 @@ pub fn run(cfg: UciConfig) -> Result<()> {
         cfg.noise.blunder_min_material_cp,
         cfg.noise.blunder_max_material_cp,
         cfg.noise.miss_chance,
-        cfg.noise.wild_chance,
         cfg.noise.guaranteed_mate_in,
     );
 
@@ -204,9 +202,6 @@ fn choose_move(
     seed: u64,
     ply: u64,
 ) -> Option<MoveChoice> {
-    // Wild noise needs the full legal list; generate before searching
-    // (movegen leaves the position unchanged), exactly as the worker does.
-    let legal = legal_moves_vec(pos);
     let params = SearchParams {
         max_depth: depth,
         max_nodes: None,
@@ -220,9 +215,9 @@ fn choose_move(
         qsearch_max_plies: cfg.qsearch_max_plies,
     };
     let lines = engine.search(pos, params);
-    match noise::pick(&cfg.noise, seed, ply, pos, &lines, &legal) {
-        // A ranked-line pick (engine-best / variety / blunder / miss):
-        // report that line's own score and PV.
+    // Every noise branch (engine-best / variety / blunder / miss) yields a
+    // ranked line; report that line's own score and PV.
+    match noise::pick(&cfg.noise, seed, ply, pos, &lines) {
         NoisePick::Line(idx) | NoisePick::Blunder(idx) | NoisePick::Miss(idx) => {
             let line = lines.get(idx).or_else(|| lines.first())?;
             Some(MoveChoice {
@@ -231,16 +226,6 @@ fn choose_move(
                 depth: line.depth,
                 pv: line.pv.clone(),
             })
-        }
-        // Wild bypasses the ranking, so there's no line for the played
-        // move; report the engine's view of the position (top line) as a
-        // proxy score so adjudication still has a number.
-        NoisePick::Wild(mv) => {
-            let (score, depth) = lines
-                .first()
-                .map(|l| (l.score, l.depth))
-                .unwrap_or((Value(0), depth));
-            Some(MoveChoice { mv, score, depth, pv: vec![mv] })
         }
     }
 }

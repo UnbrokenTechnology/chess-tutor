@@ -1290,7 +1290,6 @@ fn main() -> Result<()> {
             blunder_max_material,
             miss_chance,
             guaranteed_mate_in,
-            wild_chance,
         } => {
             let mut opponent = match seed {
                 Some(s) => chess_tutor_engine::opponent::OpponentProfile::with_seed(s),
@@ -1314,9 +1313,6 @@ fn main() -> Result<()> {
             if !(0.0..=1.0).contains(&blunder_chance) {
                 anyhow::bail!("--blunder-chance must be in [0.0, 1.0], got {blunder_chance}");
             }
-            if !(0.0..=1.0).contains(&wild_chance) {
-                anyhow::bail!("--wild-chance must be in [0.0, 1.0], got {wild_chance}");
-            }
             if !(0.0..=1.0).contains(&miss_chance) {
                 anyhow::bail!("--miss-chance must be in [0.0, 1.0], got {miss_chance}");
             }
@@ -1335,7 +1331,6 @@ fn main() -> Result<()> {
                 blunder_max_material_cp: (blunder_max_material * 100.0) as i32,
                 miss_chance,
                 guaranteed_mate_in,
-                wild_chance,
             };
             play::play_loop(play::PlayConfig {
                 start_fen: fen,
@@ -1364,15 +1359,11 @@ fn main() -> Result<()> {
             blunder_max_material,
             miss_chance,
             guaranteed_mate_in,
-            wild_chance,
         } => {
             use chess_tutor_engine::opponent::{EvalCategory, EvalMask, NoiseProfile};
             // Same dial validation as `play` — keep the two in sync.
             if !(0.0..=1.0).contains(&blunder_chance) {
                 anyhow::bail!("--blunder-chance must be in [0.0, 1.0], got {blunder_chance}");
-            }
-            if !(0.0..=1.0).contains(&wild_chance) {
-                anyhow::bail!("--wild-chance must be in [0.0, 1.0], got {wild_chance}");
             }
             if !(0.0..=1.0).contains(&miss_chance) {
                 anyhow::bail!("--miss-chance must be in [0.0, 1.0], got {miss_chance}");
@@ -1410,7 +1401,6 @@ fn main() -> Result<()> {
                 blunder_max_material_cp: (blunder_max_material * 100.0) as i32,
                 miss_chance,
                 guaranteed_mate_in,
-                wild_chance,
             };
             uci_shim::run(uci_shim::UciConfig {
                 depth,

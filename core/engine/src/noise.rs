@@ -3,7 +3,12 @@
 //!
 //! The play loop runs the search with [`NoiseProfile::effective_multi_pv`]
 //! slots, then calls [`pick`] to decide what becomes the move. The
-//! sampler has four independent branches, evaluated in this order.
+//! sampler has three independent branches, evaluated in this order. All
+//! three operate on the engine's ranked lines — there is no "pick a
+//! random legal move" branch, by design: humans don't play randomly, and
+//! the natural sub-1000 weakness (hanging pieces) is modelled by the
+//! engine's tactical-vision dial ([`crate::opponent::OpponentProfile::
+//! qsearch_max_plies`]), not by injected randomness.
 //!
 //! The blunder and miss branches classify each line by its **material
 //! outcome** — the net material the side-to-move has at the resolved
@@ -29,14 +34,7 @@
 //!    than diluting the configured rate. See [`material_blunder_pool`].
 //!    Mate-guarded.
 //!
-//! 3. **Wild branch** (when [`NoiseProfile::wild_chance`] > 0): with
-//!    that per-move probability, pick uniformly from **all legal
-//!    moves**, ignoring the search ranking entirely. This is the
-//!    beginner-bot path — the only branch that can pick a move the
-//!    engine didn't even surface (e.g. leaving a piece in a pawn's
-//!    path). Same mate-guard.
-//!
-//! 4. **Variety branch** (when [`NoiseProfile::avg_move_rank`] > 1.0):
+//! 3. **Variety branch** (when [`NoiseProfile::avg_move_rank`] > 1.0):
 //!    sample which line *rank* to play from a normal distribution
 //!    centred on `avg_move_rank` (spread scales with the dial), then
 //!    play that rank. At the `1.0` floor the spread is zero, so it
@@ -48,9 +46,8 @@
 //!
 //! **Branch ordering rationale:** miss comes first because declining a
 //! win is a decision about the best move itself; blunder follows as the
-//! calibrated material-loss knob; wild is the chaotic knob (might
-//! coincidentally pick the best move); variety is the always-on "which
-//! decent move" dial and fills whatever budget remains.
+//! calibrated material-loss knob; variety is the always-on "which decent
+//! move" dial and fills whatever budget remains.
 //!
 //! Strict invariant: only the **play** engine consults this module.
 //! Analytical paths (retrospective, hint, `analyze`) ignore the noise
@@ -67,13 +64,12 @@
 use crate::engine::SearchLine;
 use crate::opponent::NoiseProfile;
 use crate::position::Position;
-use crate::types::{Color, Move, MoveKind, PieceType, Value};
+use crate::types::{Color, MoveKind, PieceType, Value};
 
 /// Outcome of [`pick`]. The branch that fired is encoded in the
 /// variant so the caller can render it accurately in diagnostic
-/// output ("blunder #6 of 10" vs "variety #3 of 10" vs "wild — engine
-/// preferred X"). The move itself is either `lines[idx].pv[0]`
-/// (line-based variants) or the wild legal move directly.
+/// output ("blunder #6 of 10" vs "variety #3 of 10"). The move itself
+/// is always `lines[idx].pv[0]`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NoisePick {
     /// Engine-best or variety pick: take `lines[idx].pv[0]`.
@@ -90,9 +86,6 @@ pub enum NoisePick {
     /// best line that does not win material. `idx` may be any slot
     /// (including a losing one, when every non-winning move loses).
     Miss(usize),
-    /// Wild branch fired: play this legal move directly, bypassing
-    /// the engine ranking entirely.
-    Wild(Move),
 }
 
 /// Material gain (in material-centipawns, pawn = 100) at the settled
@@ -107,17 +100,14 @@ pub const WIN_MATERIAL_CP: i32 = 100;
 ///
 /// `root` is the position the bot is moving from — needed to classify
 /// each line's material outcome for the miss / blunder branches.
-/// `lines` is the engine's ranked result (best first). `legal_moves`
-/// is the full legal-move list for the current position; only consumed
-/// by the wild branch. Either list may be empty; the picker degrades to
-/// [`NoisePick::Line(0)`] when it has nothing to choose from.
+/// `lines` is the engine's ranked result (best first); it may be empty,
+/// in which case the picker degrades to [`NoisePick::Line(0)`].
 pub fn pick(
     noise: &NoiseProfile,
     seed: u64,
     ply: u64,
     root: &Position,
     lines: &[SearchLine],
-    legal_moves: &[Move],
 ) -> NoisePick {
     if noise.is_off() {
         return NoisePick::Line(0);
@@ -174,18 +164,6 @@ pub fn pick(
                 let idx = in_band[(rng as usize) % in_band.len()];
                 return NoisePick::Blunder(idx);
             }
-        }
-    }
-
-    // Wild branch: bypass the search ranking. Mate-guarded so we don't
-    // randomly walk away from a forced win the engine has fully
-    // resolved.
-    if noise.wild_chance > 0.0 && !mate_guard && !legal_moves.is_empty() {
-        let (roll, next) = roll_unit(rng);
-        rng = next;
-        if roll < noise.wild_chance as f64 {
-            let idx = (rng as usize) % legal_moves.len();
-            return NoisePick::Wild(legal_moves[idx]);
         }
     }
 

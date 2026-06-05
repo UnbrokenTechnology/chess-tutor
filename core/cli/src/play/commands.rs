@@ -205,13 +205,12 @@ pub(super) fn format_noise_summary(n: &NoiseProfile) -> String {
         return "off (bot always plays #1)".to_string();
     }
     format!(
-        "avg-rank={:.1} · blunder={:.0}% (hangs {:.1}–{:.1} pts) · miss={:.0}% · wild={:.0}% · guaranteed mate-in {}",
+        "avg-rank={:.1} · blunder={:.0}% (hangs {:.1}–{:.1} pts) · miss={:.0}% · guaranteed mate-in {}",
         n.avg_move_rank,
         n.blunder_chance * 100.0,
         n.blunder_min_material_cp as f32 / 100.0,
         n.blunder_max_material_cp as f32 / 100.0,
         n.miss_chance * 100.0,
-        n.wild_chance * 100.0,
         n.guaranteed_mate_in,
     )
 }
@@ -255,17 +254,6 @@ pub(super) fn run_noise_command(
             }
             _ => writeln!(out, "usage: noise miss <0.0-1.0>"),
         },
-        "wild" => match subarg.parse::<f32>() {
-            Ok(p) if (0.0..=1.0).contains(&p) => {
-                noise.wild_chance = p;
-                writeln!(
-                    out,
-                    "noise: wild chance set to {:.0}% (uniform pick from all legal moves).",
-                    p * 100.0,
-                )
-            }
-            _ => writeln!(out, "usage: noise wild <0.0-1.0>"),
-        },
         // Material band is in points (a pawn = 1.0); stored as
         // material-cp internally (pawn = 100).
         "min-material" | "min_material" => match subarg.parse::<f32>() {
@@ -303,7 +291,7 @@ pub(super) fn run_noise_command(
         }
         other => writeln!(
             out,
-            "unknown noise subcommand {other:?} — try: show | rank R | blunder F | miss F | min-material PTS | max-material PTS | wild F | guarantee N | reset",
+            "unknown noise subcommand {other:?} — try: show | rank R | blunder F | miss F | min-material PTS | max-material PTS | guarantee N | reset",
         ),
     }
 }

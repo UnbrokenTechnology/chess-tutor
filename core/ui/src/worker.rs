@@ -11,11 +11,10 @@ use std::time::{Duration, Instant};
 
 use chess_tutor_engine::analysis::{analyze_position, MoveAnalysis};
 use chess_tutor_engine::engine::{Engine, SearchLine, SearchParams};
-use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::noise::{self, NoisePick};
 use chess_tutor_engine::opponent::NoiseProfile;
 use chess_tutor_engine::position::Position;
-use chess_tutor_engine::types::{Move, Value};
+use chess_tutor_engine::types::Move;
 use crate::session::RepaintFn;
 
 /// Best + true-second-best + the force-included user line. The second
@@ -136,12 +135,6 @@ pub enum NoisePickInfo {
         num_lines: usize,
         engine_top: Move,
     },
-    /// Wild branch fired — bot played `mv`; the engine's preferred
-    /// move was `engine_top`. The two may coincidentally match.
-    Wild {
-        engine_top: Move,
-        engine_top_score: Value,
-    },
 }
 
 pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, repaint: RepaintFn) {
@@ -171,13 +164,10 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                 analysis_engine.new_game();
             }
             WorkerJob::Search { mut pos, params, gen, noise, seed, ply } => {
-                // Wild branch needs the legal-move list — generated
-                // here so the worker stays self-contained.
-                let legal = legal_moves_vec(&mut pos);
                 let started = Instant::now();
                 let lines = engine.search(&mut pos, params);
                 let elapsed = started.elapsed();
-                let pick = noise::pick(&noise, seed, ply, &pos, &lines, &legal);
+                let pick = noise::pick(&noise, seed, ply, &pos, &lines);
                 let (mv, line, noise_pick) = match pick {
                     NoisePick::Line(idx) => {
                         let line = lines.get(idx).cloned();
@@ -216,15 +206,6 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                                 engine_top,
                             });
                         (mv, line, info)
-                    }
-                    NoisePick::Wild(wild_mv) => {
-                        let info = lines.first().and_then(|top| {
-                            top.pv.first().map(|&top_mv| NoisePickInfo::Wild {
-                                engine_top: top_mv,
-                                engine_top_score: top.score,
-                            })
-                        });
-                        (Some(wild_mv), None, info)
                     }
                 };
                 let nodes = engine.last_nodes();

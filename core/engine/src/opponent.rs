@@ -165,17 +165,6 @@ pub struct NoiseProfile {
     /// Set to `0` to allow blunders against any mate; raise it to
     /// guarantee deeper forced sequences are converted.
     pub guaranteed_mate_in: u32,
-    /// Probability per move the bot picks **uniformly from all legal
-    /// moves**, bypassing the search ranking entirely. Distinct from
-    /// [`Self::blunder_chance`]: that branch picks from the engine's
-    /// top-K worse-but-still-considered alternatives; this branch can
-    /// pick a move the engine didn't even surface, including
-    /// genuinely beginner-level mistakes like leaving a piece in a
-    /// pawn's path. `0.0` (default) disables the branch.
-    ///
-    /// Mate-guarded the same as [`Self::blunder_chance`] — bot's
-    /// `guaranteed_mate_in` shorter mates are never bypassed.
-    pub wild_chance: f32,
 }
 
 /// MultiPV the play search surfaces whenever any line-based noise
@@ -197,7 +186,6 @@ impl Default for NoiseProfile {
             blunder_max_material_cp: 400,
             miss_chance: 0.0,
             guaranteed_mate_in: 1,
-            wild_chance: 0.0,
         }
     }
 }
@@ -209,12 +197,11 @@ impl NoiseProfile {
     pub fn is_off(&self) -> bool {
         self.blunder_chance <= 0.0
             && self.miss_chance <= 0.0
-            && self.wild_chance <= 0.0
             && self.avg_move_rank <= 1.0
     }
 
     /// True when a branch that reads the ranked line list is active
-    /// (variety, blunder, or miss). Wild alone needs no lines.
+    /// (variety, blunder, or miss) — i.e. every active branch.
     fn needs_lines(&self) -> bool {
         self.avg_move_rank > 1.0 || self.blunder_chance > 0.0 || self.miss_chance > 0.0
     }
@@ -452,14 +439,4 @@ mod tests {
         assert_eq!(n.effective_multi_pv(), NOISE_MULTI_PV);
     }
 
-    #[test]
-    fn noise_profile_wild_only_keeps_single_pv() {
-        // Wild bypasses the line list, so it doesn't widen MultiPV.
-        let n = NoiseProfile {
-            wild_chance: 0.5,
-            ..Default::default()
-        };
-        assert!(!n.is_off());
-        assert_eq!(n.effective_multi_pv(), 1);
-    }
 }

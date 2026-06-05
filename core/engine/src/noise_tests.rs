@@ -4,10 +4,10 @@ use crate::position::Position;
 use crate::types::{Move, Square, Value};
 
 /// Stub line with the given score and an empty PV. Used by tests that
-/// exercise branches which don't classify material (variety, wild,
-/// mate-guard suppression, determinism): with an empty PV the material
-/// delta is zero, which is fine because those tests never expect the
-/// blunder/miss branch to *fire*.
+/// exercise branches which don't classify material (variety, mate-guard
+/// suppression, determinism): with an empty PV the material delta is
+/// zero, which is fine because those tests never expect the blunder/miss
+/// branch to *fire*.
 fn line(score_cp: i32) -> SearchLine {
     SearchLine {
         pv: Vec::<Move>::new(),
@@ -27,14 +27,6 @@ fn mat_line(score_cp: i32, pv: Vec<Move>, settled: Option<usize>) -> SearchLine 
         ply_traces: Vec::new(),
         settled_ply: settled,
     }
-}
-
-/// Distinct stub moves keyed by an index — used by the wild-branch
-/// tests where we need to tell apart "which legal move came back".
-fn stub_move(seed: u8) -> Move {
-    let from = Square::from_index(seed % 64);
-    let to = Square::from_index(seed.wrapping_add(8) % 64);
-    Move::normal(from, to)
 }
 
 /// Position used by the material-classifier and miss/blunder tests.
@@ -69,7 +61,7 @@ fn off_profile_always_picks_first() {
     let root = any_root();
     let lines = vec![line(50), line(40), line(30), line(20)];
     for ply in 0..20 {
-        assert_eq!(pick(&noise, 0xCAFE, ply, &root, &lines, &[]), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0xCAFE, ply, &root, &lines), NoisePick::Line(0));
     }
 }
 
@@ -83,7 +75,7 @@ fn single_line_blunder_has_nothing_to_pick() {
     let root = mat_root();
     let lines = vec![mat_line(10, vec![kf1()], None)];
     // Only one line → blunder pool (i >= 1) is empty → best.
-    assert_eq!(pick(&noise, 0xCAFE, 1, &root, &lines, &[]), NoisePick::Line(0));
+    assert_eq!(pick(&noise, 0xCAFE, 1, &root, &lines), NoisePick::Line(0));
 }
 
 #[test]
@@ -91,7 +83,7 @@ fn empty_lines_picks_zero() {
     let noise = NoiseProfile::default();
     let root = any_root();
     let lines: Vec<SearchLine> = Vec::new();
-    assert_eq!(pick(&noise, 0, 0, &root, &lines, &[]), NoisePick::Line(0));
+    assert_eq!(pick(&noise, 0, 0, &root, &lines), NoisePick::Line(0));
 }
 
 #[test]
@@ -104,7 +96,7 @@ fn variety_floor_always_picks_first() {
     let root = any_root();
     let lines = vec![line(0), line(-10), line(-20)];
     for ply in 0..10 {
-        assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines, &[]), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines), NoisePick::Line(0));
     }
 }
 
@@ -118,7 +110,7 @@ fn variety_stays_within_available_lines() {
     let root = any_root();
     let lines = vec![line(20), line(15), line(10), line(-200)];
     for ply in 0..200 {
-        match pick(&noise, 0xABCD, ply, &root, &lines, &[]) {
+        match pick(&noise, 0xABCD, ply, &root, &lines) {
             NoisePick::Line(idx) => assert!(idx < lines.len(), "variety out of range: {idx}"),
             other => panic!("non-variety pick at ply {ply}: {other:?}"),
         }
@@ -139,7 +131,7 @@ fn variety_centres_near_the_dial() {
     let mut sum_rank = 0usize;
     let n = 400;
     for ply in 0..n {
-        match pick(&noise, 0xDEAD, ply, &root, &lines, &[]) {
+        match pick(&noise, 0xDEAD, ply, &root, &lines) {
             NoisePick::Line(idx) => {
                 seen.insert(idx);
                 sum_rank += idx + 1; // 1-based rank
@@ -215,7 +207,7 @@ fn blunder_picks_an_in_band_material_loss() {
     let lines = vec![mat_line(0, vec![kf1()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
     for ply in 0..30 {
         assert_eq!(
-            pick(&noise, 0xABCD, ply, &root, &lines, &[]),
+            pick(&noise, 0xABCD, ply, &root, &lines),
             NoisePick::Blunder(1),
             "should hang the in-band pawn",
         );
@@ -244,7 +236,7 @@ fn blunder_does_not_fire_when_only_hang_is_out_of_band() {
         ),
     ];
     for ply in 0..10 {
-        assert_eq!(pick(&noise, 0xCAFE, ply, &root, &lines, &[]), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0xCAFE, ply, &root, &lines), NoisePick::Line(0));
     }
 }
 
@@ -264,7 +256,7 @@ fn blunder_suppressed_when_mate_guarded() {
         mat_line(-150, hang_pawn_pv(), Some(1)),
     ];
     for ply in 0..20 {
-        assert_eq!(pick(&noise, 0xFACE, ply, &root, &lines, &[]), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0xFACE, ply, &root, &lines), NoisePick::Line(0));
     }
 }
 
@@ -285,7 +277,7 @@ fn blunder_allowed_for_mate_beyond_guarantee() {
     ];
     let mut saw_blunder = false;
     for ply in 0..20 {
-        if matches!(pick(&noise, 0xFACE, ply, &root, &lines, &[]), NoisePick::Blunder(_)) {
+        if matches!(pick(&noise, 0xFACE, ply, &root, &lines), NoisePick::Blunder(_)) {
             saw_blunder = true;
             break;
         }
@@ -307,7 +299,7 @@ fn miss_declines_a_material_winning_best_move() {
     let lines = vec![mat_line(900, vec![qxd5()], None), mat_line(0, vec![kf1()], None)];
     for ply in 0..30 {
         assert_eq!(
-            pick(&noise, 0x1234, ply, &root, &lines, &[]),
+            pick(&noise, 0x1234, ply, &root, &lines),
             NoisePick::Miss(1),
             "miss must decline the queen-win and play the best non-winning line",
         );
@@ -325,7 +317,7 @@ fn miss_inert_when_best_move_wins_no_material() {
     // Best move is quiet (no material on offer) → nothing to miss.
     let lines = vec![mat_line(0, vec![kf1()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
     for ply in 0..20 {
-        assert_eq!(pick(&noise, 0x1234, ply, &root, &lines, &[]), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0x1234, ply, &root, &lines), NoisePick::Line(0));
     }
 }
 
@@ -340,7 +332,7 @@ fn miss_suppressed_when_mate_guarded() {
     let mate_in_2 = Value::MATE.0 - 3;
     let lines = vec![mat_line(mate_in_2, vec![qxd5()], None), mat_line(0, vec![kf1()], None)];
     for ply in 0..20 {
-        assert_eq!(pick(&noise, 0xFACE, ply, &root, &lines, &[]), NoisePick::Line(0));
+        assert_eq!(pick(&noise, 0xFACE, ply, &root, &lines), NoisePick::Line(0));
     }
 }
 
@@ -361,27 +353,10 @@ fn miss_takes_precedence_over_blunder() {
     // #1 wins the queen, #2 hangs a pawn (in blunder band).
     let lines = vec![mat_line(900, vec![qxd5()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
     for ply in 0..20 {
-        assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines, &[]), NoisePick::Miss(1));
+        assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines), NoisePick::Miss(1));
     }
 }
 
-#[test]
-fn blunder_takes_precedence_over_wild() {
-    let noise = NoiseProfile {
-        blunder_chance: 1.0,
-        blunder_min_material_cp: 100,
-        blunder_max_material_cp: 400,
-        wild_chance: 1.0,
-        guaranteed_mate_in: 0,
-        ..Default::default()
-    };
-    let root = mat_root();
-    let lines = vec![mat_line(0, vec![kf1()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
-    let legal: Vec<Move> = (0..6).map(stub_move).collect();
-    for ply in 0..30 {
-        assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines, &legal), NoisePick::Blunder(1));
-    }
-}
 
 #[test]
 fn pick_is_deterministic_for_same_inputs() {
@@ -392,14 +367,12 @@ fn pick_is_deterministic_for_same_inputs() {
         blunder_min_material_cp: 80,
         blunder_max_material_cp: 900,
         guaranteed_mate_in: 1,
-        wild_chance: 0.1,
     };
     let root = mat_root();
     let lines = vec![mat_line(900, vec![qxd5()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
-    let legal = vec![stub_move(0), stub_move(1), stub_move(2), stub_move(3)];
     for ply in 0..20 {
-        let a = pick(&noise, 0xABCD, ply, &root, &lines, &legal);
-        let b = pick(&noise, 0xABCD, ply, &root, &lines, &legal);
+        let a = pick(&noise, 0xABCD, ply, &root, &lines);
+        let b = pick(&noise, 0xABCD, ply, &root, &lines);
         assert_eq!(a, b, "same inputs gave different picks at ply {ply}");
     }
 }
@@ -412,69 +385,7 @@ fn pick_varies_with_seed() {
     };
     let root = any_root();
     let lines = vec![line(0), line(-20), line(-40), line(-80)];
-    let seq_a: Vec<_> = (0..50).map(|p| pick(&noise, 0x1111_2222, p, &root, &lines, &[])).collect();
-    let seq_b: Vec<_> = (0..50).map(|p| pick(&noise, 0xAAAA_BBBB, p, &root, &lines, &[])).collect();
+    let seq_a: Vec<_> = (0..50).map(|p| pick(&noise, 0x1111_2222, p, &root, &lines)).collect();
+    let seq_b: Vec<_> = (0..50).map(|p| pick(&noise, 0xAAAA_BBBB, p, &root, &lines)).collect();
     assert_ne!(seq_a, seq_b, "seed didn't affect the pick sequence");
-}
-
-// ---- wild branch -------------------------------------------------
-
-#[test]
-fn wild_fires_only_when_chance_set() {
-    let noise = NoiseProfile::default();
-    let root = any_root();
-    let legal = vec![stub_move(0), stub_move(1)];
-    for ply in 0..20 {
-        assert_eq!(pick(&noise, 0x9999, ply, &root, &[], &legal), NoisePick::Line(0));
-    }
-}
-
-#[test]
-fn wild_with_no_legal_moves_falls_through() {
-    let noise = NoiseProfile {
-        wild_chance: 1.0,
-        ..Default::default()
-    };
-    let root = any_root();
-    assert_eq!(pick(&noise, 0x9999, 0, &root, &[line(0)], &[]), NoisePick::Line(0));
-}
-
-#[test]
-fn wild_picks_from_full_legal_list_not_just_top_k() {
-    let noise = NoiseProfile {
-        wild_chance: 1.0,
-        guaranteed_mate_in: 0,
-        ..Default::default()
-    };
-    let root = any_root();
-    let lines = vec![line(0), line(-10), line(-20)];
-    let legal: Vec<Move> = (0..8).map(stub_move).collect();
-    let mut seen_indices = [false; 8];
-    for ply in 0..200 {
-        match pick(&noise, 0xC0DE, ply, &root, &lines, &legal) {
-            NoisePick::Wild(mv) => {
-                let idx = legal.iter().position(|m| *m == mv).expect("wild move not in legal list");
-                seen_indices[idx] = true;
-            }
-            other => panic!("wild_chance=1.0 must always pick Wild; got {other:?}"),
-        }
-    }
-    let distinct = seen_indices.iter().filter(|&&b| b).count();
-    assert!(distinct >= 4, "wild barely varied — saw only {distinct}/8 legal moves");
-}
-
-#[test]
-fn wild_suppressed_when_mate_guarded() {
-    let noise = NoiseProfile {
-        wild_chance: 1.0,
-        guaranteed_mate_in: 1,
-        ..Default::default()
-    };
-    let root = any_root();
-    let mate_in_1 = Value::MATE.0 - 1;
-    let lines = vec![line(mate_in_1)];
-    let legal: Vec<Move> = (0..4).map(stub_move).collect();
-    for ply in 0..20 {
-        assert_eq!(pick(&noise, 0xFACE, ply, &root, &lines, &legal), NoisePick::Line(0));
-    }
 }

@@ -21,7 +21,7 @@ use crate::worker::{NoisePickInfo, WorkerJob, WorkerResult};
 pub(crate) fn log_noise_pick_to_stderr(
     info: &NoisePickInfo,
     pos: &Position,
-    mv: Move,
+    _mv: Move,
 ) {
     match info {
         NoisePickInfo::Variety {
@@ -52,17 +52,6 @@ pub(crate) fn log_noise_pick_to_stderr(
                 san::format(pos, *engine_top),
                 pick_idx + 1,
                 num_lines,
-            );
-        }
-        NoisePickInfo::Wild {
-            engine_top,
-            engine_top_score,
-        } => {
-            eprintln!(
-                "noise: wild — bot played {} (engine preferred {} at {} cp)",
-                san::format(pos, mv),
-                san::format(pos, *engine_top),
-                engine_top_score.0,
             );
         }
     }

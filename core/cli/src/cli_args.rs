@@ -475,14 +475,6 @@ pub enum Command {
         /// blundered). Set to 0 to allow blunders against any mate.
         #[arg(long = "guaranteed-mate-in", value_name = "N", default_value_t = 1)]
         guaranteed_mate_in: u32,
-        /// Per-move probability the bot picks uniformly from ALL legal
-        /// moves, bypassing the engine ranking entirely (range
-        /// 0.0–1.0). Default 0.0 (off). This is the "beginner bot"
-        /// branch — only it can pick moves the engine didn't surface
-        /// (e.g. leaving a piece in a pawn's path). Same mate-guard
-        /// as `--blunder-chance`.
-        #[arg(long = "wild-chance", value_name = "P", default_value_t = 0.0)]
-        wild_chance: f32,
     },
     /// Expose a dial-configured bot as a UCI engine on stdin/stdout.
     /// **Measurement/test only** — the bridge the offline ELO-calibration
@@ -544,14 +536,9 @@ pub enum Command {
         #[arg(long = "miss-chance", value_name = "P", default_value_t = 0.0)]
         miss_chance: f32,
         /// Shortest mate the bot is guaranteed to convert (blunders /
-        /// wild / miss suppressed at or within this depth). Default 1.
+        /// miss suppressed at or within this depth). Default 1.
         #[arg(long = "guaranteed-mate-in", value_name = "N", default_value_t = 1)]
         guaranteed_mate_in: u32,
-        /// Per-move probability of picking uniformly from ALL legal
-        /// moves, bypassing the engine ranking (0.0–1.0). The
-        /// beginner-bot branch. Default 0.0 (off).
-        #[arg(long = "wild-chance", value_name = "P", default_value_t = 0.0)]
-        wild_chance: f32,
     },
 }
 
