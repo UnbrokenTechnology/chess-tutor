@@ -193,18 +193,37 @@ confirmation in the harness, but it's the most promising floor seen so far.
 
 ## Open threads / next steps (in rough order)
 
-1. ✅ **qsearch-depth → slider** (LANDED `dc4291f`): GUI 0–10 slider, 10 = ∞
-   at far right (default), replacing the opaque combo. ✅ **Endgame-skill
-   GUI slider** also landed this session.
-2. **Floor-rung calibration** (`floor_calibrate.py`) → lock a weak basement
-   cluster into the pool. **Start from the `d1-q0-r2` ~100-Elo candidate**
-   (see "Floor candidate from playtest 2" above).
-3. **Re-spec the grid** to add the **endgame-skill** dimension (+ the floor)
-   and re-run.
-4. **Desktop New Game combo** for endgame-skill.
-5. Resolve Maia-anchor validity + lichess→chess.com offset before trusting
-   sub-1000 numbers.
+1. ✅ **GUI knobs**: qsearch-depth slider (0–10, 10=∞ default), endgame-skill
+   slider, avg-rank slider re-scaled to **1.0–4.0 by 0.1** (was 1–10/0.5 —
+   couldn't express 1.9).
+2. ✅ **Seed-ladder bootstrap built** (`build_ladder.py` → `design_ladder.py`)
+   — full round-robin of a small candidate set + Maia, one Ordo pass. This
+   *supersedes* the old `floor_calibrate.py` plan. Learnings:
+   - **rank is ~linear in [1,2], slope SCALES with base strength**
+     (~240/unit blind → ~550 q1 → ~1090 d4): a strong base×rank interaction
+     the grid regression must capture.
+   - **miss ~2.3× stronger than blunder per %** (miss declines a *win*),
+     both ~linear, combined sub-additive.
+   - `design_ladder.py` inverts these to design a rung per target Elo;
+     forward model holds at **bias −17, RMSE 124** (errors structured: blind
+     rungs land +90 strong as miss does less when shallow; d4 rank noisy).
+   - A measured ladder now spans −140 → 2397; runs/ has the CSVs.
+3. ⏳ **Hand-validation IN PROGRESS** (user): `t400`/`t1100`/`t1500` vs
+   chess.com bots → the **lichess→chess.com offset** (constant? band-
+   dependent?) + a believability check. Then snap & lock.
+4. **Lock the seed pool** into `pools.py` (`REFERENCE_BOTS`) from the
+   measured ladder (relabel by measured Elo, cull to ~150 spacing, + a
+   floor filler), then **re-run the big grid** against the dense pool.
+5. **Re-spec the grid** to add the **endgame-skill** dimension (+ the floor).
+6. **Desktop New Game combo** for endgame-skill (slider already wired
+   in-app; this item is stale — DONE).
+
+**Constraint for the grid + the eventual solver:** `avg_move_rank` must be
+a **0.1 multiple** (GUI slider step) — never measure/anchor a rung the
+product can't reproduce. `build_ladder` used 0.1s; `design_ladder` now
+rounds. (memory: `feedback_calibration_rank_granularity`.)
 
 ## Commit pointers (this session, on main)
-`ed31ca0` endgame-skill lever · `e37bfd9` peek_grid + sims=0 parse fix ·
-`4d5d105` grid redesign (qsearch + masks).
+`ed31ca0` endgame-skill lever · `dc4291f` qsearch slider · `c2d0087`
+endgame-skill GUI · `7d8c03f` mate-guard variety fix · `build_ladder.py` /
+`design_ladder.py` (ladder bootstrap) · avg-rank slider commit.

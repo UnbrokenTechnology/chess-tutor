@@ -132,7 +132,11 @@ def design_bot(target: int) -> tuple[BotConfig, dict]:
     # Rank must bring `full` down to (target + noise_cost); the noise then
     # carries it the rest of the way to `target`.
     residual = target + noise_cost
-    rank = round(max(1.0, invert_rank(RANK_CURVES[base_name], residual)), 2)
+    # Round rank to 0.1 — the GUI slider's step. A config whose rank isn't a
+    # 0.1-multiple can't be reproduced in the product, so we never measure
+    # one (1.25 isn't settable; it also measured ~100 Elo high). The final
+    # solver must do the same when emitting a config for a target Elo.
+    rank = round(max(1.0, invert_rank(RANK_CURVES[base_name], residual)), 1)
     cfg = BotConfig(
         name=f"t{target}",
         avg_move_rank=rank,
