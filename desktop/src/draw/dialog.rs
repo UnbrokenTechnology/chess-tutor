@@ -381,11 +381,18 @@ fn draw_strength_controls(
                     "The bot's variety dial: the average rank of the move it plays. \
                      1.0 = always the engine's best move. Higher plays weaker moves \
                      on average — 3.0 mostly plays the 2nd–4th best — sampled from a \
-                     normal distribution around this value.",
+                     normal distribution around this value. It's a strong, ~linear \
+                     lever, so this caps at 4.0 (already near the floor) with 0.1 \
+                     steps for fine control.",
                 );
+            // 1.0..=4.0 in 0.1 steps: calibration showed rank is a strong
+            // ~linear knob (each unit ≈ -240 Elo blind, steeper with vision)
+            // and rank 4 already bottoms out near the playable floor, so the
+            // useful resolution lives in [1, 4]. (Old 1..10 / 0.5-step
+            // couldn't express e.g. 1.9.)
             ui.add(
-                egui::Slider::new(&mut noise.avg_move_rank, 1.0..=10.0)
-                    .step_by(0.5)
+                egui::Slider::new(&mut noise.avg_move_rank, 1.0..=4.0)
+                    .step_by(0.1)
                     .custom_formatter(|v, _| format!("{v:.1}")),
             );
             ui.end_row();
