@@ -18,13 +18,26 @@ from dataclasses import dataclass
 
 from . import anchors, paths
 from .engines import BotConfig, Player
-from .gauntlet import TournamentSpec, run as run_gauntlet
+from .gauntlet import TournamentSpec, build_command, run as run_gauntlet
 from .pools import opponent_pool
 from .rate import Rating, rate
 
 
 def _even(n: int) -> int:
     return n if n % 2 == 0 else n + 1
+
+
+def _safe_batch_size(opponents, subjects, gpp, requested, limit=30000) -> int:
+    """Shrink the batch size so no fastchess command exceeds the Windows
+    command-line limit (~32 KB; we keep margin). Sized from the opponents'
+    base command plus the single longest config engine block — robust to
+    configs with many active dials (long ``args=`` strings)."""
+    base = len(" ".join(build_command(
+        TournamentSpec(players=list(opponents), games_per_pair=gpp,
+                       tournament="gauntlet", seeds=len(opponents)), "x.pgn")))
+    per = max((len(" ".join(c.fastchess_tokens())) + 1 for c in subjects), default=1)
+    fit = max(1, (limit - base) // per)
+    return max(1, min(requested, fit))
 
 
 def _count_results(pgn) -> int:
@@ -60,6 +73,13 @@ def run_and_rate(
     n_opp = len(opponents)
     gpp = max(2, _even(round(games_per_config / n_opp)))
     per_config = gpp * n_opp
+
+    # Cap batch size so no fastchess command overruns the Windows cmd-line
+    # limit (configs with many active dials have long args).
+    safe = _safe_batch_size(opponents, subjects, gpp, batch_size)
+    if safe < batch_size:
+        print(f"[{out_subdir}] batch size {batch_size} -> {safe} (command-length limit)")
+    batch_size = safe
 
     out_dir = paths.runs_dir() / out_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
