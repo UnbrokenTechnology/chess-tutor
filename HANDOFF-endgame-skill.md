@@ -173,6 +173,13 @@ no eval mask** (all positional signals on), our bot Black vs Martin White
 - The 10% blunder / 10% miss may be **unnecessary** — `d1-q0-r2` alone
   likely produces this.
 
+**Bug found + fixed in the same game (`7d8c03f`):** `guaranteed_mate_in=1`
+still missed a mate-in-1. The mate guard suppressed the miss/blunder
+branches but **not** the variety (`avg_move_rank`) branch, so rank-2
+demoted off the mate. Now all three branches respect the guard; mates
+deeper than the guarantee stay unprotected (normal noise — "can't see that
+far"). The dial is a *protection floor*, not a search cap.
+
 **Takeaway for `floor_calibrate.py`:** `d1-q0-r2` is a strong **~100-Elo
 floor-rung candidate** (the basement the weak grid configs need to be
 ratable). `avg_move_rank` is the lever that makes a bot *stop punishing
