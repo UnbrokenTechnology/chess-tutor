@@ -23,15 +23,28 @@ from harness.engines import BotConfig
 from harness.experiment import estimate, run_and_rate
 from harness.pools import ALL_MASKS, MASK_GROUPS
 
-# Bases spanning ~600..2435 via depth and wild (the cleanest strength
-# knobs). Masks are tested on top of each.
+# Bases chosen to separate the two questions a mask probe should answer:
+#
+#  (1) depth x mask  -- DEPTH-PURE bases (no noise), depth 1..8. The only
+#      thing varying is search depth, so any change in a mask's Elo cost
+#      across these is a real depth interaction.
+#
+#  (2) does the WEAKENING MECHANISM matter -- RANK-weakened bases. Rank
+#      weakening is *eval-dependent*: the bot still ranks moves by eval
+#      and just plays a worse-ranked one, so masking the eval changes its
+#      ranking and should still bite. (Contrast the earlier WILD bases,
+#      preserved in runs/masks_wild: wild plays random moves, ignores eval
+#      entirely, so masks were redundant there.) Rank is the realistic
+#      non-random strength lever -- "on average play the 2nd/3rd-best move".
 BASES = [
-    BotConfig("base-d6", depth=6),                       # ~2435
-    BotConfig("base-d4", depth=4),                       # ~2100
-    BotConfig("base-d2", depth=2),                       # ~1940
-    BotConfig("base-d4-w20", depth=4, wild_chance=0.2),  # ~1336
-    BotConfig("base-d4-w40", depth=4, wild_chance=0.4),  # ~1038
-    BotConfig("base-d4-w60", depth=4, wild_chance=0.6),  # ~ 613
+    BotConfig("base-d1", depth=1),                        # depth-pure ~1750
+    BotConfig("base-d2", depth=2),
+    BotConfig("base-d4", depth=4),
+    BotConfig("base-d6", depth=6),
+    BotConfig("base-d8", depth=8),                        # ~2500
+    BotConfig("base-d4-r2", depth=4, avg_move_rank=2.0),  # eval-dependent weak
+    BotConfig("base-d4-r4", depth=4, avg_move_rank=4.0),
+    BotConfig("base-d4-r6", depth=4, avg_move_rank=6.0),
 ]
 
 
