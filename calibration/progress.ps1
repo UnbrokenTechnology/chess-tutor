@@ -9,16 +9,17 @@
 #     powershell -ExecutionPolicy Bypass -File calibration\progress.ps1
 # Ctrl-C to stop watching (does NOT stop the run).
 #
-# TOTAL is specific to the current grid (4032 configs, seed-swap: 19
+# TOTAL is specific to the current grid (2880 configs, seed-swap: 18
 # opponents are the gauntlet seeds, configs are non-seeds and don't play
-# each other, batches of 120, 22 games/pair):
-#   sum over batches of (C(19,2) + 19*K) * 22.  Auto batch size 93 (44
-#   batches, command-length capped) => 1,850,904.
-# Re-derive if you change the grid/batch/opponent/games settings.
+# each other, 22 games/pair):
+#   sum over batches of (C(18,2) + 18*K) * 22.  Auto batch size 76 (38
+#   batches, command-length capped) => 1,268,388.
+# Re-derive if you change the grid/batch/opponent/games settings (a
+# one-liner is in run_grid.py's history / HANDOFF).
 
 $ErrorActionPreference = 'SilentlyContinue'
 $gridDir = Join-Path $PSScriptRoot 'runs\grid'
-$total   = 1850904
+$total   = 1268388
 $refresh = 10   # seconds between samples
 
 $prev = $null; $prevT = $null

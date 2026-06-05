@@ -1,18 +1,26 @@
-"""Full-factorial grid run over the move-quality dials — the bulk
-data-collection workhorse.
+"""Full-factorial grid run over the strength + style dials — the bulk
+data-collection workhorse ("the big run").
 
 Cartesian product of the dials in ``GRID`` (interactions captured); each
 config plays the fixed opponent pool via the seed-swap driver
 (harness.experiment), rated in one loose-multi-anchored Ordo pass; dumps
 ``grid_results.csv`` of dials -> measured Elo for offline analysis.
 
-Eval masks are a separate experiment (run_masks.py) — full-factorial of
-8 binary masks would be a 256x blowup.
+The grid axes (2026-06-05 redesign, qsearch + masks folded in):
+  * depth x qsearch-depth  — primary tactical axis (the keystone low-end
+    lever; qsearch-depth 0 = tactically blind, None = full vision).
+  * avg_move_rank / blunder_modes / miss_chance — human-realism dials.
+  * masks — eval-mask combos (safety / positional) as a real axis, so the
+    mask x tactical-level SIGN-FLIP from the low-band experiment is
+    fittable. See pools.GRID_MASK_COMBOS for the two-boolean encoding.
+
+guaranteed_mate_in is pulled OUT of the grid (minor lever) and measured
+in its own 1-D sweep (run_mate_sweep.py); here it is fixed at 1.
 
 Usage (calibration/ dir, venv python):
   python run_grid.py --dry-run        # size + estimate
   python run_grid.py --tiny           # tiny smoke grid end-to-end
-  python run_grid.py                  # the full GRID (~11 h)
+  python run_grid.py                  # the full GRID (~6.5 h)
   python run_grid.py                  # again -> resumes / re-rates
 """
 
@@ -23,35 +31,49 @@ import csv
 
 from harness.experiment import estimate, run_and_rate
 from harness.grid import GridSpec, build_grid
+from harness.pools import GRID_MASK_COMBOS
 
 # ---------------------------------------------------------------------------
-# The grid (chosen 2026-06-04, "~11 h overnight"): depth capped at 6 — the
-# pilot showed no-noise depth is a high floor (d1~1750) and depth >6 only
-# adds strength above the 2000 teaching ceiling. The realism dials (miss,
-# blunder severity) get the resolution.
-#   blunder modes = none + {0.3,0.6} x {pawn(max 2), minor(max 4), queen(max 9)}
+# The grid (chosen 2026-06-05, "~6.5 h overnight"):
+#   depth x qsearch-depth  = {1,2,4,6} x {0,1,2,None}  (16 tactical cells;
+#     q6 dropped — the probe showed q6 ~= qNone at every depth)
+#   avg_move_rank          = {1,2,4}     (drop 6 — flat variety tail)
+#   blunder_modes          = none + {0.3,0.6} x {pawn, queen}  (drop minor;
+#     pawn/queen brackets severity)
+#   miss_chance            = {0, 0.3, 0.6}
+#   masks                  = none / safety / positional / both  (4 combos)
+# => 4*4*3*5*3*4 = 2880 configs.
 # ---------------------------------------------------------------------------
 GRID = GridSpec(
     depth=[1, 2, 4, 6],
-    avg_move_rank=[1.0, 2.0, 4.0, 6.0],
+    qsearch_depth=[0, 1, 2, None],
+    avg_move_rank=[1.0, 2.0, 4.0],
     blunder_modes=[
         (0.0, 1.0, 4.0),
         (0.3, 1.0, 2.0), (0.6, 1.0, 2.0),   # pawn
-        (0.3, 1.0, 4.0), (0.6, 1.0, 4.0),   # minor
         (0.3, 1.0, 9.0), (0.6, 1.0, 9.0),   # queen
     ],
-    miss_chance=[0.0, 0.2, 0.4, 0.6],
-    guaranteed_mate_in=[1, 2, 3],
+    miss_chance=[0.0, 0.3, 0.6],
+    masks=GRID_MASK_COMBOS,
 )
 
-TINY = GridSpec(depth=[2, 4], avg_move_rank=[1.0], miss_chance=[0.0, 0.4])
+TINY = GridSpec(
+    depth=[2, 4],
+    qsearch_depth=[0, None],
+    avg_move_rank=[1.0],
+    miss_chance=[0.0, 0.4],
+    masks=GRID_MASK_COMBOS[:2],   # none + safety
+)
 
 EST_GAMES_PER_SEC = 49  # measured on a depth-1/2/4/6 mix with noise
 
-# NOTE: this grid is the OLD move-quality grid (no qsearch-depth, wild
-# retired). It is superseded by the upcoming qsearch-depth-driven redesign
-# (depth x qsearch-depth as the primary tactical axis); kept runnable in
-# the meantime.
+
+def _mask_bools(disable_eval: tuple[str, ...]) -> tuple[int, int]:
+    """Recover the two grid booleans from a config's disabled-eval slugs.
+    safety <- king-safety present; positional <- pawn-structure present."""
+    safety = 1 if "king-safety" in disable_eval else 0
+    positional = 1 if "pawn-structure" in disable_eval else 0
+    return safety, positional
 
 
 def main() -> None:
@@ -85,8 +107,9 @@ def main() -> None:
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow([
-            "name", "kind", "depth", "avg_move_rank", "blunder_chance",
-            "blunder_min_material", "blunder_max_material", "miss_chance",
+            "name", "kind", "depth", "qsearch_depth", "avg_move_rank",
+            "blunder_chance", "blunder_min_material", "blunder_max_material",
+            "miss_chance", "mask_safety", "mask_positional",
             "elo", "elo_error", "games",
         ])
         for name, r in sorted(result.ratings.items(), key=lambda kv: -kv[1].rating):
@@ -95,9 +118,12 @@ def main() -> None:
                     else "reference" if name.startswith("ref-") else "grid")
             err = "" if r.error is None else f"{r.error:.1f}"
             if c is not None:
+                qd = "inf" if c.qsearch_depth is None else c.qsearch_depth
+                m_safety, m_pos = _mask_bools(c.disable_eval)
                 w.writerow([
-                    name, kind, c.depth, c.avg_move_rank, c.blunder_chance,
-                    c.blunder_min_material, c.blunder_max_material, c.miss_chance,
+                    name, kind, c.depth, qd, c.avg_move_rank,
+                    c.blunder_chance, c.blunder_min_material, c.blunder_max_material,
+                    c.miss_chance, m_safety, m_pos,
                     f"{r.rating:.1f}", err, r.played,
                 ])
             else:

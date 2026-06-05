@@ -75,3 +75,21 @@ ALL_MASKS: tuple[str, ...] = (
     "pawn-structure", "passed-pawns", "space", "pieces",
     "mobility", "king-safety", "threats", "initiative",
 )
+
+# Mask combos folded into the MAIN grid as a dimension — the two effects the
+# low-band experiment isolated (runs/lowband_masks):
+#   * ``safety`` (king-safety + threats) is a CONSISTENT Elo handicap
+#     (~-185 at both low bands, never flips sign).
+#   * ``positional`` merges the two near-identical SIGN-FLIPPERS
+#     (pawnspace + activity): masking them HELPS a tactically-blind bot
+#     (+~240 at d1-q0) but HURTS a sighted one (-~120 at d2-q0). Their Elo
+#     effects are close enough that the model doesn't need them separated;
+#     the pawn-vs-piece distinction is a teaching/style choice, not an Elo
+#     factor. ``initiative`` is dropped (small + noisy).
+# Two underlying booleans (safety on/off, positional on/off) => 4 combos.
+GRID_MASK_COMBOS: list[tuple[str, tuple[str, ...]]] = [
+    ("", ()),
+    ("safety", MASK_GROUPS["safety"]),
+    ("positional", MASK_GROUPS["pawnspace"] + MASK_GROUPS["activity"]),
+    ("both", MASK_GROUPS["safety"] + MASK_GROUPS["pawnspace"] + MASK_GROUPS["activity"]),
+]

@@ -27,8 +27,10 @@ was missing the *keystone* low-Elo lever and added it.
 - ✅ **Harness plumbed** for qsearch-depth; pool floor = low-qdepth bots.
 - ⏸️ **The full grid run was aborted** mid-flight (it was built on the
   old lever set: had `wild`, no `qsearch-depth`). Data discarded.
-- ⬜ **NEXT: the qdepth-driven grid redesign** (user wants to weigh in on
-  shape), then the multi-hour run, then the model fit + solver.
+- ✅ **The grid was REDESIGNED** (2026-06-05, with user) around the new
+  lever set — see "The big-run grid (current shape)" below.
+- ⬜ **NEXT: run the redesigned grid** (~6.5 h, resumable), then the
+  model fit + solver.
 
 ---
 
@@ -156,6 +158,39 @@ needs qdepth-0 **stacked with** heavy rank/blunder/miss (e.g.
 
 ---
 
+## The big-run grid (current shape — redesigned 2026-06-05)
+
+`run_grid.py` / `harness/grid.py`, **2880 configs, ~6.5 h** at 49 g/s
+(396 games/config vs the 18-bot pool). Full Cartesian product:
+
+| Axis | Values | Count |
+|---|---|---|
+| **depth** | {1, 2, 4, 6} | 4 |
+| **qsearch-depth** | {0, 1, 2, None} | 4 |
+| avg_move_rank | {1, 2, 4} | 3 |
+| blunder_modes | none + {0.3,0.6}×{pawn,queen} | 5 |
+| miss_chance | {0, 0.3, 0.6} | 3 |
+| **masks** | none / safety / positional / both | 4 |
+
+- **depth × qsearch-depth = the primary tactical axis** (16 cells). `q6`
+  dropped (probe: `q6 ≈ qNone` everywhere); `qinf` is the unbounded
+  sentinel (`None`).
+- **Masks are now a GRID AXIS, not a side experiment** — the low-band
+  finding was a *sign-flip* (`positional` masking helps a blind bot,
+  hurts a sighted one), which is only fittable if the mask varies
+  *crossed with* depth×qsearch. Two underlying booleans encoded in
+  `pools.GRID_MASK_COMBOS`: **`safety`** (king-safety+threats — a
+  consistent ~−185 handicap) and **`positional`** (the two near-identical
+  sign-flippers pawnspace+activity merged; the model doesn't need them
+  split). `initiative` dropped (small/noisy). CSV emits them decomposed
+  as `mask_safety` / `mask_positional` 0/1 columns for the fit.
+- **`guaranteed_mate_in` pulled OUT of the grid** (minor lever → ×3 saved)
+  and measured in its own 1-D sweep, `run_mate_sweep.py` (bases ×
+  {1,2,3}); the grid fixes it at 1.
+- Trims vs the old grid: `avg_move_rank` 6→drop, blunder `minor` bracket
+  dropped, `miss` to 3 points. Headroom remains (~4900-config budget for
+  an 11 h run) if we want to restore a dropped axis later.
+
 ## The harness (calibration/ — Python, offline)
 
 **Stack:** fastchess (match runner) + lc0 + 9 Maia nets (human anchors) +
@@ -187,9 +222,11 @@ Ordo (rating). All downloaded by `fetch-tools.sh` into
 **Experiment scripts (calibration/):**
 - `run_qdepth_probe.py` — depth × qsearch-depth Elo + masks-on-qdepth.
 - `run_lowband_masks.py` — masks on low-band (d1/d2 × small qdepth) bots.
-- `run_grid.py` / `harness/grid.py` — the OLD move-quality grid (wild
-  stripped, but NO qsearch-depth dimension yet). **Superseded — gets
-  rebuilt in the redesign.**
+- `run_grid.py` / `harness/grid.py` — **the big-run grid (redesigned
+  2026-06-05): depth × qsearch-depth × rank × blunder × miss × masks**,
+  2880 configs. See "The big-run grid" section above.
+- `run_mate_sweep.py` — standalone guaranteed-mate-in {1,2,3} sweep on a
+  few tactical bases (pulled out of the grid).
 - `run_masks.py` — depth-pure + rank mask experiment (older).
 - `pilot.py`, `bench_rate.py` — earlier pilots/benchmarks.
 - `progress.ps1` — live PowerShell progress watcher (instantaneous rate
@@ -264,19 +301,22 @@ proposed but NOT built — offered to fold in.
 
 ## NEXT STEPS (in order)
 
-1. **qdepth-driven grid REDESIGN** (user wants to weigh in on shape):
-   primary tactical axis = **depth × qsearch-depth** ({0,1,2,6,inf}
-   confirmed for qsearch-depth), crossed with the realism dials
-   (miss/blunder/avg-rank) and eval masks handled as a separate ceiling
-   experiment. Settle exact values + resolution + opponent pool, then
-   rebuild `grid.py`/`run_grid.py` around it.
-2. **Run the multi-hour grid** on the new lever set (resumable; watch via
-   `progress.ps1`).
+1. ✅ **qdepth-driven grid REDESIGN** — DONE 2026-06-05. depth ×
+   qsearch-depth × rank × blunder × miss × **masks** (sign-flip folded
+   in as a real axis), mate-in pulled to its own sweep. 2880 configs,
+   ~6.5 h. See "The big-run grid" above.
+2. **Run the grid** (`python run_grid.py`, resumable; watch via
+   `progress.ps1` — re-derive its total: 2880 configs). Optionally run
+   `run_mate_sweep.py` for the mate-vision lever.
 3. **Fit** (`fit.py`: symbolic + GBT + LASSO, cross-validated) → forward
-   model + readable structure.
+   model + readable structure. The mask sign-flip needs an interaction
+   term (`mask·tactical`), so confirm the fit captures it.
 4. **Constrained solver** honoring user-set bands/binaries (the
    human-realism policy applied at solve time; editable forever).
 5. Resolve the Maia-anchor / lichess→chess.com-scale loose ends.
+
+**`progress.ps1` note:** its total is grid-specific — update it for the
+new 2880-config grid before trusting the ETA.
 
 ## Commit pointers (this session, on main)
 `5990349` qsearch-depth lever · `1394d2e` remove wild · GUI-wire commit ·
