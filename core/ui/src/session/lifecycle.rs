@@ -6,6 +6,7 @@ use std::sync::mpsc::{self};
 use std::thread;
 
 use chess_tutor_engine::book::BookCursor;
+use chess_tutor_engine::endgame::EndgameSkill;
 use chess_tutor_engine::opponent::{BookSelection, EvalMask, NoiseProfile, OpponentProfile};
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::{Color, Move, MoveKind, PieceType};
@@ -227,6 +228,7 @@ impl Session {
         noise: NoiseProfile,
         eval_mask: EvalMask,
         qsearch_max_plies: Option<u32>,
+        endgame_skill: EndgameSkill,
         book: BookSelection,
     ) {
         self.gen = self.gen.wrapping_add(1);
@@ -245,6 +247,7 @@ impl Session {
         self.opponent.noise = noise;
         self.opponent.eval_mask = eval_mask;
         self.opponent.qsearch_max_plies = qsearch_max_plies;
+        self.opponent.endgame_skill = endgame_skill;
         self.opponent.book = book;
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
         self.book_out_announced = false;
@@ -309,6 +312,7 @@ impl Session {
         let noise = form.noise.clone();
         let eval_mask = form.eval_mask;
         let qsearch_max_plies = form.qsearch_max_plies;
+        let endgame_skill = form.endgame_skill;
         let book = form.book.to_book();
         // The Start screen is the true home of these options (PLAN
         // step 5): commit them onto the session before the game starts.
@@ -324,6 +328,15 @@ impl Session {
         self.active_overlays = active_overlays;
         self.show_eval_bar = show_eval_bar;
         self.retrospective_depth = retrospective_depth;
-        self.start_new_game(position, engine_plays, depth, noise, eval_mask, qsearch_max_plies, book);
+        self.start_new_game(
+            position,
+            engine_plays,
+            depth,
+            noise,
+            eval_mask,
+            qsearch_max_plies,
+            endgame_skill,
+            book,
+        );
     }
 }

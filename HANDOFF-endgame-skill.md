@@ -127,9 +127,12 @@ Unit tests `skill_tiers_withhold_harder_specialists` +
 `low_skill_prefers_queen_over_bishop_promotion` pin both the fix and the
 deferred Full-tier quirk.
 
-**Follow-ups not yet done:**
-- **Desktop New Game combo** for endgame-skill (like the qsearch GUI
-  wire-up). Engine + CLI + play-worker are wired; the GUI form isn't.
+**GUI:** ✅ the New Game dialog has an **Endgame skill** slider (None /
+Basic / Intermediate / Full, default Full at far right), in the strength
+grid below the Tactical-vision slider. Wired through `NewGameForm` →
+`start_new_game` → `OpponentProfile.endgame_skill` → play search.
+
+**Follow-up not yet done:**
 - **Endgame-skill as a grid dimension** — it's a new believable-floor
   lever (tier 0 = botches endgames), a candidate axis in the grid re-spec.
 
@@ -156,15 +159,39 @@ deferred Full-tier quirk.
   tactically-blind chimeras; head-to-head vs human-like Maia may
   over/under-state them. Plus the lichess→chess.com offset (a post-fit shift).
 
+### Floor candidate from playtest 2 (~100 Elo)
+
+A second manual game (2026-06-05) — **`d1-q0-r2` + 10% blunder + 10% miss,
+no eval mask** (all positional signals on), our bot Black vs Martin White
+— **Martin won**. It felt like a believable ~100-Elo floor:
+- `q0` (no tactical vision) → misses hung pieces and can't follow up the
+  positional plans its full eval suggests (overextends).
+- `r2` (avg-move-rank 2) is the key ingredient: it routinely plays the
+  *2nd*-best move, so it **fails to punish even obvious one-move blunders**
+  — every time Martin hung his queen, "capture the queen" was best and the
+  bot played the second-best instead, letting the queen live and clean up.
+- The 10% blunder / 10% miss may be **unnecessary** — `d1-q0-r2` alone
+  likely produces this.
+
+**Takeaway for `floor_calibrate.py`:** `d1-q0-r2` is a strong **~100-Elo
+floor-rung candidate** (the basement the weak grid configs need to be
+ratable). `avg_move_rank` is the lever that makes a bot *stop punishing
+hung material* — exactly the sub-200 human behavior. Pair it with weaker
+rungs (more rank / blunder) for the all-loss-trading basement. Needs
+confirmation in the harness, but it's the most promising floor seen so far.
+(Also a data point for the eventual endgame-skill grid axis: this bot ran
+`Full` endgame books — re-test at tier 0 for even-weaker, no-technique play.)
+
 ---
 
 ## Open threads / next steps (in rough order)
 
-1. **qsearch-depth → slider** (in progress this session): engine stays
-   `Option<u32>` (None=∞); CLI flag already numeric; **GUI: 0–10 slider,
-   10 = ∞ at far right, default ∞**. Replaces the opaque combo labels.
+1. ✅ **qsearch-depth → slider** (LANDED `dc4291f`): GUI 0–10 slider, 10 = ∞
+   at far right (default), replacing the opaque combo. ✅ **Endgame-skill
+   GUI slider** also landed this session.
 2. **Floor-rung calibration** (`floor_calibrate.py`) → lock a weak basement
-   cluster into the pool.
+   cluster into the pool. **Start from the `d1-q0-r2` ~100-Elo candidate**
+   (see "Floor candidate from playtest 2" above).
 3. **Re-spec the grid** to add the **endgame-skill** dimension (+ the floor)
    and re-run.
 4. **Desktop New Game combo** for endgame-skill.

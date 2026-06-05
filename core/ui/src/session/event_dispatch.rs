@@ -3,6 +3,7 @@
 
 use super::*;
 
+use chess_tutor_engine::endgame::EndgameSkill;
 use chess_tutor_engine::opponent::{EvalMask, NoiseProfile};
 
 use crate::event::Event;
@@ -75,6 +76,7 @@ impl Session {
                     f.noise = NoiseProfile::default();
                     f.eval_mask = EvalMask::EMPTY;
                     f.qsearch_max_plies = None;
+                    f.endgame_skill = EndgameSkill::Full;
                 }
             }
             Event::ApplyLearningPreset(preset) => {

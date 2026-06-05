@@ -5,6 +5,7 @@
 use super::*;
 use std::time::Duration;
 
+use chess_tutor_engine::endgame::EndgameSkill;
 use chess_tutor_engine::openings::OpeningId;
 use chess_tutor_engine::opponent::{BookSelection, EvalMask, NoiseProfile};
 use chess_tutor_engine::position::{Position, StateInfo};
@@ -87,6 +88,11 @@ pub struct NewGameForm {
     /// = full vision; `Some(0)` = tactically blind (hangs pieces). Same
     /// persistence rule as the other handicaps.
     pub qsearch_max_plies: Option<u32>,
+    /// Endgame-book skill tier the bot may use. `Full` (the default)
+    /// knows every technique; lower tiers withhold the harder specialists
+    /// so it botches endgames like a weaker human (shuffles a won KQ,
+    /// can't mate KBN). Same persistence rule.
+    pub endgame_skill: EndgameSkill,
     /// Which openings the bot may play. Persists across New Game clicks
     /// like the other knobs.
     pub book: OpeningSelection,
@@ -125,6 +131,7 @@ impl NewGameForm {
             noise: session.opponent.noise.clone(),
             eval_mask: session.opponent.eval_mask,
             qsearch_max_plies: session.opponent.qsearch_max_plies,
+            endgame_skill: session.opponent.endgame_skill,
             book: OpeningSelection::from_book(&session.opponent.book),
             learning: session.learning,
             active_overlays: session.active_overlays.clone(),
@@ -145,6 +152,7 @@ impl NewGameForm {
             noise: NoiseProfile::default(),
             eval_mask: EvalMask::EMPTY,
             qsearch_max_plies: None,
+            endgame_skill: EndgameSkill::Full,
             book: OpeningSelection::any(),
             learning: crate::learning_mode::LearningPreferences::default(),
             active_overlays: std::collections::HashSet::new(),

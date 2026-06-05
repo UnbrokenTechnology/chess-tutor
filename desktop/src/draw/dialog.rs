@@ -13,6 +13,7 @@
 //! There is deliberately **no "Engine PV" toggle** — engine best-move
 //! lines are review-only (decision #9).
 
+use chess_tutor_engine::endgame::EndgameSkill;
 use chess_tutor_engine::opponent::{EvalCategory, EvalMask, NoiseProfile};
 use eframe::egui;
 
@@ -115,6 +116,7 @@ pub(crate) fn draw(
                     ui,
                     &mut form.depth,
                     &mut form.qsearch_max_plies,
+                    &mut form.endgame_skill,
                     &mut form.noise,
                 );
 
@@ -239,6 +241,7 @@ fn draw_strength_controls(
     ui: &mut egui::Ui,
     depth: &mut u32,
     qsearch: &mut Option<u32>,
+    endgame_skill: &mut EndgameSkill,
     noise: &mut NoiseProfile,
 ) {
     egui::Grid::new("bot_strength_grid")
@@ -280,6 +283,33 @@ fn draw_strength_controls(
                 } else {
                     Some(vision)
                 };
+            }
+            ui.end_row();
+
+            // Endgame skill = how far up the closed-form endgame-technique
+            // ladder the bot reaches. Far right (Full) = all technique;
+            // lower tiers withhold the harder specialists so it botches
+            // endgames like a weaker human. A plain slider over the four
+            // named tiers (None / Basic / Intermediate / Full).
+            ui.label("Endgame skill:").on_hover_text(
+                "How much endgame technique the bot knows. Full (far right) = all \
+                 of it. Lower tiers botch endgames like a weaker human: None = no \
+                 book knowledge at all (shuffles a won K+Q, stalemates, can't mate \
+                 K+B+N); Basic = only the trivial K+Q / K+R mates; Intermediate = \
+                 + king-and-pawn opposition and piece technique.",
+            );
+            let mut tier: u32 = *endgame_skill as u8 as u32;
+            let resp = ui.add(egui::Slider::new(&mut tier, 0..=3).custom_formatter(|v, _| {
+                match v as u8 {
+                    0 => "None",
+                    1 => "Basic",
+                    2 => "Intermediate",
+                    _ => "Full",
+                }
+                .to_string()
+            }));
+            if resp.changed() {
+                *endgame_skill = EndgameSkill::from_tier(tier as u8);
             }
             ui.end_row();
 
