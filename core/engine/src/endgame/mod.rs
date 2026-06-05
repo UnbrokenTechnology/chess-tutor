@@ -101,6 +101,52 @@ pub enum ProbeResult {
     None,
 }
 
+/// How much closed-form endgame knowledge the **play** engine may use — a
+/// difficulty-ordered skill ladder. A weaker bot is denied the harder
+/// specialists and falls back to classical eval + search, so it misplays
+/// endgames the way a human of that level does: a tier-`None` bot has no
+/// king-driving gradient and shuffles / stalemates a won KQ; a tier-below-
+/// `Full` bot can't deliver the KBN mate (the `kbnk` corner override is
+/// withheld) and herds the king to the wrong square.
+///
+/// **Play-engine-only**, exactly like [`crate::opponent::EvalMask`] and
+/// the qsearch cap: the analytical / hint / retrospective engines always
+/// use [`EndgameSkill::Full`] so teaching judges true best play and can
+/// say "you *could* have won this — here's the technique."
+///
+/// Variants are declared weakest-first so the derived `Ord` gives the
+/// ladder ordering used by [`probe_with_skill`] (`bot >= required`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum EndgameSkill {
+    /// No endgame books at all — pure classical eval + search. Believable
+    /// sub-~1000 play: misplaced kings, accidental stalemates, won
+    /// endgames let slip. Also sidesteps the SF11-inherited Q→B
+    /// underpromotion quirk (no `kbnk` override to out-rank a queen).
+    None,
+    /// Trivial major-piece mates only — KQK / KRK via the generic `kxk`.
+    Basic,
+    /// + fundamental technique: KPK opposition (bitbase), piece-vs-pawn
+    /// and piece-vs-piece endings, the KNN-vs-K dead draw.
+    Intermediate,
+    /// Everything, including the hard mates (KBNK, KNNKP/Troitsky) and the
+    /// fortress scaling functions. The analytical default.
+    #[default]
+    Full,
+}
+
+impl EndgameSkill {
+    /// Map a 0-based tier level (CLI / UCI dial) to a skill. Levels at or
+    /// above the top tier saturate to [`EndgameSkill::Full`].
+    pub fn from_tier(level: u8) -> EndgameSkill {
+        match level {
+            0 => EndgameSkill::None,
+            1 => EndgameSkill::Basic,
+            2 => EndgameSkill::Intermediate,
+            _ => EndgameSkill::Full,
+        }
+    }
+}
+
 // =========================================================================
 // Tuning tables
 // =========================================================================
@@ -149,46 +195,74 @@ pub(super) const PUSH_TO_CORNERS: [i32; 64] = [
 /// If `pos` matches a recognised endgame pattern, return the specialist
 /// result. The caller is responsible for any side-to-move flipping of
 /// the Override value (which is in white's POV).
+///
+/// Full endgame knowledge — equivalent to `probe_with_skill(pos,
+/// EndgameSkill::Full)`. The analytical / UI engines use this.
 pub fn probe(pos: &Position) -> ProbeResult {
+    probe_with_skill(pos, EndgameSkill::Full)
+}
+
+/// As [`probe`], but only consult specialists at or below the bot's
+/// [`EndgameSkill`] tier; harder ones are withheld so the position falls
+/// through to a coarser specialist (or to classical eval at
+/// [`EndgameSkill::None`]). See [`EndgameSkill`] for the per-tier rationale.
+///
+/// Withholding a specialist makes the position fall *through* the
+/// dispatcher: e.g. a KBN-vs-K position below `Full` skips `kbnk` and
+/// lands on the generic `kxk` (which drives to the wrong — merely
+/// edge — square, the human failure mode), and at `None` skips `kxk`
+/// too and gets plain classical eval.
+pub fn probe_with_skill(pos: &Position, skill: EndgameSkill) -> ProbeResult {
+    use EndgameSkill::{Basic, Full, Intermediate};
+
     // ---- Value-returning evaluators (Override) ----------------------
     //
     // KBNK before KXK: same lone-king structure but a tighter
-    // corner-driving score.
-    if let Some(strong) = kbnk::strong_side(pos) {
-        return ProbeResult::Override(kbnk::evaluate(pos, strong));
+    // corner-driving score. The hardest elementary mate — `Full` only;
+    // below that it falls through to the generic KXK.
+    if skill >= Full {
+        if let Some(strong) = kbnk::strong_side(pos) {
+            return ProbeResult::Override(kbnk::evaluate(pos, strong));
+        }
     }
 
     // KPK before KXK. The bitbase distinguishes wrong-rook-pawn /
     // opposition / stalemate; KXK would paper over those nuances.
-    if let Some(strong) = kpk::strong_side(pos) {
-        return ProbeResult::Override(kpk::evaluate(pos, strong));
+    if skill >= Intermediate {
+        if let Some(strong) = kpk::strong_side(pos) {
+            return ProbeResult::Override(kpk::evaluate(pos, strong));
+        }
+
+        // KNN vs bare K — unconditional draw.
+        if knnk::matches(pos) {
+            return ProbeResult::Override(Value::DRAW);
+        }
     }
 
-    // KNN vs bare K — unconditional draw.
-    if knnk::matches(pos) {
-        return ProbeResult::Override(Value::DRAW);
+    // KNN vs K+P — theoretical Troitsky-line win (advanced technique).
+    if skill >= Full {
+        if let Some(strong) = knnkp::strong_side(pos) {
+            return ProbeResult::Override(knnkp::evaluate(pos, strong));
+        }
     }
 
-    // KNN vs K+P — theoretical Troitsky-line win.
-    if let Some(strong) = knnkp::strong_side(pos) {
-        return ProbeResult::Override(knnkp::evaluate(pos, strong));
-    }
-
-    // Piece-vs-piece endings.
-    if let Some(strong) = piece_vs_piece_signature(pos, PieceType::Queen, PieceType::Rook) {
-        return ProbeResult::Override(kqkr::evaluate(pos, strong));
-    }
-    if let Some(strong) = piece_vs_pawn_signature(pos, PieceType::Queen) {
-        return ProbeResult::Override(kqkp::evaluate(pos, strong));
-    }
-    if let Some(strong) = piece_vs_pawn_signature(pos, PieceType::Rook) {
-        return ProbeResult::Override(krkp::evaluate(pos, strong));
-    }
-    if let Some(strong) = piece_vs_piece_signature(pos, PieceType::Rook, PieceType::Bishop) {
-        return ProbeResult::Override(krkb::evaluate(pos, strong));
-    }
-    if let Some(strong) = piece_vs_piece_signature(pos, PieceType::Rook, PieceType::Knight) {
-        return ProbeResult::Override(krkn::evaluate(pos, strong));
+    // Piece-vs-piece / piece-vs-pawn endings.
+    if skill >= Intermediate {
+        if let Some(strong) = piece_vs_piece_signature(pos, PieceType::Queen, PieceType::Rook) {
+            return ProbeResult::Override(kqkr::evaluate(pos, strong));
+        }
+        if let Some(strong) = piece_vs_pawn_signature(pos, PieceType::Queen) {
+            return ProbeResult::Override(kqkp::evaluate(pos, strong));
+        }
+        if let Some(strong) = piece_vs_pawn_signature(pos, PieceType::Rook) {
+            return ProbeResult::Override(krkp::evaluate(pos, strong));
+        }
+        if let Some(strong) = piece_vs_piece_signature(pos, PieceType::Rook, PieceType::Bishop) {
+            return ProbeResult::Override(krkb::evaluate(pos, strong));
+        }
+        if let Some(strong) = piece_vs_piece_signature(pos, PieceType::Rook, PieceType::Knight) {
+            return ProbeResult::Override(krkn::evaluate(pos, strong));
+        }
     }
 
     // ---- ScaleFactor-returning scaling functions (Scale) ------------
@@ -229,7 +303,7 @@ pub fn probe(pos: &Position) -> ProbeResult {
     // generic KBPsK / KQKRPs / KPsK / KPKP, mirroring SF11
     // material.cpp's exact-key-then-generic dispatch.
     const SCALING_ENABLED: bool = false;
-    if SCALING_ENABLED {
+    if SCALING_ENABLED && skill >= Full {
         if let Some(strong) = krpkr::strong_side(pos) {
             if let Some(r) = scale_if_applies(strong, krpkr::evaluate(pos, strong)) {
                 return r;
@@ -295,9 +369,13 @@ pub fn probe(pos: &Position) -> ProbeResult {
 
     // KXK: catch-all fallback for "one side has a lone king and the
     // other has enough material to mate." Runs after the scaling
-    // functions so fortress patterns get the first chance.
-    if let Some(strong) = lone_king_opponent(pos) {
-        return ProbeResult::Override(kxk::evaluate(pos, strong));
+    // functions so fortress patterns get the first chance. The lowest
+    // tier of book knowledge — `Basic` and up; at `None` even the
+    // trivial mates get no king-driving gradient (classical eval only).
+    if skill >= Basic {
+        if let Some(strong) = lone_king_opponent(pos) {
+            return ProbeResult::Override(kxk::evaluate(pos, strong));
+        }
     }
 
     ProbeResult::None
@@ -459,5 +537,101 @@ mod tests {
     fn kxk_pattern_returns_override() {
         let p = Position::from_fen("7k/8/5KQ1/8/8/8/8/8 w - - 0 1").unwrap();
         assert!(matches!(probe(&p), ProbeResult::Override(_)));
+    }
+
+    #[test]
+    fn skill_tiers_withhold_harder_specialists() {
+        use EndgameSkill::{Basic, Full, Intermediate, None as NoBooks};
+
+        // KQK (trivial mate) — fires at Basic+, classical (None) at tier 0.
+        let kqk = Position::from_fen("7k/8/5KQ1/8/8/8/8/8 w - - 0 1").unwrap();
+        assert_eq!(probe_with_skill(&kqk, NoBooks), ProbeResult::None);
+        assert!(matches!(
+            probe_with_skill(&kqk, Basic),
+            ProbeResult::Override(_)
+        ));
+
+        // KPK — the precise opposition/wrong-pawn bitbase is withheld
+        // below Intermediate. (At Basic, K+pawns-vs-K still gets the
+        // generic KXK gradient — "pawns usually win" — just not the
+        // bitbase's drawn-position nuance; at None it's classical only.)
+        let kpk = Position::from_fen("8/8/8/3k4/8/3K4/3P4/8 w - - 0 1").unwrap();
+        assert_eq!(probe_with_skill(&kpk, NoBooks), ProbeResult::None);
+        assert!(matches!(
+            probe_with_skill(&kpk, Intermediate),
+            ProbeResult::Override(_)
+        ));
+
+        // KBNK — the hard mate. Below Full it falls THROUGH to the generic
+        // KXK (still an Override, but the wrong — merely edge-driving —
+        // gradient), and at None drops to classical eval.
+        let kbnk = Position::from_fen("7k/8/8/8/8/8/8/2B1K1N1 w - - 0 1").unwrap();
+        assert_eq!(probe_with_skill(&kbnk, NoBooks), ProbeResult::None);
+        // Generic KXK fires at Basic/Intermediate (lone king + B+N).
+        assert!(matches!(
+            probe_with_skill(&kbnk, Intermediate),
+            ProbeResult::Override(_)
+        ));
+        // The dedicated KBNK override only at Full — and it scores ABOVE
+        // the generic KXK (its corner gradient), so the two differ.
+        let generic = probe_with_skill(&kbnk, Intermediate);
+        let dedicated = probe_with_skill(&kbnk, Full);
+        assert!(matches!(dedicated, ProbeResult::Override(_)));
+        assert_ne!(generic, dedicated);
+    }
+
+    #[test]
+    fn low_skill_prefers_queen_over_bishop_promotion() {
+        // The SF11-inherited Q->B underpromotion only happens when the
+        // KBNK override fires (its KNOWN_WIN+corner out-ranks a queen).
+        // With books gated off, both promotions get classical eval where
+        // material rules, so a queen out-scores bishop+knight. White to
+        // move is the lone king; more-negative = better for the strong
+        // (Black) side choosing the promotion.
+        let after_bishop = "8/8/6K1/8/4k3/8/1n6/b7 w - - 0 1"; // K+B+N vs K
+        let after_queen = "8/8/6K1/8/4k3/8/1n6/q7 w - - 0 1"; // K+Q+N vs K
+        let pb = Position::from_fen(after_bishop).unwrap();
+        let pq = Position::from_fen(after_queen).unwrap();
+
+        // Tier 0 (no books): queen strictly better (classical material).
+        let b0 = crate::eval::evaluate_with_pawn_cache(
+            &pb,
+            &mut crate::pawns::Table::new(),
+            crate::opponent::EvalMask::EMPTY,
+            EndgameSkill::None,
+        );
+        let q0 = crate::eval::evaluate_with_pawn_cache(
+            &pq,
+            &mut crate::pawns::Table::new(),
+            crate::opponent::EvalMask::EMPTY,
+            EndgameSkill::None,
+        );
+        assert!(
+            q0.0 < b0.0,
+            "tier 0: queen ({}) should beat bishop ({})",
+            q0.0,
+            b0.0
+        );
+
+        // At Full the SF11 quirk re-appears (bishop out-ranks queen) —
+        // documented as deferred, asserted here so a future fix flips it.
+        let bf = crate::eval::evaluate_with_pawn_cache(
+            &pb,
+            &mut crate::pawns::Table::new(),
+            crate::opponent::EvalMask::EMPTY,
+            EndgameSkill::Full,
+        );
+        let qf = crate::eval::evaluate_with_pawn_cache(
+            &pq,
+            &mut crate::pawns::Table::new(),
+            crate::opponent::EvalMask::EMPTY,
+            EndgameSkill::Full,
+        );
+        assert!(
+            bf.0 < qf.0,
+            "Full: SF11 quirk — bishop ({}) out-ranks queen ({})",
+            bf.0,
+            qf.0
+        );
     }
 }

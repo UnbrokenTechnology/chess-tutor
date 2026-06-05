@@ -3,9 +3,7 @@
 
 use super::*;
 use crate::eval::evaluate_with_pawn_cache;
-use crate::movepick::{
-    ContHistKeys, MovePicker,
-};
+use crate::movepick::{ContHistKeys, MovePicker};
 use crate::position::Position;
 use crate::types::{Bound, Depth, Move, Square, Value};
 
@@ -80,13 +78,13 @@ impl<'a> Search<'a> {
             if probe.data.eval != Value::NONE {
                 probe.data.eval
             } else {
-                evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask)
+                evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask, self.eg_skill)
             }
         } else if parent_was_null {
             let parent_raw = self.stack[STACK_SENTINEL + ply - 1].raw_static_eval;
             Value(-parent_raw.0 + 2 * crate::eval::TEMPO.0)
         } else {
-            evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask)
+            evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask, self.eg_skill)
         };
         self.stack[STACK_SENTINEL + ply].raw_static_eval = raw_stand_pat;
 
@@ -170,7 +168,8 @@ impl<'a> Search<'a> {
             cont_key_at(&self.stack, ply, 4),
             cont_key_at(&self.stack, ply, 6),
         ];
-        let mut picker = MovePicker::new_qs(pos, tt_move, qs_picker_depth, recapture_square, cont_keys);
+        let mut picker =
+            MovePicker::new_qs(pos, tt_move, qs_picker_depth, recapture_square, cont_keys);
         let mut move_count = 0usize;
 
         loop {

@@ -1,7 +1,6 @@
 //! REPL subcommand handlers (openings / eval-mask / noise).
 use std::io::{self, Write};
 
-
 use chess_tutor_engine::book::BookCursor;
 use chess_tutor_engine::openings::{self, OpeningId};
 use chess_tutor_engine::opponent::{
@@ -9,7 +8,6 @@ use chess_tutor_engine::opponent::{
 };
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::Move;
-
 
 use super::*;
 
@@ -63,6 +61,7 @@ fn print_openings_status(
         book: allowed.clone(),
         eval_mask: EvalMask::EMPTY,
         qsearch_max_plies: None,
+        endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
         noise: NoiseProfile::default(),
     };
     let probe_pos = Position::startpos();
@@ -88,7 +87,10 @@ fn print_allowed_list(out: &mut io::StdoutLock<'_>, allowed: &BookSelection) -> 
         BookSelection::Allowed(v) => v.as_slice(),
     };
     if ids.is_empty() {
-        return writeln!(out, "openings: allowed set is empty (engine plays from search).");
+        return writeln!(
+            out,
+            "openings: allowed set is empty (engine plays from search)."
+        );
     }
     writeln!(out, "openings allowed ({}):", ids.len())?;
     for id in ids {
@@ -172,14 +174,22 @@ pub(super) fn run_eval_mask_command(
                 mask.disable(cat);
                 writeln!(out, "eval-mask: bot now blind to {}.", cat.slug())
             }
-            None => writeln!(out, "unknown category {subarg:?}; try one of: {}", slug_list()),
+            None => writeln!(
+                out,
+                "unknown category {subarg:?}; try one of: {}",
+                slug_list()
+            ),
         },
         "enable" => match EvalCategory::from_slug(subarg) {
             Some(cat) => {
                 mask.enable(cat);
                 writeln!(out, "eval-mask: bot now considers {} again.", cat.slug())
             }
-            None => writeln!(out, "unknown category {subarg:?}; try one of: {}", slug_list()),
+            None => writeln!(
+                out,
+                "unknown category {subarg:?}; try one of: {}",
+                slug_list()
+            ),
         },
         "reset" => {
             *mask = EvalMask::EMPTY;
@@ -295,4 +305,3 @@ pub(super) fn run_noise_command(
         ),
     }
 }
-

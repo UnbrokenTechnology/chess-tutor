@@ -11,6 +11,7 @@
 //! only to allow history mutation; the TT is accessed through a shared
 //! `&self`.
 
+use crate::endgame::EndgameSkill;
 use crate::eval::EvalTrace;
 use crate::movepick::{ButterflyHistory, CaptureHistory, ContHistStore, CounterMoveTable};
 use crate::opponent::EvalMask;
@@ -139,6 +140,14 @@ pub struct SearchParams {
     /// Play-engine-only, like [`Self::eval_mask`]: analytical paths must
     /// keep this `None` so feedback judges against true best play.
     pub qsearch_max_plies: Option<u32>,
+
+    /// How much closed-form endgame knowledge the bot may use.
+    /// [`EndgameSkill::Full`] (the default) consults every specialist;
+    /// lower tiers withhold the harder ones so a weak bot misplays
+    /// endgames like a human of that level (and, at low tiers, promotes
+    /// to a queen instead of the SF-quirk underpromotion). Play-engine-
+    /// only, like [`Self::eval_mask`] / [`Self::qsearch_max_plies`].
+    pub endgame_skill: EndgameSkill,
 }
 
 impl Default for SearchParams {
@@ -154,6 +163,7 @@ impl Default for SearchParams {
             threads: 1,
             eval_mask: EvalMask::EMPTY,
             qsearch_max_plies: None,
+            endgame_skill: EndgameSkill::Full,
         }
     }
 }
@@ -417,7 +427,6 @@ impl Engine {
             worker.pawn_cache.reset_stats();
         }
     }
-
 }
 
 impl Default for Engine {

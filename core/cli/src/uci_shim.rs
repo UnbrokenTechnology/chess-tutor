@@ -29,6 +29,7 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::Result;
 
+use chess_tutor_engine::endgame::EndgameSkill;
 use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::noise::{self, NoisePick};
 use chess_tutor_engine::opponent::{EvalMask, NoiseProfile};
@@ -58,6 +59,10 @@ pub struct UciConfig {
     /// Quiescence horizon cap (tactical-vision dial). `None` = full
     /// vision; `Some(0)` = tactically blind (hangs pieces).
     pub qsearch_max_plies: Option<u32>,
+    /// Endgame-book skill tier (technique dial). [`EndgameSkill::Full`] =
+    /// all books; lower tiers withhold the harder mates so the bot
+    /// misplays endgames (and queens instead of underpromoting).
+    pub endgame_skill: EndgameSkill,
     /// Move-sampling dials (variety / blunder / miss / wild).
     pub noise: NoiseProfile,
 }
@@ -79,9 +84,10 @@ pub fn run(cfg: UciConfig) -> Result<()> {
     // Surface the resolved config on stderr (stdout is the UCI channel)
     // so harness logs record exactly what was measured.
     eprintln!(
-        "uci-shim: depth={} qsearch_depth={:?} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, blunder={} [{}..{}cp], miss={}, guaranteed_mate_in={}}}",
+        "uci-shim: depth={} qsearch_depth={:?} endgame_skill={:?} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, blunder={} [{}..{}cp], miss={}, guaranteed_mate_in={}}}",
         cfg.depth,
         cfg.qsearch_max_plies,
+        cfg.endgame_skill,
         cfg.threads,
         cfg.base_seed,
         cfg.eval_mask
@@ -213,6 +219,7 @@ fn choose_move(
         threads: cfg.threads.max(1),
         eval_mask: cfg.eval_mask,
         qsearch_max_plies: cfg.qsearch_max_plies,
+        endgame_skill: cfg.endgame_skill,
     };
     let lines = engine.search(pos, params);
     // Every noise branch (engine-best / variety / blunder / miss) yields a
@@ -240,7 +247,10 @@ fn uci_score(v: Value) -> String {
         let signed = if v.0 >= 0 { moves } else { -moves };
         format!("mate {signed}")
     } else {
-        format!("cp {}", units::engine_cp_to_conventional_cp(v).round() as i32)
+        format!(
+            "cp {}",
+            units::engine_cp_to_conventional_cp(v).round() as i32
+        )
     }
 }
 
@@ -259,7 +269,8 @@ fn build_position(line: &str) -> Result<(Position, Vec<u64>, u64)> {
     let mut pos = if spec.is_empty() || spec == "startpos" {
         Position::startpos()
     } else if let Some(fen) = spec.strip_prefix("fen") {
-        Position::from_fen(fen.trim()).map_err(|e| anyhow::anyhow!("invalid FEN {:?}: {e}", fen.trim()))?
+        Position::from_fen(fen.trim())
+            .map_err(|e| anyhow::anyhow!("invalid FEN {:?}: {e}", fen.trim()))?
     } else {
         anyhow::bail!("unrecognised position spec {spec:?} (expected `startpos` or `fen <FEN>`)");
     };
@@ -270,7 +281,8 @@ fn build_position(line: &str) -> Result<(Position, Vec<u64>, u64)> {
         // Key of the position *before* this move joins the pre-root
         // history; the root (after the last move) is deliberately omitted.
         history.push(pos.key());
-        let mv = uci::parse(&mut pos, mv_str).map_err(|e| anyhow::anyhow!("bad move {mv_str:?}: {e}"))?;
+        let mv = uci::parse(&mut pos, mv_str)
+            .map_err(|e| anyhow::anyhow!("bad move {mv_str:?}: {e}"))?;
         pos.do_move(mv);
         ply += 1;
     }

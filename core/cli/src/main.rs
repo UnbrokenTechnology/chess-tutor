@@ -36,6 +36,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use chess_tutor_engine::analysis::{analyze_position, find_latent_threats, find_threat_defusals};
+use chess_tutor_engine::endgame::EndgameSkill;
 use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
@@ -129,8 +130,7 @@ fn print_allowed_banner(
     // noise.
     if stm == Color::Black {
         let best_wp = crate::units::format_pawns(crate::units::to_white_pov(best_score, stm));
-        let forced_wp =
-            crate::units::format_pawns(crate::units::to_white_pov(forced_score, stm));
+        let forced_wp = crate::units::format_pawns(crate::units::to_white_pov(forced_score, stm));
         println!("!! (white-POV / eval-bar: {best_wp} → {forced_wp}.)");
     }
     println!("!! This is not \"you missed a stronger move\" — your move ALLOWED the");
@@ -437,8 +437,7 @@ fn main() -> Result<()> {
         }
         Command::Square { square, fen } => {
             use chess_tutor_engine::types::Square;
-            let pos = Position::from_fen(&fen)
-                .with_context(|| format!("parsing FEN {:?}", fen))?;
+            let pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
             let sq = Square::from_algebraic(&square)
                 .with_context(|| format!("parsing square {:?} (expected e.g. 'e5')", square))?;
             let summary_data = summary::build(&pos, summary::ScoreSource::Static, None);
@@ -554,8 +553,8 @@ fn main() -> Result<()> {
             // loaded) plus the swing reframe.
             let mut pos =
                 Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
-            let played_move = parse_user_move(&mut pos, &mv)
-                .with_context(|| format!("parsing move {:?}", mv))?;
+            let played_move =
+                parse_user_move(&mut pos, &mv).with_context(|| format!("parsing move {:?}", mv))?;
             let stm = pos.side_to_move();
             let orientation = crate::units::Orientation::from_stm_flag(stm_mode);
 
@@ -571,6 +570,7 @@ fn main() -> Result<()> {
                 threads: 1,
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 qsearch_max_plies: None,
+                endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
             };
             let lines = engine.search(&mut pos, params);
             if lines.is_empty() {
@@ -693,8 +693,8 @@ fn main() -> Result<()> {
             // last block — it dominates wall time and is the
             // headline number the position summary at the top
             // references.
-            let mut pos = Position::from_fen(&fen)
-                .with_context(|| format!("parsing FEN {:?}", fen))?;
+            let mut pos =
+                Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
             // Run a depth-N search first so the summary header can
             // carry the search score rather than a static eval.
             let mut engine = Engine::default();
@@ -709,20 +709,24 @@ fn main() -> Result<()> {
                 threads: 1,
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 qsearch_max_plies: None,
+                endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
             };
             let lines = engine.search(&mut pos, search_params);
             let (score_source, headline_score) = if lines.is_empty() {
                 (summary::ScoreSource::Static, None)
             } else {
                 (
-                    summary::ScoreSource::Search { depth: lines[0].depth },
+                    summary::ScoreSource::Search {
+                        depth: lines[0].depth,
+                    },
                     Some(lines[0].score),
                 )
             };
             let summary_data = summary::build(&pos, score_source, headline_score);
             let threats_data = threats_view::build(&pos);
-            let mut tactics_data =
-                tactics_view::build(&pos, None, /*latent*/ true, /*check_followups*/ true);
+            let mut tactics_data = tactics_view::build(
+                &pos, None, /*latent*/ true, /*check_followups*/ true,
+            );
             // Search-backed defusal enumeration: when the side to move
             // faces a standing threat, list the moves that actually
             // neutralise it without conceding the eval. Reuses the
@@ -795,10 +799,16 @@ fn main() -> Result<()> {
                 println!("pv:       {}", pv_san.join(" "));
             }
         }
-        Command::Tactics { fen, prior_move, latent, check_followups } => {
+        Command::Tactics {
+            fen,
+            prior_move,
+            latent,
+            check_followups,
+        } => {
             use chess_tutor_engine::analysis::PriorMove;
             use chess_tutor_engine::types::{Move, PieceType, Square};
-            let mut pos = Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
+            let mut pos =
+                Position::from_fen(&fen).with_context(|| format!("parsing FEN {:?}", fen))?;
             // `--prior-move` is the OPPONENT's last move — the move that
             // produced this FEN. We can't validate it against any legal
             // move list (its source square is empty in the current FEN
@@ -821,10 +831,12 @@ fn main() -> Result<()> {
                             uci_str,
                         );
                     }
-                    let from = Square::from_algebraic(&s[0..2])
-                        .ok_or_else(|| anyhow::anyhow!("--prior-move: bad from-square in {:?}", uci_str))?;
-                    let to = Square::from_algebraic(&s[2..4])
-                        .ok_or_else(|| anyhow::anyhow!("--prior-move: bad to-square in {:?}", uci_str))?;
+                    let from = Square::from_algebraic(&s[0..2]).ok_or_else(|| {
+                        anyhow::anyhow!("--prior-move: bad from-square in {:?}", uci_str)
+                    })?;
+                    let to = Square::from_algebraic(&s[2..4]).ok_or_else(|| {
+                        anyhow::anyhow!("--prior-move: bad to-square in {:?}", uci_str)
+                    })?;
                     let mv = if s.len() == 5 {
                         let promo = match s.as_bytes()[4] as char {
                             'q' => PieceType::Queen,
@@ -859,8 +871,11 @@ fn main() -> Result<()> {
                         &stm_threats,
                         TACTICS_DEFUSAL_DEPTH,
                     );
-                    view.defusals =
-                        Some(tactics_view::build_defusals_view(&pos, &report, TACTICS_DEFUSAL_DEPTH));
+                    view.defusals = Some(tactics_view::build_defusals_view(
+                        &pos,
+                        &report,
+                        TACTICS_DEFUSAL_DEPTH,
+                    ));
                 }
             }
             if json_mode {
@@ -884,6 +899,7 @@ fn main() -> Result<()> {
             fen,
             depth,
             qsearch_depth,
+            endgame_skill,
             nodes,
             time_ms,
             multi_pv,
@@ -905,8 +921,10 @@ fn main() -> Result<()> {
             // to UCI on failure.
             let force_include_moves = force_include
                 .iter()
-                .map(|s| parse_user_move(&mut pos, s)
-                    .with_context(|| format!("parsing --force-include {s:?}")))
+                .map(|s| {
+                    parse_user_move(&mut pos, s)
+                        .with_context(|| format!("parsing --force-include {s:?}"))
+                })
                 .collect::<Result<Vec<_>>>()?;
             let params = SearchParams {
                 max_depth: depth,
@@ -921,6 +939,8 @@ fn main() -> Result<()> {
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 // ...except the explicit tactical-vision dial for inspection.
                 qsearch_max_plies: qsearch_depth,
+                // ...and the explicit endgame-skill dial for inspection.
+                endgame_skill: endgame_skill.map_or(EndgameSkill::Full, EndgameSkill::from_tier),
             };
 
             let orientation = crate::units::Orientation::from_stm_flag(stm_mode);
@@ -1176,9 +1196,7 @@ fn main() -> Result<()> {
             if annotate && !lines[0].pv.is_empty() {
                 use chess_tutor_engine::analysis::find_tactic_in_line;
                 let mover = pos.side_to_move();
-                if let Some(hit) =
-                    find_tactic_in_line(&pos, &lines[0].pv, mover, None)
-                {
+                if let Some(hit) = find_tactic_in_line(&pos, &lines[0].pv, mover, None) {
                     let pv_san = pv_to_san(&pos, &lines[0].pv);
                     let move_name = pv_san.first().map(|s| s.as_str()).unwrap_or("?");
                     let mate_suffix = match hit.mate_pattern {
@@ -1193,12 +1211,7 @@ fn main() -> Result<()> {
                     };
                     println!(
                         "tactic:   {:?} via {}{}{}  (gain {}, conf: {:?})",
-                        hit.pattern,
-                        move_name,
-                        mate_suffix,
-                        sac,
-                        gain,
-                        hit.confidence,
+                        hit.pattern, move_name, mate_suffix, sac, gain, hit.confidence,
                     );
                     // When the tactic fires on the first PV move, check for a
                     // forcing escape so the line doesn't read as a clean win
@@ -1351,6 +1364,7 @@ fn main() -> Result<()> {
             depth,
             threads,
             qsearch_depth,
+            endgame_skill,
             seed,
             disable_eval,
             avg_move_rank,
@@ -1408,6 +1422,7 @@ fn main() -> Result<()> {
                 base_seed,
                 eval_mask,
                 qsearch_max_plies: qsearch_depth,
+                endgame_skill: endgame_skill.map_or(EndgameSkill::Full, EndgameSkill::from_tier),
                 noise,
             })?;
         }

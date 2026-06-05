@@ -220,6 +220,14 @@ pub enum Command {
         /// bot's move/eval changes as tactical sight shrinks.
         #[arg(long = "qsearch-depth", value_name = "PLIES")]
         qsearch_depth: Option<u32>,
+        /// Endgame-book skill tier (technique dial): how far up the
+        /// endgame-knowledge ladder the bot reaches. `0` = no books
+        /// (classical eval — misplaces kings, stalemates, queens instead
+        /// of underpromoting); `1` = trivial KQK/KRK mates; `2` = +
+        /// opposition / piece-vs-pawn; `3`+ = everything incl. KBNK.
+        /// Omit for full knowledge. Mainly for inspecting weak-bot play.
+        #[arg(long = "endgame-skill", value_name = "TIER")]
+        endgame_skill: Option<u8>,
         /// Stop after this many nodes.
         #[arg(long)]
         nodes: Option<u64>,
@@ -454,13 +462,21 @@ pub enum Command {
         /// Smallest material loss (in points; a pawn = 1.0) for a move
         /// to count as an "in band" blunder. Default 1.0 — a hung pawn,
         /// the lightest punishable mistake.
-        #[arg(long = "blunder-min-material", value_name = "PTS", default_value_t = 1.0)]
+        #[arg(
+            long = "blunder-min-material",
+            value_name = "PTS",
+            default_value_t = 1.0
+        )]
         blunder_min_material: f32,
         /// Largest material loss (points; pawn = 1.0) for a move to
         /// count as "in band". Default 4.0 — caps deliberate blunders
         /// at roughly a minor-and-pawn / the exchange, so the bot won't
         /// gift its queen. Raise toward 9.0 for heavier hangs.
-        #[arg(long = "blunder-max-material", value_name = "PTS", default_value_t = 4.0)]
+        #[arg(
+            long = "blunder-max-material",
+            value_name = "PTS",
+            default_value_t = 4.0
+        )]
         blunder_max_material: f32,
         /// Per-move probability the bot plays a "miss" — declining a
         /// move that wins material by force and playing the best move
@@ -504,6 +520,13 @@ pub enum Command {
         /// or statistically-bad moves.
         #[arg(long = "qsearch-depth", value_name = "PLIES")]
         qsearch_depth: Option<u32>,
+        /// Endgame-book skill tier (technique dial): `0` = no books
+        /// (classical eval — botches endgames, queens instead of
+        /// underpromoting like a sub-1000 human); `1` = KQK/KRK; `2` = +
+        /// opposition / piece endings; `3`+ = everything incl. KBNK.
+        /// Omit for full endgame knowledge.
+        #[arg(long = "endgame-skill", value_name = "TIER")]
+        endgame_skill: Option<u8>,
         /// Base seed for per-game randomness. Default: random per
         /// process (logged to stderr). Pass a fixed value to make an
         /// entire harness run reproducible.
@@ -525,11 +548,19 @@ pub enum Command {
         blunder_chance: f32,
         /// Smallest material loss (points; pawn = 1.0) counting as an
         /// in-band blunder. Default 1.0.
-        #[arg(long = "blunder-min-material", value_name = "PTS", default_value_t = 1.0)]
+        #[arg(
+            long = "blunder-min-material",
+            value_name = "PTS",
+            default_value_t = 1.0
+        )]
         blunder_min_material: f32,
         /// Largest material loss (points; pawn = 1.0) counting as an
         /// in-band blunder. Default 4.0.
-        #[arg(long = "blunder-max-material", value_name = "PTS", default_value_t = 4.0)]
+        #[arg(
+            long = "blunder-max-material",
+            value_name = "PTS",
+            default_value_t = 4.0
+        )]
         blunder_max_material: f32,
         /// Per-move probability of a "miss" — declining a forced
         /// material win (0.0–1.0). Default 0.0 (off).

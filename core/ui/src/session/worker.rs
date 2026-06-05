@@ -9,20 +9,14 @@ use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::types::{Color, Move};
 
-use crate::learning_mode::{
-    gating_config_for, intervention_required, PendingIntervention,
-};
+use crate::learning_mode::{gating_config_for, intervention_required, PendingIntervention};
 use crate::worker::{NoisePickInfo, WorkerJob, WorkerResult};
 
 /// Emit a one-line stderr entry describing a noise-driven pick.
 /// Extracted from [`Session::handle_worker_result`] so the same
 /// log line still fires when `log_to_stderr` is on without
 /// inlining the match over every variant in the hot path.
-pub(crate) fn log_noise_pick_to_stderr(
-    info: &NoisePickInfo,
-    pos: &Position,
-    _mv: Move,
-) {
+pub(crate) fn log_noise_pick_to_stderr(info: &NoisePickInfo, pos: &Position, _mv: Move) {
     match info {
         NoisePickInfo::Variety {
             pick_idx,
@@ -120,7 +114,10 @@ impl Session {
             if self.pending_intervention.is_some() || self.awaiting_intervention_decision {
                 return;
             }
-            if !self.engine_plays.is_engine_turn(self.position.side_to_move()) {
+            if !self
+                .engine_plays
+                .is_engine_turn(self.position.side_to_move())
+            {
                 return;
             }
             let mut scratch = self.position.clone();
@@ -140,7 +137,10 @@ impl Session {
                 if self.log_to_stderr {
                     let san_str = san::format(&self.position, book_pick.mv);
                     if let Some(entry) = chess_tutor_engine::openings::entry(book_pick.opening_id) {
-                        eprintln!("book: engine plays {} ({} {})", san_str, entry.eco, entry.name);
+                        eprintln!(
+                            "book: engine plays {} ({} {})",
+                            san_str, entry.eco, entry.name
+                        );
                     } else {
                         eprintln!("book: engine plays {}", san_str);
                     }
@@ -201,6 +201,9 @@ impl Session {
             // categories, and its tactical-vision (qsearch) horizon.
             eval_mask: self.opponent.eval_mask,
             qsearch_max_plies: self.opponent.qsearch_max_plies,
+            // ...and its endgame-book skill tier (botches endgames it
+            // doesn't yet "know", and queens instead of underpromoting).
+            endgame_skill: self.opponent.endgame_skill,
         };
         self.engine_thinking = true;
         let _ = self.worker_tx.send(WorkerJob::Search {
@@ -322,9 +325,7 @@ impl Session {
                 // — anything else is a stale arrival and we ignore it
                 // for intervention purposes (the gen-check above
                 // already filtered most of those).
-                if self.awaiting_intervention_decision
-                    && target_index + 1 == self.history.len()
-                {
+                if self.awaiting_intervention_decision && target_index + 1 == self.history.len() {
                     self.awaiting_intervention_decision = false;
                     let prior_move = self.prior_move_for(target_index);
                     let assessment = pre_pos.as_ref().map(|pp| {

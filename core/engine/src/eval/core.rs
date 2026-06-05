@@ -6,6 +6,7 @@
 use super::scale::scale_factor;
 use super::{initiative, king, passed, pieces, space, threats};
 use super::{EvalTrace, Evaluator, MaterialBreakdown, PHASE_MAX, SCALE_NORMAL, TEMPO};
+use crate::endgame::EndgameSkill;
 use crate::opponent::{EvalCategory, EvalMask};
 use crate::pawns::PawnsEval;
 use crate::position::Position;
@@ -41,9 +42,10 @@ pub(super) fn evaluate_inner(
     pos: &Position,
     pawns_eval: PawnsEval,
     mask: EvalMask,
+    eg_skill: EndgameSkill,
     mut trace: Option<&mut EvalTrace>,
 ) -> Value {
-    let mut e = Evaluator::new_with_pawns(pos, pawns_eval);
+    let mut e = Evaluator::new_with_pawns(pos, pawns_eval, eg_skill);
 
     // If material reports a specialised endgame evaluator (`ProbeResult::
     // Override`), trust it and skip the classical terms entirely.

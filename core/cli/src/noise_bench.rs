@@ -77,8 +77,8 @@ pub fn run(args: NoiseBenchArgs) -> Result<()> {
     let mut engine = Engine::new(args.tt_mb);
 
     for (i, entry) in positions.iter().enumerate() {
-        let mut pos = parse_bench_entry(entry)
-            .with_context(|| format!("parsing bench entry {}", i + 1))?;
+        let mut pos =
+            parse_bench_entry(entry).with_context(|| format!("parsing bench entry {}", i + 1))?;
 
         if legal_moves_vec(&mut pos).is_empty() {
             let label = if pos.in_check() {
@@ -112,6 +112,7 @@ pub fn run(args: NoiseBenchArgs) -> Result<()> {
                 threads: args.threads,
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 qsearch_max_plies: None,
+                endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
             };
             let analyses = analyze_position(&mut engine, &mut pos.clone(), params);
             for a in &analyses {
@@ -179,13 +180,19 @@ pub fn run(args: NoiseBenchArgs) -> Result<()> {
         sorted[idx]
     };
     println!("  positions:   {}", sorted.len());
-    println!("  min:        {:>4} cp", sorted.first().copied().unwrap_or(0));
+    println!(
+        "  min:        {:>4} cp",
+        sorted.first().copied().unwrap_or(0)
+    );
     println!("  p50:        {:>4} cp", pct(0.50));
     println!("  p75:        {:>4} cp", pct(0.75));
     println!("  p90:        {:>4} cp", pct(0.90));
     println!("  p95:        {:>4} cp", pct(0.95));
     println!("  p99:        {:>4} cp", pct(0.99));
-    println!("  max:        {:>4} cp", sorted.last().copied().unwrap_or(0));
+    println!(
+        "  max:        {:>4} cp",
+        sorted.last().copied().unwrap_or(0)
+    );
     let mean = sorted.iter().sum::<i32>() as f32 / sorted.len() as f32;
     println!("  mean:       {:>6.1} cp", mean);
     println!();

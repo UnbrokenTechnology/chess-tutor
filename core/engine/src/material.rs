@@ -26,7 +26,7 @@
 //! other patterns (KBNK, KPK bitbase, drawish rook endings) are still
 //! deferred.
 
-use crate::endgame::{self, ProbeResult};
+use crate::endgame::{self, EndgameSkill, ProbeResult};
 use crate::position::Position;
 use crate::types::{Color, Phase, PieceType, ScaleFactor, Score, Value};
 
@@ -101,6 +101,15 @@ pub struct MaterialEval {
 /// (a Zobrist-like hash over piece counts) in an 8192-entry table; we'll
 /// add it when profiling warrants.
 pub fn evaluate(pos: &Position) -> MaterialEval {
+    evaluate_with_skill(pos, EndgameSkill::Full)
+}
+
+/// As [`evaluate`], but consult the endgame book only up to the play
+/// engine's [`EndgameSkill`] tier (the `Override`/`Scale` results from
+/// [`endgame::probe_with_skill`]). Imbalance, phase, and the drawish
+/// factor are unaffected — only the specialist endgame knowledge is
+/// gated. Analytical callers use [`evaluate`] (full books).
+pub fn evaluate_with_skill(pos: &Position, eg_skill: EndgameSkill) -> MaterialEval {
     let mut scale_factor = [ScaleFactor::NORMAL; 2];
 
     // --- Game phase ---------------------------------------------------
@@ -122,7 +131,7 @@ pub fn evaluate(pos: &Position) -> MaterialEval {
     // patterns. Scaling overrides are *not* applied for free draw cases
     // (NONE); the existing drawish factor stays.
     let mut endgame_value = None;
-    match endgame::probe(pos) {
+    match endgame::probe_with_skill(pos, eg_skill) {
         ProbeResult::Override(v) => endgame_value = Some(v),
         ProbeResult::Scale {
             strong_side,

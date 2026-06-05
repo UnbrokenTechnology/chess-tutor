@@ -22,9 +22,7 @@ use chess_tutor_engine::engine::SearchParams;
 use chess_tutor_engine::eval::evaluate_with_trace;
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::openings::OpeningIdentification;
-use chess_tutor_engine::opponent::{
-    BookSelection, EvalMask, OpponentProfile,
-};
+use chess_tutor_engine::opponent::{BookSelection, EvalMask, OpponentProfile};
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::san;
 use chess_tutor_engine::types::{Color, Move};
@@ -34,7 +32,6 @@ use chess_tutor_ui::Session;
 
 use crate::eval_report;
 use crate::EngineColor;
-
 
 mod commands;
 mod output;
@@ -88,7 +85,12 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
         EngineColor::Both => EngineMode::Both,
         EngineColor::None => EngineMode::None,
     };
-    session.start_game(start_pos.clone(), engine_plays, cfg.depth, cfg.opponent.clone());
+    session.start_game(
+        start_pos.clone(),
+        engine_plays,
+        cfg.depth,
+        cfg.opponent.clone(),
+    );
 
     // Trap events live on Session's HistoryEntry now; the CLI just
     // walks newly-applied entries and prints whatever the engine /
@@ -116,7 +118,12 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
         cfg.opponent.seed, cfg.opponent.seed,
     )?;
     if !cfg.opponent.eval_mask.is_empty() {
-        let disabled: Vec<_> = cfg.opponent.eval_mask.disabled_iter().map(|c| c.slug()).collect();
+        let disabled: Vec<_> = cfg
+            .opponent
+            .eval_mask
+            .disabled_iter()
+            .map(|c| c.slug())
+            .collect();
         writeln!(out, "eval-mask: bot blind to {}", disabled.join(", "))?;
     }
     if !cfg.opponent.noise.is_off() {
@@ -160,7 +167,13 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
             explain_best,
         )?;
 
-        render_current(&mut out, session.position(), session.history(), &cfg, manual_flip)?;
+        render_current(
+            &mut out,
+            session.position(),
+            session.history(),
+            &cfg,
+            manual_flip,
+        )?;
         announce_opening_if_changed(&mut out, session.position(), &mut last_opening)?;
 
         if let Some(outcome) = session.game_outcome() {
@@ -205,8 +218,10 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
             "moves" => {
                 let mut scratch = session.position().clone();
                 let legal = legal_moves_vec(&mut scratch);
-                let sans: Vec<String> =
-                    legal.iter().map(|m| san::format(session.position(), *m)).collect();
+                let sans: Vec<String> = legal
+                    .iter()
+                    .map(|m| san::format(session.position(), *m))
+                    .collect();
                 writeln!(out, "{} legal moves: {}", sans.len(), sans.join(" "))?;
             }
             "eval" => {
@@ -223,16 +238,14 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                 Err(e) => writeln!(out, "{}", e)?,
             },
             "analyze" => match parse_analyze_command(arg) {
-                Ok(AnalyzeArgs { multi_pv, top_percent }) => {
+                Ok(AnalyzeArgs {
+                    multi_pv,
+                    top_percent,
+                }) => {
                     let params = analysis_params(cfg.depth, cfg.time_ms, multi_pv);
                     let pos_for_search = session.position().clone();
                     let outcome = session.run_analysis(pos_for_search, params);
-                    print_analyze_report(
-                        &mut out,
-                        session.position(),
-                        &outcome,
-                        top_percent,
-                    )?;
+                    print_analyze_report(&mut out, session.position(), &outcome, top_percent)?;
                 }
                 Err(e) => writeln!(out, "{}", e)?,
             },
@@ -248,7 +261,11 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                 Ok(None) => writeln!(
                     out,
                     "retrospective feedback is {}.",
-                    if session.auto_retrospective() { "on" } else { "off" },
+                    if session.auto_retrospective() {
+                        "on"
+                    } else {
+                        "off"
+                    },
                 )?,
                 Err(e) => writeln!(out, "{}", e)?,
             },
@@ -294,8 +311,8 @@ pub fn play_loop(cfg: PlayConfig) -> Result<()> {
                     writeln!(out, "nothing to undo.")?;
                 } else {
                     let last_san = history.last().map(|e| e.san.clone());
-                    let prev_san = (history.len() >= 2)
-                        .then(|| history[history.len() - 2].san.clone());
+                    let prev_san =
+                        (history.len() >= 2).then(|| history[history.len() - 2].san.clone());
                     let len_before = history.len();
                     session.dispatch(Event::Takeback);
                     let rewound = len_before - session.history().len();
@@ -350,6 +367,7 @@ fn analysis_params(depth: u32, time_ms: Option<u64>, multi_pv: usize) -> SearchP
         threads: 1,
         eval_mask: EvalMask::EMPTY,
         qsearch_max_plies: None,
+        endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
     }
 }
 

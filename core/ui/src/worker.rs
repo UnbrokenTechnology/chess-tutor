@@ -9,13 +9,13 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use crate::session::RepaintFn;
 use chess_tutor_engine::analysis::{analyze_position, MoveAnalysis};
 use chess_tutor_engine::engine::{Engine, SearchLine, SearchParams};
 use chess_tutor_engine::noise::{self, NoisePick};
 use chess_tutor_engine::opponent::NoiseProfile;
 use chess_tutor_engine::position::Position;
 use chess_tutor_engine::types::Move;
-use crate::session::RepaintFn;
 
 /// Best + true-second-best + the force-included user line. The second
 /// line powers the `only_good_move` signal on the verdict claim (and
@@ -116,10 +116,7 @@ pub(crate) enum WorkerResult {
 pub enum NoisePickInfo {
     /// Variety branch fired — sampled `pick_idx` from the ranked lines
     /// per the `avg_move_rank` dial.
-    Variety {
-        pick_idx: usize,
-        num_lines: usize,
-    },
+    Variety { pick_idx: usize, num_lines: usize },
     /// Blunder branch fired — picked a line that loses material inside
     /// the configured band. `pick_idx` is always `>= 1`.
     Blunder {
@@ -163,7 +160,14 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                 engine.new_game();
                 analysis_engine.new_game();
             }
-            WorkerJob::Search { mut pos, params, gen, noise, seed, ply } => {
+            WorkerJob::Search {
+                mut pos,
+                params,
+                gen,
+                noise,
+                seed,
+                ply,
+            } => {
                 let started = Instant::now();
                 let lines = engine.search(&mut pos, params);
                 let elapsed = started.elapsed();
@@ -197,14 +201,13 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                         // played the best non-winning line at `idx`.
                         let line = lines.get(idx).cloned();
                         let mv = line.as_ref().and_then(|l| l.pv.first().copied());
-                        let info = lines
-                            .first()
-                            .and_then(|top| top.pv.first().copied())
-                            .map(|engine_top| NoisePickInfo::Miss {
+                        let info = lines.first().and_then(|top| top.pv.first().copied()).map(
+                            |engine_top| NoisePickInfo::Miss {
                                 pick_idx: idx,
                                 num_lines: lines.len(),
                                 engine_top,
-                            });
+                            },
+                        );
                         (mv, line, info)
                     }
                 };
@@ -259,6 +262,8 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                     // eval, regardless of any mid-game bot mask.
                     eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                     qsearch_max_plies: None,
+                    // Analytical — full endgame books for true-best-play.
+                    endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
                 };
                 let started = Instant::now();
                 let analyses = analyze_position(&mut analysis_engine, &mut pre_move_pos, params);

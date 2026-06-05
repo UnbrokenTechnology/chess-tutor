@@ -4,17 +4,15 @@
 //! [`RootMove`], and [`MovesOutcome`] supporting types.
 
 use super::*;
+use crate::endgame::EndgameSkill;
+use crate::engine::WorkerState;
 use crate::eval::{evaluate_with_pawn_cache, evaluate_with_trace, EvalTrace};
+use crate::movepick::{ButterflyHistory, CaptureHistory, ContHistStore, CounterMoveTable};
 use crate::opponent::EvalMask;
-use crate::movepick::{
-    ButterflyHistory, CaptureHistory, ContHistStore,
-    CounterMoveTable,
-};
 use crate::pawns;
 use crate::position::{Position, StateInfo};
 use crate::tt::TranspositionTable;
 use crate::types::{Color, Move, Value};
-use crate::engine::WorkerState;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -232,6 +230,17 @@ pub(crate) struct Search<'a> {
     /// judges against true best play. Captured from `params` at `run()`.
     pub(crate) qsearch_cap: i32,
 
+    /// Endgame-book knowledge tier the bot may use for this search.
+    /// [`EndgameSkill::Full`] (the default) consults every specialist;
+    /// lower tiers withhold the harder ones so a weak bot misplays
+    /// endgames (no king-driving gradient, botched KBNK) like a human of
+    /// that level. Play-engine-only, exactly like [`eval_mask`](Self::
+    /// eval_mask) and [`qsearch_cap`](Self::qsearch_cap): analytical
+    /// searches keep `Full` so teaching judges true best play. Captured
+    /// from `params` at `run()` start; passed to every
+    /// `evaluate_with_pawn_cache` call inside the search.
+    pub(crate) eg_skill: EndgameSkill,
+
     /// SF11's `Thread::ttHitAverage` (search.cpp:699-700): a running
     /// exponential average of TT-hit success, in units of
     /// `TT_HIT_AVERAGE_RESOLUTION`. Updated once per `negamax` node
@@ -300,6 +309,7 @@ impl<'a> Search<'a> {
             root_stm: Color::White,
             eval_mask: EvalMask::EMPTY,
             qsearch_cap: QSEARCH_UNBOUNDED,
+            eg_skill: EndgameSkill::Full,
             tt_hit_average: TT_HIT_AVERAGE_INIT,
             nmp_min_ply: 0,
             nmp_color: Color::White,
@@ -354,7 +364,7 @@ impl<'a> Search<'a> {
     /// pruning decisions should go through this, but **not** values
     /// written into the TT — see `probe.save(..., raw_eval)` below.
     pub(super) fn search_eval(&mut self, pos: &Position) -> Value {
-        let raw = evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask);
+        let raw = evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask, self.eg_skill);
         Value(raw.0 + self.contempt_for_pov(pos.side_to_move()))
     }
 

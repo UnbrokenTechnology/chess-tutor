@@ -51,6 +51,7 @@ pub use trace::{EvalTrace, MaterialBreakdown, MobilityBreakdown};
 
 use crate::attacks::king_attacks;
 use crate::bitboard::{Bitboard, RANK_2, RANK_3, RANK_6, RANK_7};
+use crate::endgame::EndgameSkill;
 use crate::material::{self, MaterialEval};
 use crate::opponent::EvalMask;
 use crate::pawns::{self, PawnsEval};
@@ -170,16 +171,20 @@ impl<'a> Evaluator<'a> {
     /// by analytical / UI callers that don't share a long-lived pawn
     /// cache.
     pub(crate) fn new(pos: &'a Position) -> Evaluator<'a> {
-        Self::new_with_pawns(pos, pawns::evaluate(pos))
+        Self::new_with_pawns(pos, pawns::evaluate(pos), EndgameSkill::Full)
     }
 
     /// Build an evaluator from a precomputed [`PawnsEval`]. The hot
     /// search path uses this so a per-engine [`pawns::Table`] can short-
     /// circuit pawn evaluation across sibling and child nodes.
-    pub(crate) fn new_with_pawns(pos: &'a Position, pawns: PawnsEval) -> Evaluator<'a> {
+    pub(crate) fn new_with_pawns(
+        pos: &'a Position,
+        pawns: PawnsEval,
+        eg_skill: EndgameSkill,
+    ) -> Evaluator<'a> {
         Evaluator {
             pos,
-            material: material::evaluate(pos),
+            material: material::evaluate_with_skill(pos, eg_skill),
             pawns,
             mobility_area: [Bitboard::EMPTY; 2],
             mobility: [MobilityBreakdown::zero(); 2],
@@ -288,7 +293,13 @@ impl<'a> Evaluator<'a> {
 /// [`evaluate_with_pawn_cache`]. Always runs the unbiased eval (no
 /// [`EvalMask`]); the bot's mask is applied only inside `Search`.
 pub fn evaluate(pos: &Position) -> Value {
-    core::evaluate_inner(pos, pawns::evaluate(pos), EvalMask::EMPTY, None)
+    core::evaluate_inner(
+        pos,
+        pawns::evaluate(pos),
+        EvalMask::EMPTY,
+        EndgameSkill::Full,
+        None,
+    )
 }
 
 /// Evaluate `pos` using the supplied pawn-structure cache. The hot path
@@ -307,8 +318,9 @@ pub fn evaluate_with_pawn_cache(
     pos: &Position,
     pawn_cache: &mut pawns::Table,
     mask: EvalMask,
+    eg_skill: EndgameSkill,
 ) -> Value {
-    core::evaluate_inner(pos, pawn_cache.evaluate(pos), mask, None)
+    core::evaluate_inner(pos, pawn_cache.evaluate(pos), mask, eg_skill, None)
 }
 
 /// Evaluate `pos` and additionally capture a per-term [`EvalTrace`]. Use
@@ -319,6 +331,12 @@ pub fn evaluate_with_pawn_cache(
 /// can hold the student to it.
 pub fn evaluate_with_trace(pos: &Position) -> (Value, EvalTrace) {
     let mut trace = EvalTrace::zero();
-    let v = core::evaluate_inner(pos, pawns::evaluate(pos), EvalMask::EMPTY, Some(&mut trace));
+    let v = core::evaluate_inner(
+        pos,
+        pawns::evaluate(pos),
+        EvalMask::EMPTY,
+        EndgameSkill::Full,
+        Some(&mut trace),
+    );
     (v, trace)
 }

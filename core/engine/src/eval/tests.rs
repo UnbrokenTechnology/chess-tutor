@@ -69,7 +69,12 @@ fn empty_mask_matches_unmasked_evaluate() {
         let p = Position::from_fen(fen).expect("test FEN");
         let mut cache = pawns::Table::new();
         let bare = evaluate(&p);
-        let masked = evaluate_with_pawn_cache(&p, &mut cache, EvalMask::EMPTY);
+        let masked = evaluate_with_pawn_cache(
+            &p,
+            &mut cache,
+            EvalMask::EMPTY,
+            crate::endgame::EndgameSkill::Full,
+        );
         assert_eq!(
             bare, masked,
             "empty mask should match bare evaluate at {fen}",
@@ -85,16 +90,21 @@ fn disabling_king_safety_changes_eval_when_king_safety_was_contributing() {
     // (A null assertion would be too weak — we want to know the
     // gate actually short-circuits the += line, not just that
     // some line ran.)
-    let p = Position::from_fen(
-        "r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5",
-    )
-    .expect("test FEN");
+    let p =
+        Position::from_fen("r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5")
+            .expect("test FEN");
     let mut cache = pawns::Table::new();
-    let full = evaluate_with_pawn_cache(&p, &mut cache, EvalMask::EMPTY);
+    let full = evaluate_with_pawn_cache(
+        &p,
+        &mut cache,
+        EvalMask::EMPTY,
+        crate::endgame::EndgameSkill::Full,
+    );
     let mut mask = EvalMask::EMPTY;
     mask.disable(EvalCategory::KingSafety);
     let mut cache2 = pawns::Table::new();
-    let masked = evaluate_with_pawn_cache(&p, &mut cache2, mask);
+    let masked =
+        evaluate_with_pawn_cache(&p, &mut cache2, mask, crate::endgame::EndgameSkill::Full);
     assert_ne!(
         full, masked,
         "masking off KingSafety should change the score in a real midgame position",
@@ -103,10 +113,9 @@ fn disabling_king_safety_changes_eval_when_king_safety_was_contributing() {
 
 #[test]
 fn evaluate_is_pure() {
-    let p = Position::from_fen(
-        "r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5",
-    )
-    .unwrap();
+    let p =
+        Position::from_fen("r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5")
+            .unwrap();
     let a = evaluate(&p);
     let b = evaluate(&p);
     assert_eq!(a, b);
@@ -119,14 +128,12 @@ fn mirrored_positions_evaluate_to_symmetric_values() {
     // White's side to move evaluation of position A should equal
     // black's side to move evaluation of the colour-flipped mirror,
     // up to sign. Concrete test: Italian Game mirrored.
-    let white_pov = Position::from_fen(
-        "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3",
-    )
-    .unwrap();
-    let black_pov = Position::from_fen(
-        "rnbqk2r/pppp1ppp/5n2/2b1p3/4P3/2N2N2/PPPP1PPP/R1BQKB1R b KQkq - 2 3",
-    )
-    .unwrap();
+    let white_pov =
+        Position::from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 2 3")
+            .unwrap();
+    let black_pov =
+        Position::from_fen("rnbqk2r/pppp1ppp/5n2/2b1p3/4P3/2N2N2/PPPP1PPP/R1BQKB1R b KQkq - 2 3")
+            .unwrap();
     let v1 = evaluate(&white_pov);
     let v2 = evaluate(&black_pov);
     assert_eq!(
@@ -249,10 +256,9 @@ fn trace_material_split_sums_to_psq_score() {
 
 #[test]
 fn trace_has_phase_and_scale_factor_in_valid_ranges() {
-    let p = Position::from_fen(
-        "r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5",
-    )
-    .unwrap();
+    let p =
+        Position::from_fen("r1bqkb1r/ppp2ppp/2np1n2/4p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 0 5")
+            .unwrap();
     let (_, trace) = evaluate_with_trace(&p);
     assert!(
         (0..=128).contains(&trace.phase),

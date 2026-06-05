@@ -187,6 +187,7 @@ pub fn find_threat_defusals(
         threads: 1,
         eval_mask: crate::opponent::EvalMask::EMPTY,
         qsearch_max_plies: None,
+        endgame_skill: crate::endgame::EndgameSkill::Full,
     };
     let lines = engine.search(pos, params);
     if lines.is_empty() {

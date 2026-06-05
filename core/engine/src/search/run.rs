@@ -2,9 +2,9 @@
 //! `run_forced_slots` (force-include passes), and `aspiration_search`.
 
 use super::*;
+use crate::engine::{SearchLine, SearchParams};
 use crate::position::Position;
 use crate::types::{Color, Move, Value};
-use crate::engine::{SearchLine, SearchParams};
 use std::time::Instant;
 
 impl<'a> Search<'a> {
@@ -31,6 +31,7 @@ impl<'a> Search<'a> {
             .qsearch_max_plies
             .map(|q| q as i32)
             .unwrap_or(QSEARCH_UNBOUNDED);
+        self.eg_skill = params.endgame_skill;
         self.tt_hit_average = TT_HIT_AVERAGE_INIT;
         self.nmp_min_ply = 0;
         self.nmp_color = Color::White;
@@ -274,7 +275,12 @@ impl<'a> Search<'a> {
     // Iterative deepening + aspiration
     // ------------------------------------------------------------------
 
-    pub(super) fn aspiration_search(&mut self, pos: &mut Position, depth: i32, prev_score: Value) -> Value {
+    pub(super) fn aspiration_search(
+        &mut self,
+        pos: &mut Position,
+        depth: i32,
+        prev_score: Value,
+    ) -> Value {
         let mut alpha = -Value::INFINITE;
         let mut beta = Value::INFINITE;
         let mut delta = ASPIRATION_DELTA;

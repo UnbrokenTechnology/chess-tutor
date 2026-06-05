@@ -107,8 +107,8 @@ pub fn run(args: BenchArgs) -> Result<()> {
         if args.new_game_between_positions && i > 0 {
             engine.new_game();
         }
-        let mut pos = parse_bench_entry(entry)
-            .with_context(|| format!("parsing bench entry {}", i + 1))?;
+        let mut pos =
+            parse_bench_entry(entry).with_context(|| format!("parsing bench entry {}", i + 1))?;
         let params = params_template.clone();
 
         // Detect terminal positions (no legal moves) up front so the
@@ -118,13 +118,12 @@ pub fn run(args: BenchArgs) -> Result<()> {
         // the aggregate totals, but the human reader shouldn't have to
         // squint at the zeros to figure out why.
         if legal_moves_vec(&mut pos).is_empty() {
-            let label = if pos.in_check() { "checkmate" } else { "stalemate" };
-            println!(
-                "  {:>2}/{}  (terminal — {})",
-                i + 1,
-                positions.len(),
-                label,
-            );
+            let label = if pos.in_check() {
+                "checkmate"
+            } else {
+                "stalemate"
+            };
+            println!("  {:>2}/{}  (terminal — {})", i + 1, positions.len(), label,);
             continue;
         }
 
@@ -200,9 +199,13 @@ fn parse_position_indices(s: &str) -> Result<std::collections::HashSet<usize>> {
             continue;
         }
         if let Some((lo, hi)) = tok.split_once('-') {
-            let lo: usize = lo.trim().parse()
+            let lo: usize = lo
+                .trim()
+                .parse()
                 .map_err(|_| anyhow!("bench: bad position range {:?}", tok))?;
-            let hi: usize = hi.trim().parse()
+            let hi: usize = hi
+                .trim()
+                .parse()
                 .map_err(|_| anyhow!("bench: bad position range {:?}", tok))?;
             if lo == 0 || hi < lo {
                 return Err(anyhow!("bench: bad position range {:?}", tok));
@@ -211,7 +214,8 @@ fn parse_position_indices(s: &str) -> Result<std::collections::HashSet<usize>> {
                 out.insert(i);
             }
         } else {
-            let i: usize = tok.parse()
+            let i: usize = tok
+                .parse()
                 .map_err(|_| anyhow!("bench: bad position index {:?}", tok))?;
             if i == 0 {
                 return Err(anyhow!("bench: position indices are 1-based; got 0"));
@@ -264,6 +268,7 @@ fn build_params(limit_type: &str, limit: u64, threads: usize) -> Result<SearchPa
         threads,
         eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
         qsearch_max_plies: None,
+        endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
     };
     match limit_type {
         "depth" => {
@@ -287,4 +292,3 @@ fn build_params(limit_type: &str, limit: u64, threads: usize) -> Result<SearchPa
     }
     Ok(p)
 }
-

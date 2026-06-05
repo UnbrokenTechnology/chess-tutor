@@ -28,6 +28,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::endgame::EndgameSkill;
 use crate::openings::OpeningId;
 
 /// Per-game opponent configuration. See module-level docs.
@@ -45,6 +46,15 @@ pub struct OpponentProfile {
     /// Analytical engines never read it (full vision for true-best-play
     /// feedback), exactly like [`Self::eval_mask`].
     pub qsearch_max_plies: Option<u32>,
+    /// How much closed-form endgame knowledge the bot may use — a
+    /// difficulty-ordered skill ladder. [`EndgameSkill::Full`] (the
+    /// default) knows every technique; lower tiers withhold the harder
+    /// specialists so the bot misplays endgames like a human of that
+    /// level (shuffles a won KQ, botches KBNK, stalemates). Flows to
+    /// [`crate::engine::SearchParams::endgame_skill`]. Analytical engines
+    /// never read it (full books for true-best-play feedback), exactly
+    /// like [`Self::eval_mask`] / [`Self::qsearch_max_plies`].
+    pub endgame_skill: EndgameSkill,
     /// Seed for any pseudo-randomness this profile drives — opening
     /// line selection in Phase B, move sampling later. Logged at game
     /// start so a varied game can be replayed exactly by passing the
@@ -72,6 +82,7 @@ impl OpponentProfile {
             noise: NoiseProfile::default(),
             eval_mask: EvalMask::default(),
             qsearch_max_plies: None,
+            endgame_skill: EndgameSkill::Full,
             seed,
         }
     }
@@ -195,9 +206,7 @@ impl NoiseProfile {
     /// the play loop uses this to skip the picker entirely. The variety
     /// dial is off at its `1.0` floor (zero spread → always #1).
     pub fn is_off(&self) -> bool {
-        self.blunder_chance <= 0.0
-            && self.miss_chance <= 0.0
-            && self.avg_move_rank <= 1.0
+        self.blunder_chance <= 0.0 && self.miss_chance <= 0.0 && self.avg_move_rank <= 1.0
     }
 
     /// True when a branch that reads the ranked line list is active
@@ -306,7 +315,9 @@ impl EvalMask {
     /// Iterate the categories that are currently disabled, in
     /// [`EvalCategory::ALL`] order.
     pub fn disabled_iter(self) -> impl Iterator<Item = EvalCategory> {
-        EvalCategory::ALL.into_iter().filter(move |c| self.is_disabled(*c))
+        EvalCategory::ALL
+            .into_iter()
+            .filter(move |c| self.is_disabled(*c))
     }
 }
 
@@ -395,7 +406,11 @@ mod tests {
     fn default_noise_profile_is_off() {
         let n = NoiseProfile::default();
         assert!(n.is_off(), "default noise must be a no-op (always #1)");
-        assert_eq!(n.effective_multi_pv(), 1, "off-profile keeps the single-PV fast path");
+        assert_eq!(
+            n.effective_multi_pv(),
+            1,
+            "off-profile keeps the single-PV fast path"
+        );
     }
 
     #[test]
@@ -438,5 +453,4 @@ mod tests {
         assert!(!n.is_off());
         assert_eq!(n.effective_multi_pv(), NOISE_MULTI_PV);
     }
-
 }

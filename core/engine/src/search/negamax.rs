@@ -169,7 +169,10 @@ impl<'a> Search<'a> {
         } else {
             let parent_stat = self.stack[STACK_SENTINEL + ply - 1].stat_score;
             let bonus = -parent_stat / 512;
-            Value(evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask).0 + bonus)
+            Value(
+                evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask, self.eg_skill).0
+                    + bonus,
+            )
         };
         let static_eval = self.apply_contempt(raw_static_eval, pos);
 
@@ -255,7 +258,17 @@ impl<'a> Search<'a> {
 
         // Null-move pruning with verification — see [`try_null_move`].
         if let Some(v) = self.try_null_move(
-            pos, beta, depth, ply, in_check, is_pv, cut_node, prev, eval, static_eval, improving,
+            pos,
+            beta,
+            depth,
+            ply,
+            in_check,
+            is_pv,
+            cut_node,
+            prev,
+            eval,
+            static_eval,
+            improving,
             parent_was_null,
         ) {
             return v;
@@ -274,7 +287,16 @@ impl<'a> Search<'a> {
 
         // ProbCut pre-loop pruning phase — see [`try_probcut`].
         if let Some(v) = self.try_probcut(
-            pos, beta, depth, ply, in_check, is_pv, cut_node, static_eval, improving, tt_move,
+            pos,
+            beta,
+            depth,
+            ply,
+            in_check,
+            is_pv,
+            cut_node,
+            static_eval,
+            improving,
+            tt_move,
         ) {
             return v;
         }
@@ -282,8 +304,21 @@ impl<'a> Search<'a> {
         // Iterate the legal moves with the full SF11 ordering/pruning
         // stack — see [`negamax_moves`].
         let (best_score, best_move, raised_alpha, move_count) = match self.negamax_moves(
-            pos, alpha, beta, depth, ply, is_root, is_pv, cut_node, prev, in_check, static_eval,
-            tt_move, tt_pv, improving, cont_keys,
+            pos,
+            alpha,
+            beta,
+            depth,
+            ply,
+            is_root,
+            is_pv,
+            cut_node,
+            prev,
+            in_check,
+            static_eval,
+            tt_move,
+            tt_pv,
+            improving,
+            cont_keys,
         ) {
             MovesOutcome::Aborted => return Value::ZERO,
             MovesOutcome::Done {
