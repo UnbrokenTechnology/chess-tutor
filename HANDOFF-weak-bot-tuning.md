@@ -121,6 +121,33 @@ needed — a non-capture start is always ≤0 at two plies) captures everything:
   (classifier: +900 / 0 / −200). `miss_takes_precedence_over_blunder` moved
   to the fork fixture.
 
+### LANDED: promotions are eased too (always queen)
+`4437e73`. chess.com validation (t500 vs Martin) caught a KP-vs-K wiggle:
+the bot shuffled its king ~10 moves before pushing `g2-g1=Q`. Cause: the
+easing rescued only *captures*, so the rank lever freely demoted off a free
+*promotion* (same bug, one square over); the material classifier also
+ignored promotions, so `swing` couldn't see the queening. Fix: count
+promotion gains (promoted − pawn, + captured piece for capture-promotions)
+in the material walk, and rescue a material-gaining promotion with **P=1
+(always)** — distinct from the capture value-curve, because queening is the
+most obvious move in chess (no "didn't notice it," at any rank). Only fires
+when the engine ranked the promotion #1, so it can't force a
+stalemating/under-valued promotion. Verified e2e: t500 now plays `g2g1q`
+every seed. NOTE: rare-event change, won't materially move the ladder.
+
+### Known limit (NOT a bug): can't mate vs a mate-in-1-perfect opponent
+Same validation: after queening, t500 spent 25 moves failing to mate → 50-
+move draw. This is structural, not a noise issue. Martin *always* sees
+mate-in-1 both directions (never allows one, always takes one), so beating
+him needs a forced mate-in-N (N>1) — invisible at depth1/qsearch0 — or an
+endgame book. Sub-1000 rungs have `endgame_skill=0` (no books, `tier_for`),
+so they will **draw won endgames vs mate-seeing chess.com bots**. Decide
+later whether the weakest rungs should get Basic books (tier 1) to convert
+KQ/KR — borderline-realistic to leave them unable. Note for offset-pinning:
+this makes weak bots under-convert vs Martin specifically (vs Maia they can
+still win on opponent blunders), so the lichess→chess.com gap may look
+larger at the very bottom than pure strength implies.
+
 ### Also noted, NOT yet built — the symmetric half
 The rank lever can also **demote *to* a move that hangs your own material**
 (observed: `t400` hung its queen via a bad check-block `Qc6`). The easing
