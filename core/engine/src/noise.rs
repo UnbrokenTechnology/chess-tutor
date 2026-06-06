@@ -74,7 +74,7 @@
 use crate::engine::SearchLine;
 use crate::opponent::NoiseProfile;
 use crate::position::Position;
-use crate::types::{Color, MoveKind, PieceType, Value};
+use crate::types::{Color, Move, MoveKind, PieceType, Value};
 
 /// Outcome of [`pick`]. The branch that fired is encoded in the
 /// variant so the caller can render it accurately in diagnostic
@@ -267,8 +267,42 @@ pub fn pick(
             }
         }
     }
+
+    // Self-hang guard: the mirror of the capture rescue. A weak bot blunders,
+    // but even a weak human doesn't drop a *valuable* piece to a one-move
+    // capture — yet a qsearch-0 bot will, because it's blind to the recapture
+    // (it ranked `Qg6` #3, not seeing `hxg6`). If the chosen move hangs a
+    // piece worth `V` pawns, reject it with
+    //
+    //     P(save) = min(1, V / SELF_HANG_C)     V = pawns of material hung
+    //
+    // SELF_HANG_C = 9 anchors it to the queen: a queen (V≈9) is ALWAYS saved,
+    // a rook (5) ~56%, a minor (3) ~33%, a pawn (1) ~11% — so small material
+    // still hangs believably while the queen never does. On a save, fall back
+    // to the best line that doesn't hang something as valuable. Variety-only:
+    // the deliberate blunder branch already returned, so this never overrides
+    // an intended blunder.
+    if let Some(v) = self_hang_pawns(root, &lines[k]) {
+        let (roll, _) = roll_unit(mix(rng, SELF_HANG_SALT));
+        if roll < (v / SELF_HANG_C).min(1.0) {
+            if let Some(safe) =
+                (0..lines.len()).find(|&i| self_hang_pawns(root, &lines[i]).map_or(true, |hv| hv < v))
+            {
+                return NoisePick::Line(safe);
+            }
+        }
+    }
     NoisePick::Line(k)
 }
+
+/// Distinct SplitMix64 salt for the self-hang roll, independent of the rank
+/// sample and the capture-rescue roll.
+const SELF_HANG_SALT: u64 = 0x5A1E_6005_E1F1_2AA9;
+
+/// Self-hang curve constant (pawns of hung material per certainty). 9 anchors
+/// the queen at always-saved (9/9 = 1); lower values still hang in proportion
+/// to size. Mirror of [`CAPTURE_RESCUE_C`] for the give-away direction.
+const SELF_HANG_C: f64 = 9.0;
 
 /// Distinct SplitMix64 salt for the capture-rescue roll so it's independent
 /// of the rank sample that precedes it (same `rng`, different stream).
@@ -295,6 +329,58 @@ fn first_move_is_capture(root: &Position, line: &SearchLine) -> bool {
             MoveKind::Castling => false,
             _ => root.piece_on(mv.to()).is_some(),
         },
+    }
+}
+
+/// If `line`'s first move parks the moved piece on a square where the
+/// opponent can win it by an immediate capture (SEE-positive), return the
+/// moved piece's standard value in pawns — the material that would hang.
+/// `None` when the move is safe (no winning enemy capture on the landing
+/// square). This is what the variety branch's self-hang guard keys on: a
+/// tactically-blind (qsearch-0) bot is happy to drop its queen to a pawn
+/// because it never sees the recapture; even a weak human doesn't. Only
+/// normal moves are considered — promotions are handled by their own rescue,
+/// and castling/en-passant aren't the "moved-into-a-capture" case.
+fn self_hang_pawns(root: &Position, line: &SearchLine) -> Option<f64> {
+    let mv = *line.pv.first()?;
+    if mv.kind() != MoveKind::Normal {
+        return None;
+    }
+    let moved = root.piece_on(mv.from())?;
+    let mut scratch = root.clone();
+    scratch.do_move(mv);
+    let dest = mv.to();
+    let opp = scratch.side_to_move();
+    let opp_attackers = scratch.attackers_to(dest, scratch.occupied()) & scratch.pieces_by_color(opp);
+    if opp_attackers.is_empty() {
+        return None; // not attacked on its new square → safe
+    }
+    // Name the cheapest enemy attacker so `see_ge` resolves the optimal
+    // exchange (least-valuable attacker first, our defenders included).
+    let from = [
+        PieceType::Pawn,
+        PieceType::Knight,
+        PieceType::Bishop,
+        PieceType::Rook,
+        PieceType::Queen,
+        PieceType::King,
+    ]
+    .into_iter()
+    .find_map(|pt| {
+        let bb = opp_attackers & scratch.pieces(pt);
+        if bb.any() {
+            Some(bb.lsb())
+        } else {
+            None
+        }
+    })?;
+    // `see_ge(.., Value(1))` ⇒ capturing our piece wins the opponent material
+    // (after all recaptures), i.e. our piece is hanging. Value at risk = the
+    // moved piece (the centerpiece of the lost exchange).
+    if scratch.see_ge(Move::normal(from, dest), Value(1)) {
+        Some(standard_piece_value_cp(moved.kind()) as f64 / WIN_MATERIAL_CP as f64)
+    } else {
+        None
     }
 }
 

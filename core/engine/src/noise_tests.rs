@@ -500,6 +500,74 @@ fn capture_rescue_falls_with_rank() {
     );
 }
 
+// ---- self-hang guard ---------------------------------------------
+
+/// Position 2 from the t600 vs Martin game: Black Qb1; White Qd8/Kd5/Ph5.
+/// `Qg6` (b1-g6) drops the queen to `hxg6` — a qsearch-0 bot ranked it #3,
+/// blind to the recapture. `Qd1+` is the safe (winning) move.
+fn queen_hang_root() -> Position {
+    Position::from_fen("3Q4/5k2/8/3K3P/8/8/8/1q6 b - - 0 1").unwrap()
+}
+fn qg6_hang() -> Move {
+    Move::normal(Square::B1, Square::G6)
+}
+fn qd1_safe() -> Move {
+    Move::normal(Square::B1, Square::D1)
+}
+
+/// Black Ka8, Rd8; White Kh1, Pe4. `Rd5` drops the rook to `exd5`; `Rd7` is
+/// safe. Used to check the guard *scales* with value (a rook isn't always
+/// saved, unlike a queen).
+fn rook_hang_root() -> Position {
+    Position::from_fen("k2r4/8/8/8/4P3/8/8/7K b - - 0 1").unwrap()
+}
+
+#[test]
+fn self_hang_detects_a_queen_drop() {
+    let root = queen_hang_root();
+    let hang = mat_line(100, vec![qg6_hang()], None);
+    let safe = mat_line(2000, vec![qd1_safe()], None);
+    assert_eq!(self_hang_pawns(&root, &hang), Some(9.0), "Qg6 hangs the queen to hxg6");
+    assert_eq!(self_hang_pawns(&root, &safe), None, "Qd1+ is safe");
+}
+
+#[test]
+fn self_hang_guard_always_saves_the_queen() {
+    // A rank-4 bot samples the demoted Qg6 almost always; the guard (P=1 for a
+    // queen) must reject it every ply and fall back to the safe line.
+    let root = queen_hang_root();
+    let noise = NoiseProfile { avg_move_rank: 4.0, ..Default::default() };
+    let lines = vec![
+        mat_line(2000, vec![qd1_safe()], None),
+        mat_line(100, vec![qg6_hang()], None),
+    ];
+    for ply in 0..300 {
+        assert_eq!(
+            pick(&noise, 0xABCD, ply, &root, &lines),
+            NoisePick::Line(0),
+            "must never drop the queen to a one-move capture",
+        );
+    }
+}
+
+#[test]
+fn self_hang_scales_with_piece_value() {
+    let root = rook_hang_root();
+    let rd5 = Move::normal(Square::D8, Square::D5); // hangs the rook to exd5
+    let rd7 = Move::normal(Square::D8, Square::D7); // safe
+    assert_eq!(self_hang_pawns(&root, &mat_line(100, vec![rd5], None)), Some(5.0));
+    assert_eq!(self_hang_pawns(&root, &mat_line(2000, vec![rd7], None)), None);
+    // A rook is saved ~5/9 ≈ 56% — often, but NOT always (smaller material
+    // still hangs believably). Contrast the queen's always-save above.
+    let noise = NoiseProfile { avg_move_rank: 4.0, ..Default::default() };
+    let lines = vec![mat_line(2000, vec![rd7], None), mat_line(100, vec![rd5], None)];
+    let saved = (0..3000)
+        .filter(|&p| matches!(pick(&noise, 0xBEEF, p, &root, &lines), NoisePick::Line(0)))
+        .count() as f64
+        / 3000.0;
+    assert!((0.40..0.72).contains(&saved), "rook saved ~56%, got {saved}");
+}
+
 #[test]
 fn promotion_is_always_grabbed() {
     // Regression for the reported KP-vs-K bug: a rank-4 bot shuffled its king
