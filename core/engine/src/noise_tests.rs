@@ -102,6 +102,21 @@ fn sac_quiet() -> Move {
     Move::normal(Square::E1, Square::E2)
 }
 
+/// The user-reported KP-vs-K wiggle position: Black (us) has a pawn on g2
+/// one step from queening with the king on f3 guarding g1; White's king is
+/// far away on b3. Black to move — `g2-g1=Q` is the obvious win the engine
+/// ranks #1, but the rank lever used to demote off it for ten king-shuffle
+/// moves before finally promoting (promotions weren't material-eased).
+fn promo_root() -> Position {
+    Position::from_fen("8/8/8/8/8/1K3k2/6p1/8 b - - 0 1").unwrap()
+}
+fn g1_queen() -> Move {
+    Move::promotion(Square::G2, Square::G1, PieceType::Queen)
+}
+fn wiggle_kf2() -> Move {
+    Move::normal(Square::F3, Square::F2)
+}
+
 // ---- off / degenerate inputs -------------------------------------
 
 #[test]
@@ -245,6 +260,27 @@ fn two_ply_material_separates_grab_from_combination() {
     let sac = mat_line(300, sac_win_pv(), Some(2));
     assert_eq!(two_ply_material_cp(&sr, &sac, sr.side_to_move()), -200);
     assert_eq!(line_material_delta_cp(&sr, &sac, sr.side_to_move()), 300);
+}
+
+#[test]
+fn material_delta_counts_promotion() {
+    let root = promo_root();
+    let stm = root.side_to_move();
+    // g1=Q upgrades a pawn to a queen: +800 (900 - 100), no capture. It also
+    // reads as an obvious grab at two plies (secured at ply 0).
+    let promo = mat_line(2000, vec![g1_queen()], Some(0));
+    assert_eq!(line_material_delta_cp(&root, &promo, stm), 800);
+    assert_eq!(two_ply_material_cp(&root, &promo, stm), 800);
+}
+
+#[test]
+fn material_delta_counts_capture_promotion() {
+    // gxh8=Q captures a rook AND promotes: +500 (rook) + 800 (promo) = 1300.
+    let root = Position::from_fen("7r/6P1/8/8/8/8/8/K6k w - - 0 1").unwrap();
+    let stm = root.side_to_move();
+    let cap_promo =
+        mat_line(2000, vec![Move::promotion(Square::G7, Square::H8, PieceType::Queen)], Some(0));
+    assert_eq!(line_material_delta_cp(&root, &cap_promo, stm), 1300);
 }
 
 #[test]
@@ -462,6 +498,27 @@ fn capture_rescue_falls_with_rank() {
         rate15 > rate4 + 0.10,
         "lower rank should grab the queen more: r1.5={rate15}, r4={rate4}"
     );
+}
+
+#[test]
+fn promotion_is_always_grabbed() {
+    // Regression for the reported KP-vs-K bug: a rank-4 bot shuffled its king
+    // for ten moves instead of pushing g2-g1=Q. Unlike a capture (value-curve,
+    // missable by weak bots), a material-gaining promotion is rescued with
+    // P=1 — every bot queens every time, at any rank.
+    let root = promo_root();
+    let r4 = NoiseProfile { avg_move_rank: 4.0, ..Default::default() };
+    let lines = vec![
+        mat_line(2000, vec![g1_queen()], Some(0)),
+        mat_line(100, vec![wiggle_kf2()], Some(0)),
+    ];
+    for ply in 0..200 {
+        assert_eq!(
+            pick(&r4, 0xABCD, ply, &root, &lines),
+            NoisePick::Line(0),
+            "a free promotion must always be played, never demoted to a king move",
+        );
+    }
 }
 
 // ---- miss branch -------------------------------------------------

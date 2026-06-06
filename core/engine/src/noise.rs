@@ -216,36 +216,50 @@ pub fn pick(
     // spread is zero, so this returns #1 unchanged.
     let k = sample_rank(noise.avg_move_rank, lines.len(), rng);
 
-    // Material easing: a rank demotion off an *immediate winning capture*
-    // is a believability bug — even a weak human doesn't leave a free queen
-    // sitting there, and (validation showed) sidesteps a check instead of
-    // taking the checker, or stops a rook shy of a capture. If #0's first
-    // move grabs material the demoted move doesn't, the bot still plays #0
-    // with a probability that RISES with the material at stake (queen >
-    // rook > minor) and FALLS with `avg_move_rank` (a weaker bot misses
-    // more), capped at certainty:
+    // Material easing: a rank demotion off an *obvious* material gain — an
+    // immediate winning capture OR a pawn promotion — is a believability bug.
+    // Even a weak human doesn't leave a free queen sitting (capture; validation
+    // showed bots sidestepping a check instead of taking the checker, or
+    // stopping a rook shy of a capture), and *every* human queens a pawn one
+    // step from promoting (validation showed a bot shuffling its king for ten
+    // moves before pushing g2-g1=Q). #0 is the engine's best move; when its
+    // first move grabs material the demoted move doesn't (`swing > 0`), keep #0
+    // with a probability set by the *kind* of gain:
     //
-    //     P(grab) = min(1, V / (C·(rank − 1)))     V = pawns of material secured
+    //   * promotion → ALWAYS (P = 1). Queening is the most obvious move in
+    //     chess — there's no "didn't notice it." We only reach here when the
+    //     engine already ranked the promotion #1, so this can't force a
+    //     stalemating/under-valued promotion the search rejected.
+    //   * capture → P(grab) = min(1, V / (C·(rank − 1))), rising with the
+    //     material V (queen > rook > minor) and falling with `avg_move_rank` (a
+    //     weaker bot misses more). C = [`CAPTURE_RESCUE_C`] = 6: a queen (V≈9)
+    //     at rank 2 is always grabbed, a minor (V≈3) at rank 2 ~50%; rank 1
+    //     always grabs. Weaker bots still miss high-value pieces sometimes.
     //
-    // C = [`CAPTURE_RESCUE_C`] = 6 sets both anchors: a queen (V≈9) at rank
-    // 2 is ALWAYS grabbed (9/6 caps at 1), a minor (V≈3) at rank 2 ~50%;
-    // `rank == 1` always grabs. Weaker bots (higher rank) still miss
-    // high-value pieces sometimes. Only *immediate* captures are rescued; a
-    // subtle quiet best-move (a defensive-only-move, a deep tactic) is still
-    // demotable, keeping the "looks-like-zugzwang misjudgment" feel. So
-    // hanging material comes only from tactical blindness (qsearch) or the
-    // deliberate blunder lever, never incidentally from rank.
-    if k > 0 && !deltas.is_empty() && first_move_is_capture(root, &lines[0]) {
+    // Only *immediate* gains are rescued; a subtle quiet best-move (a
+    // defensive-only-move, a deep tactic) stays demotable, keeping the
+    // "looks-like-zugzwang misjudgment" feel. So hanging material comes only
+    // from tactical blindness (qsearch) or the deliberate blunder lever, never
+    // incidentally from rank — and a passed pawn always queens.
+    if k > 0 && !deltas.is_empty() {
         let swing = deltas[0] - deltas[k]; // material #0 secures over the demoted move
-        if swing > 0 {
-            // Deltas are standard material-cp (pawn = WIN_MATERIAL_CP = 100),
-            // so dividing gives the swing in pawns (queen ≈ 9).
-            let v = swing as f64 / WIN_MATERIAL_CP as f64;
-            let r = noise.avg_move_rank as f64;
-            let p_grab = if r <= 1.0 {
+        let is_promo = matches!(
+            lines[0].pv.first().map(|m| m.kind()),
+            Some(MoveKind::Promotion)
+        );
+        if swing > 0 && (is_promo || first_move_is_capture(root, &lines[0])) {
+            let p_grab = if is_promo {
                 1.0
             } else {
-                (v / (CAPTURE_RESCUE_C * (r - 1.0))).min(1.0)
+                // Deltas are standard material-cp (pawn = WIN_MATERIAL_CP =
+                // 100), so dividing gives the swing in pawns (queen ≈ 9).
+                let v = swing as f64 / WIN_MATERIAL_CP as f64;
+                let r = noise.avg_move_rank as f64;
+                if r <= 1.0 {
+                    1.0
+                } else {
+                    (v / (CAPTURE_RESCUE_C * (r - 1.0))).min(1.0)
+                }
             };
             let (roll, _) = roll_unit(mix(rng, CAPTURE_RESCUE_SALT));
             if roll < p_grab {
@@ -345,19 +359,30 @@ fn material_delta_through_ply(
     let mut scratch = root.clone();
     let mut net = 0i32;
     for (ply, &mv) in line.pv.iter().enumerate() {
-        // Resolve the capture before applying the move.
+        // Sign material by who is moving (read before the move is applied).
+        let mover = scratch
+            .piece_on(mv.from())
+            .map(|p| p.color())
+            .unwrap_or(root_stm);
+        let sign = if mover == root_stm { 1 } else { -1 };
+        // Capture: value of the piece on the destination (en passant takes a
+        // pawn off an empty-looking square; castling never captures).
         let captured: Option<PieceType> = match mv.kind() {
             MoveKind::Castling => None,
             MoveKind::EnPassant => Some(PieceType::Pawn),
             _ => scratch.piece_on(mv.to()).map(|p| p.kind()),
         };
         if let Some(pt) = captured {
-            let captor = scratch
-                .piece_on(mv.from())
-                .map(|p| p.color())
-                .unwrap_or(root_stm);
-            let sign = if captor == root_stm { 1 } else { -1 };
             net += sign * standard_piece_value_cp(pt);
+        }
+        // Promotion upgrades the pawn — count the gain (promoted piece minus
+        // the pawn it replaces) so a queening line reads as the material win
+        // it is. Without this the classifier saw a promotion as neutral, and
+        // the easing below couldn't tell a free queening from a quiet move.
+        if mv.kind() == MoveKind::Promotion {
+            net += sign
+                * (standard_piece_value_cp(mv.promoted_to())
+                    - standard_piece_value_cp(PieceType::Pawn));
         }
         scratch.do_move(mv);
         if ply >= last_ply {
