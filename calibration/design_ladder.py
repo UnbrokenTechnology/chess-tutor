@@ -50,16 +50,22 @@ from harness.rate import rate
 #: measured rank sweep — we ASSUME the sighted slope (a touch steeper for
 #: full qsearch); the run tells us whether that holds.
 RANK_CURVES: dict[str, list[tuple[float, int]]] = {
-    "d1-q0": [(1.0, 976), (1.5, 760), (2.0, 512), (3.0, 268), (4.0, -29)],
-    "d1-q1": [(1.0, 1637), (1.5, 1358), (2.0, 1089)],
-    "d4": [(1.0, 1996), (2.0, 1376)],  # slope -620/unit (extrapolated guess)
+    # Re-measured POST material-easing (build_ladder, 2026-06-05) — the
+    # full r1..r7 sweep on the blind base; high rank is now sane-but-weak
+    # so the floor reaches r7 ≈ -113.
+    "d1-q0": [(1.0, 942), (1.5, 838), (2.0, 674), (3.0, 489),
+              (4.0, 262), (5.0, 128), (6.0, 15), (7.0, -113)],
+    "d1-q1": [(1.0, 1606), (1.5, 1381), (2.0, 1151), (3.0, 858)],
+    # d4 rank still unmeasured — slope guess, less steep than pre-easing
+    # (~-1090/unit) because the easing softens rank. The run measures it.
+    "d4": [(1.0, 1958), (2.0, 1258)],  # slope -700/unit (guess)
 }
 
 #: base name -> (BotConfig dial kwargs at rank 1, full-strength Elo).
 BASES: dict[str, tuple[dict, int]] = {
-    "d1-q0": (dict(depth=1, qsearch_depth=0), 976),
-    "d1-q1": (dict(depth=1, qsearch_depth=1), 1637),
-    "d4": (dict(depth=4), 1996),
+    "d1-q0": (dict(depth=1, qsearch_depth=0), 942),
+    "d1-q1": (dict(depth=1, qsearch_depth=1), 1606),
+    "d4": (dict(depth=4), 1958),
 }
 #: Order to try bases (weakest first); pick the first whose full-strength
 #: Elo clears the target by `BASE_MARGIN` (room for rank + noise to weaken).

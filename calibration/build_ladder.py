@@ -71,42 +71,38 @@ from harness.rate import rate
 # ~1565-1855) and sparsely up high.
 # ---------------------------------------------------------------------------
 CANDIDATES: list[BotConfig] = [
-    # --- rank-response curve on the BLIND base (d1-q0) -------------------
-    # r1..r4 + the new r1.5, so the fit can see HOW rank scales between 1
-    # and 2 (the steepest, most useful stretch). If r1->r2 is one big cliff
-    # the equation can only say "set r to 1 or 2"; the curve shape (linear?
-    # quadratic?) is what lets us fine-tune. (round-1 Elos in comments)
-    BotConfig("d1-q0-r4-m40", depth=1, qsearch_depth=0, avg_move_rank=4.0, miss_chance=0.4),  # -72 floor
-    BotConfig("d1-q0-r4", depth=1, qsearch_depth=0, avg_move_rank=4.0),    # 43
-    BotConfig("d1-q0-r3", depth=1, qsearch_depth=0, avg_move_rank=3.0),    # 271
-    BotConfig("d1-q0-r2", depth=1, qsearch_depth=0, avg_move_rank=2.0),    # 490  "Martin-ish" (lichess)
-    BotConfig("d1-q0-r1.5", depth=1, qsearch_depth=0, avg_move_rank=1.5),  # NEW — between r1 & r2
-    BotConfig("d1-q0", depth=1, qsearch_depth=0),                          # 852  (r1 baseline)
+    # --- FULL rank sweep on the BLIND base (d1-q0): r1..r7 --------------
+    # Post material-easing, high rank is "plays the Nth-best SANE move"
+    # (no incidental hangs), so the floor reopened to r5/r6/r7 — sweep the
+    # whole range to re-measure the (now-easing-shaped) rank curve and find
+    # the new basement. (round-2 PRE-easing Elos in comments, for contrast.)
+    BotConfig("d1-q0", depth=1, qsearch_depth=0),                         # was 976 (r1 baseline)
+    BotConfig("d1-q0-r1.5", depth=1, qsearch_depth=0, avg_move_rank=1.5),  # was 760
+    BotConfig("d1-q0-r2", depth=1, qsearch_depth=0, avg_move_rank=2.0),   # was 512
+    BotConfig("d1-q0-r3", depth=1, qsearch_depth=0, avg_move_rank=3.0),   # was 268
+    BotConfig("d1-q0-r4", depth=1, qsearch_depth=0, avg_move_rank=4.0),   # was -29
+    BotConfig("d1-q0-r5", depth=1, qsearch_depth=0, avg_move_rank=5.0),   # NEW (reopened)
+    BotConfig("d1-q0-r6", depth=1, qsearch_depth=0, avg_move_rank=6.0),   # NEW
+    BotConfig("d1-q0-r7", depth=1, qsearch_depth=0, avg_move_rank=7.0),   # NEW basement
 
-    # --- single-lever study on the SEES-FIRST-CAPTURE base (d1-q1) -------
-    # One point each for rank / miss / blunder / combined, all off the same
-    # ~1612 baseline so the deltas are clean (rank vs miss vs blunder on
-    # identical footing). miss reads more human than blunder; r1.5 here
-    # checks whether the rank curve shape transfers across bases. These
-    # also FILL the 850->1590 gap that rank overshot last run.
-    BotConfig("d1-q1", depth=1, qsearch_depth=1),                         # 1612 (r1 baseline)
-    BotConfig("d1-q1-r1.5", depth=1, qsearch_depth=1, avg_move_rank=1.5),  # NEW
-    BotConfig("d1-q1-r2", depth=1, qsearch_depth=1, avg_move_rank=2.0),   # 920 (rank overshoots)
-    BotConfig("d1-q1-m10", depth=1, qsearch_depth=1, miss_chance=0.1),    # NEW — gentle miss
-    BotConfig("d1-q1-m30", depth=1, qsearch_depth=1, miss_chance=0.3),    # NEW
-    BotConfig("d1-q1-b10", depth=1, qsearch_depth=1, blunder_chance=0.1),  # NEW — gentle blunder
-    BotConfig("d1-q1-b30", depth=1, qsearch_depth=1, blunder_chance=0.3),  # NEW
-    BotConfig("d1-q1-m20-b20", depth=1, qsearch_depth=1, miss_chance=0.2, blunder_chance=0.2),  # NEW — combined
+    # --- rank + miss/blunder panel on the SIGHTED base (d1-q1 ~1637) ----
+    # Single-lever deltas off one baseline; re-measured so the post-easing
+    # rank slope (steeper on a sighted base) and the miss/blunder slopes are
+    # current.
+    BotConfig("d1-q1", depth=1, qsearch_depth=1),                        # r1 baseline
+    BotConfig("d1-q1-r1.5", depth=1, qsearch_depth=1, avg_move_rank=1.5),
+    BotConfig("d1-q1-r2", depth=1, qsearch_depth=1, avg_move_rank=2.0),
+    BotConfig("d1-q1-r3", depth=1, qsearch_depth=1, avg_move_rank=3.0),  # NEW (extend)
+    BotConfig("d1-q1-m10", depth=1, qsearch_depth=1, miss_chance=0.1),
+    BotConfig("d1-q1-m30", depth=1, qsearch_depth=1, miss_chance=0.3),
+    BotConfig("d1-q1-b10", depth=1, qsearch_depth=1, blunder_chance=0.1),
+    BotConfig("d1-q1-b30", depth=1, qsearch_depth=1, blunder_chance=0.3),
 
-    # --- clean depth-2 / blind baseline (a distinct lever from the d1 rungs) ---
-    BotConfig("d2-q0", depth=2, qsearch_depth=0),                         # 1589
-
-    # --- upper ceiling ladder (above the Maia band ~1800) ---------------
-    # depth > 6 is ~perfect (beats every Maia) so we stop at d6; d5 fills
-    # the 1998->2497 gap so the strongest grid configs aren't all-win.
-    BotConfig("d4", depth=4),                                             # 1998
-    BotConfig("d5", depth=5),                                             # NEW — ~2250
-    BotConfig("d6", depth=6),                                             # 2497 ceiling
+    # --- depth-2 baseline + upper ceiling ladder -----------------------
+    BotConfig("d2-q0", depth=2, qsearch_depth=0),
+    BotConfig("d4", depth=4),
+    BotConfig("d5", depth=5),
+    BotConfig("d6", depth=6),
 ]
 
 #: Flag adjacent rated rungs farther apart than this (Elo) — a gap a config
