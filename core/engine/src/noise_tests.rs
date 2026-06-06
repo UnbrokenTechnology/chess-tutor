@@ -326,6 +326,57 @@ fn variety_allowed_for_mate_beyond_guarantee() {
     assert!(saw_demotion, "variety never demoted off an unprotected mate-in-5");
 }
 
+// ---- material easing (capture rescue) ----------------------------
+
+/// Fraction of plies on which `pick` returns the engine's best line.
+fn grab_rate(noise: &NoiseProfile, root: &Position, lines: &[SearchLine], plies: u64) -> f64 {
+    let hits = (0..plies)
+        .filter(|&p| matches!(pick(noise, 0xABCD, p, root, lines), NoisePick::Line(0)))
+        .count();
+    hits as f64 / plies as f64
+}
+
+#[test]
+fn capture_rescue_grabs_hanging_material() {
+    // #0 grabs the hanging black queen (Qxd5); #1 is a quiet king move that
+    // throws it away. Even a rank-4 bot — which without the easing almost
+    // never plays #0 — should still grab the queen a meaningful share of the
+    // time, whereas a *non-capture* best move gets no such rescue.
+    let root = mat_root();
+    let r4 = NoiseProfile { avg_move_rank: 4.0, ..Default::default() };
+    let capture = vec![
+        mat_line(2000, vec![qxd5()], Some(0)),
+        mat_line(100, vec![kf1()], Some(0)),
+    ];
+    let quiet = vec![
+        mat_line(2000, vec![kf1()], Some(0)),
+        mat_line(100, vec![Move::normal(Square::E3, Square::E4)], Some(0)),
+    ];
+    let cap = grab_rate(&r4, &root, &capture, 2000);
+    let non = grab_rate(&r4, &root, &quiet, 2000);
+    assert!(cap > 0.15, "rank-4 bot should still grab a hanging queen often, got {cap}");
+    assert!(non < 0.10, "a non-capture best move gets no rescue, got {non}");
+    assert!(cap > non + 0.10, "capture {cap} should beat non-capture {non} clearly");
+}
+
+#[test]
+fn capture_rescue_falls_with_rank() {
+    // The weaker (higher-rank) bot misses the free queen more often.
+    let root = mat_root();
+    let lines = vec![
+        mat_line(2000, vec![qxd5()], Some(0)),
+        mat_line(100, vec![kf1()], Some(0)),
+    ];
+    let r15 = NoiseProfile { avg_move_rank: 1.5, ..Default::default() };
+    let r4 = NoiseProfile { avg_move_rank: 4.0, ..Default::default() };
+    let rate15 = grab_rate(&r15, &root, &lines, 2000);
+    let rate4 = grab_rate(&r4, &root, &lines, 2000);
+    assert!(
+        rate15 > rate4 + 0.10,
+        "lower rank should grab the queen more: r1.5={rate15}, r4={rate4}"
+    );
+}
+
 // ---- miss branch -------------------------------------------------
 
 #[test]

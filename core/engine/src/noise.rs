@@ -121,8 +121,11 @@ pub fn pick(
     let mate_guard = !lines.is_empty() && mate_guarded(top_score, noise.guaranteed_mate_in);
 
     // Per-line settled material outcome (material-cp, side-to-move POV),
-    // computed only when a branch that needs it is enabled.
-    let needs_material = noise.miss_chance > 0.0 || noise.blunder_chance > 0.0;
+    // computed when a branch that needs it is enabled — miss/blunder, or
+    // the variety branch's capture-rescue (which needs the per-line deltas
+    // to size the material a demotion would throw away).
+    let needs_material =
+        noise.miss_chance > 0.0 || noise.blunder_chance > 0.0 || noise.avg_move_rank > 1.0;
     let deltas: Vec<i32> = if needs_material && !lines.is_empty() {
         let root_stm = root.side_to_move();
         lines
@@ -189,7 +192,58 @@ pub fn pick(
     // Variety branch: sample which rank to play from a normal
     // distribution centred on `avg_move_rank`. At the 1.0 floor the
     // spread is zero, so this returns #1 unchanged.
-    NoisePick::Line(sample_rank(noise.avg_move_rank, lines.len(), rng))
+    let k = sample_rank(noise.avg_move_rank, lines.len(), rng);
+
+    // Material easing: a rank demotion off an *immediate winning capture*
+    // is a believability bug — even a weak human doesn't leave a free queen
+    // sitting next to a rook. If #0's first move grabs material the demoted
+    // move doesn't, the bot still plays #0 with a probability that RISES
+    // with the material at stake (queen > rook > minor) and FALLS with
+    // `avg_move_rank` (a weaker bot misses more):
+    //
+    //     P(grab) = V / (V + 9·(rank − 1))     V = pawns of material secured
+    //
+    // The `9` is the queen's value, chosen so the anchor is exact — a queen
+    // (V≈9) at rank 2.0 is grabbed ~50% — and so `rank == 1` always grabs
+    // (P = 1). Only *immediate* captures are rescued; a subtle quiet
+    // best-move (a defensive-only-move, a deep tactic) is still demotable,
+    // which keeps the wanted "looks-like-zugzwang misjudgment" feel. With
+    // this, hanging material comes only from tactical blindness (qsearch)
+    // or the deliberate blunder lever, never incidentally from rank.
+    if k > 0 && !deltas.is_empty() && first_move_is_capture(root, &lines[0]) {
+        let swing = deltas[0] - deltas[k]; // material #0 secures over the demoted move
+        if swing > 0 {
+            // Deltas are standard material-cp (pawn = WIN_MATERIAL_CP = 100),
+            // so dividing gives the swing in pawns (queen ≈ 9).
+            let v = swing as f64 / WIN_MATERIAL_CP as f64;
+            let r = noise.avg_move_rank as f64;
+            let p_grab = v / (v + 9.0 * (r - 1.0));
+            let (roll, _) = roll_unit(mix(rng, CAPTURE_RESCUE_SALT));
+            if roll < p_grab {
+                return NoisePick::Line(0);
+            }
+        }
+    }
+    NoisePick::Line(k)
+}
+
+/// Distinct SplitMix64 salt for the capture-rescue roll so it's independent
+/// of the rank sample that precedes it (same `rng`, different stream).
+const CAPTURE_RESCUE_SALT: u64 = 0x5EED_CA97_0DE5_A1A5;
+
+/// True iff the line's first move is a capture (including en passant). The
+/// material easing and the obviousness it models key on *immediate*
+/// captures — "grab the piece in front of you" — as distinct from a
+/// multi-move tactic, which stays missable.
+fn first_move_is_capture(root: &Position, line: &SearchLine) -> bool {
+    match line.pv.first() {
+        None => false,
+        Some(mv) => match mv.kind() {
+            MoveKind::EnPassant => true,
+            MoveKind::Castling => false,
+            _ => root.piece_on(mv.to()).is_some(),
+        },
+    }
 }
 
 /// Standard "point value" of a piece in material-centipawns (pawn =
