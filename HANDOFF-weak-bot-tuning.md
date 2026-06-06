@@ -15,17 +15,18 @@ internals), [`HANDOFF-endgame-skill.md`](HANDOFF-endgame-skill.md)
 and fit an invertible model. Two intertwined work streams this session:
 
 1. **Believable weak bots** — the levers must produce play that *looks*
-   like a weak human, not a strong engine that throws games. Several
-   engine fixes landed; one (miss-gating) is **pending**.
+   like a weak human, not a strong engine that throws games. All the
+   engine fixes including miss-gating have now **landed**.
 2. **A dense, Maia-anchored seed ladder** — built via `build_ladder.py`
    (measure knobs) → `design_ladder.py` (design a rung per target ELO from
    the measured linear models). A measured ladder exists; it needs **one
-   more re-measure** after the pending believability fix.
+   more re-measure** now that the believability fixes are all in.
 
-**Immediate next step:** implement the **miss-gating** fix (below), then
-**re-run `build_ladder` + `design_ladder`** (the easing changes shifted all
-noisy-bot ELOs up), then continue chess.com hand-validation → pin the
-lichess→chess.com offset → lock the seed pool into `pools.py`.
+**Immediate next step:** **re-run `build_ladder` + `design_ladder`** (the
+easing + miss-gating changes shifted all noisy-bot ELOs up — miss is now
+weaker per % since it no longer declines immediate captures), then continue
+chess.com hand-validation → pin the lichess→chess.com offset → lock the
+seed pool into `pools.py`.
 
 ---
 
@@ -92,25 +93,33 @@ lever, never incidentally from rank.**
 basement rungs (high rank is now sane-but-weak). → **must re-measure the
 ladder**, and likely **raise the GUI rank cap above 4** afterward.
 
-### PENDING: gate `miss` the same way (+ the 2-ply edge case)
-`miss` *also* declines immediate captures (it fires before variety), so a
-`t400` with 26% miss still sidesteps ~¼ of capture moments regardless of
-the easing. Agreed definition:
+### LANDED: gate `miss` on 2-ply material (obvious grab vs combination)
+`miss` used to *also* decline immediate captures (it fires before variety),
+so a `t400` with 26% miss sidestepped ~¼ of capture moments regardless of
+the easing. **Fix shipped in `noise.rs::pick`:** the miss branch now also
+requires **`two_ply_material_cp(PV[0]) < WIN_MATERIAL_CP`** — i.e. the best
+line is **not already up a pawn-or-more after its first move + the
+opponent's reply**. This single test (no `first_move_is_capture` disjunction
+needed — a non-capture start is always ≤0 at two plies) captures everything:
+- **Obvious grab → exempt** (handled by the value-easing): a hanging-piece
+  capture (`Qxd5`, +900 at 2 plies), an even trade settled in hand.
+- **Combination → still missable:** a quiet first move (a fork, 2-ply 0); an
+  even trade that wins on the follow-up (a discovered attack, 2-ply 0); a
+  real **sacrifice** (Damiano-style `Nxe5 …dxe5`, 2-ply *negative*, material
+  returns later). The user's catch — a capture-first PV that's really a
+  tactic — is now handled, not deferred. (Note: a *deep* quiet sac whose
+  material only returns past ply 2 still reads as a grab; that's the known
+  limit of a 2-ply read, acceptable — those bots search deep anyway.)
 - **`miss` = missed a *combination you had to see*, never a piece sitting
-  in front of you.** Gate it on **`!first_move_is_capture(PV[0])`** so it
-  only declines material wins where the material comes from a *sequence*.
-  Immediate captures are handled solely by the value-easing.
-- **Edge case (the user's catch):** a capture `PV[0]` can still be a real
-  sacrifice (Damiano-style: NxP, they recapture, you win a rook later) —
-  starts with a capture but is a *tactic*. The clean discriminator is
-  **2-ply material**: up after `PV[0]`+reply → obvious grab (easing); down
-  there but settled-line wins → sacrifice/tactic (still missable). **At
-  `d1-q0`/qdepth0 we can't see 2 plies**, so the simple gate is fine for
-  the floor bots; the 2-ply refinement is for deeper bots — implement the
-  simple gate first, layer 2-ply later.
-- The test `miss_declines_a_material_winning_best_move` uses an immediate
-  capture (`Qxd5`); rewrite it to a **non-capture (sequence) win** before
-  gating.
+  in front of you.** ← now enforced for both quiet-start AND capture-start
+  combinations.
+- **Tests:** `miss_declines_a_material_winning_best_move` →
+  `miss_declines_a_combination_winning_best_move` (knight-fork win on new
+  `fork_root()`); added `miss_does_not_decline_an_immediate_capture` (locks
+  the exemption), `miss_declines_a_capture_first_sacrifice` (new `sac_root()`
+  Damiano fixture), and `two_ply_material_separates_grab_from_combination`
+  (classifier: +900 / 0 / −200). `miss_takes_precedence_over_blunder` moved
+  to the fork fixture.
 
 ### Also noted, NOT yet built — the symmetric half
 The rank lever can also **demote *to* a move that hangs your own material**
@@ -198,9 +207,10 @@ table is regenerable from `design_ladder` + the results CSV.
 
 ## NEXT STEPS (in order)
 
-1. **Implement miss-gating** (`!first_move_is_capture`) + rewrite its test
-   to a sequence-tactic. (2-ply refinement + the symmetric self-hang
-   filter are later.)
+1. ~~**Implement miss-gating** (2-ply material discriminator) + rewrite its
+   tests.~~ **DONE** (this session) — *including* the 2-ply sacrifice
+   refinement. Only the symmetric self-hang filter ("don't demote *into* a
+   ≥minor self-hang") remains deferred.
 2. **Re-run `build_ladder`** (re-measure knobs post-easing+miss) →
    **recompute `design_ladder` models** → **re-run `design_ladder`**.
    (Add a measured `d4` rank sweep to fix the upper band.)

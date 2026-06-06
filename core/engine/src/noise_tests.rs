@@ -53,6 +53,55 @@ fn hang_pawn_pv() -> Vec<Move> {
     vec![Move::normal(Square::E3, Square::E4), Move::normal(Square::D5, Square::E4)]
 }
 
+/// Position with a *non-capture* material win for the miss-branch tests:
+/// the win comes from a knight fork, so its first move is quiet. White:
+/// Ke1, Ne4, Pb2. Black: Ke8, Qd5. `Nf6+` forks king and queen; after the
+/// forced king move `Nxd5` wins the queen — a win that opens with a quiet
+/// move, which the gated miss branch may decline. `b2-b3` hangs the b-pawn
+/// to `…Qxb3` (a one-pawn, in-band slip). `Ke2` is quiet and neutral.
+fn fork_root() -> Position {
+    Position::from_fen("4k3/8/8/3q4/4N3/8/1P6/4K3 w - - 0 1").unwrap()
+}
+// The non-capture queen-winning fork: Nf6+, Kf8, Nxd5 (capture at ply 2).
+fn fork_win_pv() -> Vec<Move> {
+    vec![
+        Move::normal(Square::E4, Square::F6),
+        Move::normal(Square::E8, Square::F8),
+        Move::normal(Square::F6, Square::D5),
+    ]
+}
+// White hangs the b-pawn: b2-b3 then …Qxb3.
+fn fork_hang_pawn_pv() -> Vec<Move> {
+    vec![Move::normal(Square::B2, Square::B3), Move::normal(Square::D5, Square::B3)]
+}
+// Quiet, material-neutral white king move on `fork_root`.
+fn fork_quiet() -> Move {
+    Move::normal(Square::E1, Square::E2)
+}
+
+/// Position with a *capture-first sacrifice* — the case the simple
+/// `!first_move_is_capture` gate would have mis-classified as an obvious
+/// grab. White: Ke1, Ng4, Bb3. Black: Ke8, Rf7, Pd6, Pe5. White's winning
+/// line opens with the capture `Nxe5` (+1), is recaptured `…dxe5` (−3, so
+/// **down 2 pawns after two plies**), then `Bxf7` wins the rook (+5) — net
+/// +3 at the settled end. First move is a capture, yet it's a combination,
+/// so the 2-ply read keeps it missable.
+fn sac_root() -> Position {
+    Position::from_fen("4k3/5r2/3p4/4p3/6N1/1B6/8/4K3 w - - 0 1").unwrap()
+}
+// Nxe5 (+1), …dxe5 (−3), Bxf7 (+5): capture-first, down at 2 plies, wins.
+fn sac_win_pv() -> Vec<Move> {
+    vec![
+        Move::normal(Square::G4, Square::E5),
+        Move::normal(Square::D6, Square::E5),
+        Move::normal(Square::B3, Square::F7),
+    ]
+}
+// Quiet, material-neutral white king move on `sac_root`.
+fn sac_quiet() -> Move {
+    Move::normal(Square::E1, Square::E2)
+}
+
 // ---- off / degenerate inputs -------------------------------------
 
 #[test]
@@ -173,6 +222,29 @@ fn line_material_delta_reads_pv_outcome() {
     // Empty PV is materially neutral.
     let empty = mat_line(0, vec![], None);
     assert_eq!(line_material_delta_cp(&root, &empty, stm), 0);
+}
+
+#[test]
+fn two_ply_material_separates_grab_from_combination() {
+    // Obvious grab: an immediate hanging-queen capture is up +900 at 2 plies
+    // (the single-move PV stops at ply 0).
+    let mr = mat_root();
+    let grab = mat_line(900, vec![qxd5()], None);
+    assert_eq!(two_ply_material_cp(&mr, &grab, mr.side_to_move()), 900);
+
+    // Combination (quiet first move): a knight fork is materially flat after
+    // two plies (Nf6+, …Kf8 — no captures yet) though it settles +900.
+    let fr = fork_root();
+    let fork = mat_line(900, fork_win_pv(), Some(2));
+    assert_eq!(two_ply_material_cp(&fr, &fork, fr.side_to_move()), 0);
+    assert_eq!(line_material_delta_cp(&fr, &fork, fr.side_to_move()), 900);
+
+    // Combination (sacrifice): capture-first but down −200 after the
+    // recapture, even though the settled line wins +300.
+    let sr = sac_root();
+    let sac = mat_line(300, sac_win_pv(), Some(2));
+    assert_eq!(two_ply_material_cp(&sr, &sac, sr.side_to_move()), -200);
+    assert_eq!(line_material_delta_cp(&sr, &sac, sr.side_to_move()), 300);
 }
 
 #[test]
@@ -395,20 +467,65 @@ fn capture_rescue_falls_with_rank() {
 // ---- miss branch -------------------------------------------------
 
 #[test]
-fn miss_declines_a_material_winning_best_move() {
+fn miss_declines_a_combination_winning_best_move() {
+    let noise = NoiseProfile {
+        miss_chance: 1.0,
+        guaranteed_mate_in: 0,
+        ..Default::default()
+    };
+    let root = fork_root();
+    // #1 wins the queen by a knight fork (+900) whose first move is the quiet
+    // Nf6+ — a combination you had to see; #2 is a quiet, non-winning move.
+    let lines = vec![mat_line(900, fork_win_pv(), Some(2)), mat_line(0, vec![fork_quiet()], None)];
+    for ply in 0..30 {
+        assert_eq!(
+            pick(&noise, 0x1234, ply, &root, &lines),
+            NoisePick::Miss(1),
+            "miss must decline the combination win and play the best non-winning line",
+        );
+    }
+}
+
+#[test]
+fn miss_does_not_decline_an_immediate_capture() {
+    // The gate: a winning move that just grabs a hanging piece (Qxd5) is an
+    // *obvious* capture — handled by the variety branch's material easing, not
+    // the miss branch. Miss only declines wins you had to calculate, so a
+    // pure-capture best move is never turned into a Miss, even at 100% miss.
     let noise = NoiseProfile {
         miss_chance: 1.0,
         guaranteed_mate_in: 0,
         ..Default::default()
     };
     let root = mat_root();
-    // #1 wins the queen (+900); #2 is a quiet, non-winning move.
     let lines = vec![mat_line(900, vec![qxd5()], None), mat_line(0, vec![kf1()], None)];
+    for ply in 0..30 {
+        assert!(
+            !matches!(pick(&noise, 0x1234, ply, &root, &lines), NoisePick::Miss(_)),
+            "an immediate capture must not be declined by the miss branch",
+        );
+    }
+}
+
+#[test]
+fn miss_declines_a_capture_first_sacrifice() {
+    // The 2-ply refinement: a win whose first move *is* a capture but which
+    // is **down material after two plies** (Nxe5, …dxe5) is a sacrificial
+    // combination, not an obvious grab — the simple `!first_move_is_capture`
+    // gate would have wrongly exempted it. It must stay missable.
+    let noise = NoiseProfile {
+        miss_chance: 1.0,
+        guaranteed_mate_in: 0,
+        ..Default::default()
+    };
+    let root = sac_root();
+    // #1 is the +3 sacrifice (settled), #2 a quiet, non-winning move.
+    let lines = vec![mat_line(300, sac_win_pv(), Some(2)), mat_line(0, vec![sac_quiet()], None)];
     for ply in 0..30 {
         assert_eq!(
             pick(&noise, 0x1234, ply, &root, &lines),
             NoisePick::Miss(1),
-            "miss must decline the queen-win and play the best non-winning line",
+            "a capture-first sacrifice is a combination and must stay missable",
         );
     }
 }
@@ -456,9 +573,10 @@ fn miss_takes_precedence_over_blunder() {
         guaranteed_mate_in: 0,
         ..Default::default()
     };
-    let root = mat_root();
-    // #1 wins the queen, #2 hangs a pawn (in blunder band).
-    let lines = vec![mat_line(900, vec![qxd5()], None), mat_line(-150, hang_pawn_pv(), Some(1))];
+    let root = fork_root();
+    // #1 wins the queen by a (non-capture) fork — miss-eligible; #2 hangs a
+    // pawn (in blunder band). Both rolls would fire; miss is evaluated first.
+    let lines = vec![mat_line(900, fork_win_pv(), Some(2)), mat_line(-150, fork_hang_pawn_pv(), Some(1))];
     for ply in 0..20 {
         assert_eq!(pick(&noise, 0xBEEF, ply, &root, &lines), NoisePick::Miss(1));
     }

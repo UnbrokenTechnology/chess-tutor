@@ -18,12 +18,18 @@
 //! kept distinct from a merely-positional centipawn drop, which is not
 //! a material mistake at all.
 //!
-//! 1. **Miss branch** (when [`NoiseProfile::miss_chance`] > 0): when a
-//!    line *wins material* by force and is the best thing to do, the
-//!    bot refuses it and plays the highest-scoring line that does **not**
-//!    win material — even if that line is itself losing. Models "saw a
-//!    winning tactic, didn't play it." No-op when no material-winning
-//!    move exists. Mate-guarded.
+//! 1. **Miss branch** (when [`NoiseProfile::miss_chance`] > 0): when the
+//!    best line *wins material* by force **through a combination**, the bot
+//!    refuses it and plays the highest-scoring line that does **not** win
+//!    material, even if that line is itself losing. Models "saw a winning
+//!    tactic, didn't play it." The combination-vs-obvious-grab line is drawn
+//!    by *2-ply material*: a win already up a pawn-or-more after the best
+//!    move + the opponent's reply is an obvious grab (a hanging piece, an
+//!    even trade) and is left to the variety branch's material easing — you
+//!    don't "miss" a piece sitting in front of you. A win that's still
+//!    even-or-down at two plies but settles winning is a combination — a
+//!    quiet first move (a fork) or a real sacrifice — and stays missable.
+//!    No-op when no such win exists. Mate-guarded.
 //!
 //! 2. **Blunder branch** (when [`NoiseProfile::blunder_chance`] > 0):
 //!    play a line that *loses material* by force, with the amount hung
@@ -138,10 +144,26 @@ pub fn pick(
 
     let mut rng = mix(seed, ply);
 
-    // Miss branch: when the *best* move wins material, deliberately
-    // decline it and play the best line that does not win material.
-    // Eligible only when there's a real material win to pass up.
-    if noise.miss_chance > 0.0 && !mate_guard && !deltas.is_empty() && deltas[0] >= WIN_MATERIAL_CP {
+    // Miss branch: when the *best* move wins material through a combination
+    // you had to calculate, deliberately decline it and play the best line
+    // that does not win material. The combination-vs-obvious-grab test is
+    // **2-ply material** (`two_ply_material_cp`): a win already up a
+    // pawn-or-more after the best move + the opponent's reply is an *obvious
+    // grab* — a hanging piece (`Qxd5`), an even trade settled in hand — and
+    // is exempt, left instead to the variety branch's material easing. You
+    // don't "miss" a piece sitting in front of you. Everything that's still
+    // even-or-down at two plies but settles winning is a *combination* and
+    // stays missable: a quiet first move (a fork, 2-ply 0), an even trade
+    // that wins on the follow-up (a discovered attack, 2-ply 0), or a real
+    // **sacrifice** (Damiano-style, 2-ply negative — material comes back with
+    // interest later). One test covers all three. Eligible only when there's
+    // a real (settled) material win to pass up.
+    if noise.miss_chance > 0.0
+        && !mate_guard
+        && !deltas.is_empty()
+        && deltas[0] >= WIN_MATERIAL_CP
+        && two_ply_material_cp(root, &lines[0], root.side_to_move()) < WIN_MATERIAL_CP
+    {
         let (roll, next) = roll_unit(rng);
         rng = next;
         if roll < noise.miss_chance as f64 {
@@ -245,9 +267,12 @@ const CAPTURE_RESCUE_SALT: u64 = 0x5EED_CA97_0DE5_A1A5;
 const CAPTURE_RESCUE_C: f64 = 6.0;
 
 /// True iff the line's first move is a capture (including en passant). The
-/// material easing and the obviousness it models key on *immediate*
-/// captures — "grab the piece in front of you" — as distinct from a
-/// multi-move tactic, which stays missable.
+/// variety branch's material easing keys on this — an *immediate* capture
+/// ("grab the piece in front of you") is rescued from rank demotion, as
+/// distinct from a multi-move tactic, which stays demotable. (The miss
+/// branch draws the same obvious-vs-combination line, but with a finer
+/// 2-ply material read — see [`two_ply_material_cp`] — so a capture that's
+/// really a sacrifice still counts as a missable combination.)
 fn first_move_is_capture(root: &Position, line: &SearchLine) -> bool {
     match line.pv.first() {
         None => false,
@@ -277,10 +302,9 @@ fn standard_piece_value_cp(pt: PieceType) -> i32 {
 /// Net material the side-to-move gains (positive) or loses (negative)
 /// at the settled end of `line`, in material-centipawns (pawn = 100,
 /// standard values). Walks the PV through `settled_ply` (or the PV end
-/// if it never settled), summing captured-piece values with a sign for
-/// who captured. The settled cap keeps the count quiescent — it stops
-/// once the tactics have resolved rather than counting a mid-exchange
-/// snapshot.
+/// if it never settled). The settled cap keeps the count quiescent — it
+/// stops once the tactics have resolved rather than counting a
+/// mid-exchange snapshot.
 fn line_material_delta_cp(root: &Position, line: &SearchLine, root_stm: Color) -> i32 {
     if line.pv.is_empty() {
         return 0;
@@ -289,6 +313,35 @@ fn line_material_delta_cp(root: &Position, line: &SearchLine, root_stm: Color) -
         Some(idx) if idx < line.pv.len() => idx,
         _ => line.pv.len().saturating_sub(1),
     };
+    material_delta_through_ply(root, line, root_stm, last_ply)
+}
+
+/// Net material the side-to-move has (positive = up) after just the first
+/// **two plies** of `line` — its own first move and the opponent's reply.
+/// This is the discriminator the miss branch uses to tell an *obvious grab*
+/// (already up a pawn-or-more here: a hanging piece, an even trade settled
+/// in hand) from a *combination* (still even-or-down at two plies, yet the
+/// settled line wins — a fork off a quiet move, or a real sacrifice that
+/// pays off later). Only the obvious grab is exempt from being declined.
+fn two_ply_material_cp(root: &Position, line: &SearchLine, root_stm: Color) -> i32 {
+    if line.pv.is_empty() {
+        return 0;
+    }
+    let last_ply = 1.min(line.pv.len() - 1);
+    material_delta_through_ply(root, line, root_stm, last_ply)
+}
+
+/// Net material (root-stm POV, material-cp) after the first `last_ply + 1`
+/// plies of `line` are played from `root`, summing captured-piece values
+/// with a sign for who captured. Shared by the settled-outcome classifier
+/// ([`line_material_delta_cp`], cap = settled ply) and the miss branch's
+/// 2-ply sacrifice check ([`two_ply_material_cp`], cap = ply 1).
+fn material_delta_through_ply(
+    root: &Position,
+    line: &SearchLine,
+    root_stm: Color,
+    last_ply: usize,
+) -> i32 {
     let mut scratch = root.clone();
     let mut net = 0i32;
     for (ply, &mv) in line.pv.iter().enumerate() {
