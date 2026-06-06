@@ -41,11 +41,18 @@
 //!    Mate-guarded.
 //!
 //! 3. **Variety branch** (when [`NoiseProfile::avg_move_rank`] > 1.0):
-//!    sample which line *rank* to play from a normal distribution
-//!    centred on `avg_move_rank` (spread scales with the dial), then
-//!    play that rank. At the `1.0` floor the spread is zero, so it
-//!    returns the engine's #1. This is the "plays the Nth-best move on
-//!    average" weakness dial. See [`sample_rank`]. Mate-guarded.
+//!    first *filter out* lines whose move hangs material (value-scaled —
+//!    a queen-hang always dropped, a pawn almost never; #0 always kept as
+//!    a possible sacrifice), then sample which surviving line *rank* to
+//!    play from a normal distribution centred on `avg_move_rank` (spread
+//!    scales with the dial). So the bot plays the Nth-best *safe* move:
+//!    weak and varied, but it won't drop its queen to a one-move capture
+//!    (which a qsearch-0 bot, blind to the recapture, otherwise would).
+//!    At the `1.0` floor the spread is zero, so it returns the best safe
+//!    move. Two material easings ride on top: an immediate winning capture
+//!    or pawn promotion at #0 is snapped back to (you don't leave a free
+//!    piece / decline a queening). See [`sample_rank`], [`self_hang_pawns`].
+//!    Mate-guarded.
 //!
 //! All three branches respect [`NoiseProfile::guaranteed_mate_in`]: a
 //! forced mate the engine has resolved within that many moves is never
@@ -211,10 +218,39 @@ pub fn pick(
         return NoisePick::Line(0);
     }
 
-    // Variety branch: sample which rank to play from a normal
-    // distribution centred on `avg_move_rank`. At the 1.0 floor the
-    // spread is zero, so this returns #1 unchanged.
-    let k = sample_rank(noise.avg_move_rank, lines.len(), rng);
+    // Variety branch with a self-hang FILTER. First drop the lines whose move
+    // hangs material — value-scaled, the capture rescue in reverse: a
+    // queen-hang is always dropped, a rook ~56%, a minor ~33%, a pawn ~11%
+    // (small material still hangs believably; the queen never drops to a
+    // one-move capture). #0 is always kept — if the engine's best move hangs,
+    // it's a sacrifice it chose on purpose, or the only fallback. Then sample
+    // the rank AMONG THE SURVIVORS, so the bot plays the Nth-best *safe* move
+    // and keeps its variety — instead of snapping to the single best
+    // non-hanging move, which both kills variety and floors the weakness (at
+    // high rank nearly everything hangs, so it always snapped back to #0). A
+    // qsearch-0 bot is blind to the recapture (it ranked `Qg6` #3, not seeing
+    // `hxg6`); this filter is its only protection.
+    let playable: Vec<usize> = (0..lines.len())
+        .filter(|&i| {
+            if i == 0 {
+                return true; // keep the engine's best (sacrifice / fallback)
+            }
+            match self_hang_pawns(root, &lines[i]) {
+                None => true, // safe move
+                Some(v) => {
+                    // Drop with probability v / SELF_HANG_C; keep otherwise.
+                    let (roll, _) = roll_unit(mix(rng, SELF_HANG_SALT.wrapping_add(i as u64)));
+                    roll >= (v / SELF_HANG_C).min(1.0)
+                }
+            }
+        })
+        .collect();
+
+    // Sample which rank to play, centred on `avg_move_rank`, over the SAFE
+    // pool. At the 1.0 floor the spread is zero, so this returns the best safe
+    // move unchanged.
+    let kp = sample_rank(noise.avg_move_rank, playable.len(), rng);
+    let k = playable[kp];
 
     // Material easing: a rank demotion off an *obvious* material gain — an
     // immediate winning capture OR a pawn promotion — is a believability bug.
@@ -268,30 +304,6 @@ pub fn pick(
         }
     }
 
-    // Self-hang guard: the mirror of the capture rescue. A weak bot blunders,
-    // but even a weak human doesn't drop a *valuable* piece to a one-move
-    // capture — yet a qsearch-0 bot will, because it's blind to the recapture
-    // (it ranked `Qg6` #3, not seeing `hxg6`). If the chosen move hangs a
-    // piece worth `V` pawns, reject it with
-    //
-    //     P(save) = min(1, V / SELF_HANG_C)     V = pawns of material hung
-    //
-    // SELF_HANG_C = 9 anchors it to the queen: a queen (V≈9) is ALWAYS saved,
-    // a rook (5) ~56%, a minor (3) ~33%, a pawn (1) ~11% — so small material
-    // still hangs believably while the queen never does. On a save, fall back
-    // to the best line that doesn't hang something as valuable. Variety-only:
-    // the deliberate blunder branch already returned, so this never overrides
-    // an intended blunder.
-    if let Some(v) = self_hang_pawns(root, &lines[k]) {
-        let (roll, _) = roll_unit(mix(rng, SELF_HANG_SALT));
-        if roll < (v / SELF_HANG_C).min(1.0) {
-            if let Some(safe) =
-                (0..lines.len()).find(|&i| self_hang_pawns(root, &lines[i]).map_or(true, |hv| hv < v))
-            {
-                return NoisePick::Line(safe);
-            }
-        }
-    }
     NoisePick::Line(k)
 }
 
