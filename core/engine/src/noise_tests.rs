@@ -360,6 +360,21 @@ fn capture_rescue_grabs_hanging_material() {
 }
 
 #[test]
+fn queen_always_grabbed_at_rank_two() {
+    // Anchor: a hanging queen at rank 2.0 is taken essentially always
+    // (P caps at 1 for V=9 / rank 2), so even a rank-2 bot doesn't leave a
+    // free queen sitting — the believability floor.
+    let root = mat_root();
+    let r2 = NoiseProfile { avg_move_rank: 2.0, ..Default::default() };
+    let lines = vec![
+        mat_line(2000, vec![qxd5()], Some(0)),
+        mat_line(100, vec![kf1()], Some(0)),
+    ];
+    let rate = grab_rate(&r2, &root, &lines, 2000);
+    assert!(rate > 0.9, "queen at rank 2 should be grabbed ~always, got {rate}");
+}
+
+#[test]
 fn capture_rescue_falls_with_rank() {
     // The weaker (higher-rank) bot misses the free queen more often.
     let root = mat_root();

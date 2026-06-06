@@ -196,20 +196,23 @@ pub fn pick(
 
     // Material easing: a rank demotion off an *immediate winning capture*
     // is a believability bug — even a weak human doesn't leave a free queen
-    // sitting next to a rook. If #0's first move grabs material the demoted
-    // move doesn't, the bot still plays #0 with a probability that RISES
-    // with the material at stake (queen > rook > minor) and FALLS with
-    // `avg_move_rank` (a weaker bot misses more):
+    // sitting there, and (validation showed) sidesteps a check instead of
+    // taking the checker, or stops a rook shy of a capture. If #0's first
+    // move grabs material the demoted move doesn't, the bot still plays #0
+    // with a probability that RISES with the material at stake (queen >
+    // rook > minor) and FALLS with `avg_move_rank` (a weaker bot misses
+    // more), capped at certainty:
     //
-    //     P(grab) = V / (V + 9·(rank − 1))     V = pawns of material secured
+    //     P(grab) = min(1, V / (C·(rank − 1)))     V = pawns of material secured
     //
-    // The `9` is the queen's value, chosen so the anchor is exact — a queen
-    // (V≈9) at rank 2.0 is grabbed ~50% — and so `rank == 1` always grabs
-    // (P = 1). Only *immediate* captures are rescued; a subtle quiet
-    // best-move (a defensive-only-move, a deep tactic) is still demotable,
-    // which keeps the wanted "looks-like-zugzwang misjudgment" feel. With
-    // this, hanging material comes only from tactical blindness (qsearch)
-    // or the deliberate blunder lever, never incidentally from rank.
+    // C = [`CAPTURE_RESCUE_C`] = 6 sets both anchors: a queen (V≈9) at rank
+    // 2 is ALWAYS grabbed (9/6 caps at 1), a minor (V≈3) at rank 2 ~50%;
+    // `rank == 1` always grabs. Weaker bots (higher rank) still miss
+    // high-value pieces sometimes. Only *immediate* captures are rescued; a
+    // subtle quiet best-move (a defensive-only-move, a deep tactic) is still
+    // demotable, keeping the "looks-like-zugzwang misjudgment" feel. So
+    // hanging material comes only from tactical blindness (qsearch) or the
+    // deliberate blunder lever, never incidentally from rank.
     if k > 0 && !deltas.is_empty() && first_move_is_capture(root, &lines[0]) {
         let swing = deltas[0] - deltas[k]; // material #0 secures over the demoted move
         if swing > 0 {
@@ -217,7 +220,11 @@ pub fn pick(
             // so dividing gives the swing in pawns (queen ≈ 9).
             let v = swing as f64 / WIN_MATERIAL_CP as f64;
             let r = noise.avg_move_rank as f64;
-            let p_grab = v / (v + 9.0 * (r - 1.0));
+            let p_grab = if r <= 1.0 {
+                1.0
+            } else {
+                (v / (CAPTURE_RESCUE_C * (r - 1.0))).min(1.0)
+            };
             let (roll, _) = roll_unit(mix(rng, CAPTURE_RESCUE_SALT));
             if roll < p_grab {
                 return NoisePick::Line(0);
@@ -230,6 +237,12 @@ pub fn pick(
 /// Distinct SplitMix64 salt for the capture-rescue roll so it's independent
 /// of the rank sample that precedes it (same `rng`, different stream).
 const CAPTURE_RESCUE_SALT: u64 = 0x5EED_CA97_0DE5_A1A5;
+
+/// Material-easing curve constant (pawns of rank-cost per rank-unit). 6
+/// sets the two anchors: a queen (≈9 pawns) at rank 2 is always grabbed
+/// (9/6 caps at 1), a minor (≈3) at rank 2 is grabbed ~50%. Lower = grab
+/// more; raise if weak bots feel too sharp about material.
+const CAPTURE_RESCUE_C: f64 = 6.0;
 
 /// True iff the line's first move is a capture (including en passant). The
 /// material easing and the obviousness it models key on *immediate*
