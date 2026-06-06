@@ -189,6 +189,41 @@ confirmation in the harness, but it's the most promising floor seen so far.
 (Also a data point for the eventual endgame-skill grid axis: this bot ran
 `Full` endgame books — re-test at tier 0 for even-weaker, no-technique play.)
 
+### Material-aware rank/miss — believability fix (SPEC, 2026-06-05)
+
+**Problem.** The variety (`avg_move_rank`) and `miss` levers pick by
+*rank*, blind to *material*. They demote/decline off a blindingly-obvious
+winning capture — chess.com validation of `t400` showed it refuse to
+recapture a hanging queen (next to a rook) for **3 turns**, and hang B/Q/R
+vs Martin. cp can't fix it: a *subtle* only-move and an *obvious* recapture
+both show a big cp gap to #2. **Material** is the discriminating signal.
+
+**Fix (no new user lever).** Before the miss/variety demotion, look at the
+**material swing you'd throw away** by not playing the best move (reuse
+`line_material_delta_cp` already in `noise.rs`). Play the best move with
+probability **P that increases with that swing** — *graduated, not a hard
+rule*: ~0.97 for a queen, ~0.9 rook, ~0.75 minor, low for a pawn; always
+above what raw rank demotion gives. If the roll says "take," return
+`Line(0)`; else fall through to normal miss/variety. (One fixed curve, not
+a dial.)
+- **Preserves the wanted feel:** a move that's positionally worse but
+  *materially fine* is still demotable (the "subtle only-move / zugzwang
+  misjudgment" feel). A move that hangs a piece is (usually) excluded.
+- **NOT targeted:** missing a subtle *defensive* only-move (the eval-bar
+  "only move that worked" case) — that's the zugzwang feel we keep.
+- Geometry/ease (long-range snipe stays missable) is a later layer.
+
+**Consequences (important):**
+- Hanging material then comes only from **tactical blindness (qsearch)** or
+  the **intentional blunder lever** — never incidentally from rank. The
+  three weakening levers become orthogonal.
+- All noisy bots get **STRONGER** → **re-run `build_ladder` / `design_ladder`**
+  to re-measure (the ladder Elos shift up).
+- **Reopens r5/r6/r7** as useful basement rungs — r4 was the floor only
+  because high rank caused catastrophic *incidental* hangs; with those
+  gone, high rank is sane-but-weak. → likely **raise the GUI rank-slider
+  cap back above 4** after re-measuring (it was just set to 1.0–4.0).
+
 ---
 
 ## Open threads / next steps (in rough order)
