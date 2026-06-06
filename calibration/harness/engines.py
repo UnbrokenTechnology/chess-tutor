@@ -44,6 +44,10 @@ class BotConfig:
     #: Quiescence horizon cap (tactical-vision dial). None = full vision;
     #: 0 = tactically blind (hangs pieces). Replaces the retired wild dial.
     qsearch_depth: int | None = None
+    #: Endgame-book skill tier (0=no books .. 3=Full). None = Full (the
+    #: flag is omitted). A weak rung should NOT play flawless KBNK, so the
+    #: ladder sets this by band (see ``design_ladder.tier_for``).
+    endgame_skill: int | None = None
     disable_eval: tuple[str, ...] = ()
     seed: int | None = None
 
@@ -69,6 +73,8 @@ class BotConfig:
             args += ["--miss-chance", f"{self.miss_chance}"]
         if self.qsearch_depth is not None:
             args += ["--qsearch-depth", str(self.qsearch_depth)]
+        if self.endgame_skill is not None:
+            args += ["--endgame-skill", str(self.endgame_skill)]
         if self.guaranteed_mate_in != 1:
             args += ["--guaranteed-mate-in", str(self.guaranteed_mate_in)]
         if self.disable_eval:

@@ -77,7 +77,8 @@ TARGETS = list(range(300, 1801, 100))
 # Fixed rungs outside the design range: the measured basement floor and the
 # top ceiling ladder (no base rank-tunes above d4 in our data).
 FIXED: list[BotConfig] = [
-    BotConfig("floor-d1q0r4m40", depth=1, qsearch_depth=0, avg_move_rank=4.0, miss_chance=0.4),  # ~-200
+    BotConfig("floor-d1q0r4m40", depth=1, qsearch_depth=0, avg_move_rank=4.0,
+              miss_chance=0.4, endgame_skill=0),  # ~-200, no endgame books
     BotConfig("ceil-d4", depth=4),   # ~1996
     BotConfig("ceil-d5", depth=5),   # ~2227
     BotConfig("ceil-d6", depth=6),   # ~2426 (likely all-win -> excluded; that's its job)
@@ -101,6 +102,20 @@ def miss_for(target: int) -> float:
 def blunder_for(target: int) -> float:
     """Gentler blunder% (miss-weighted per round 2), ~0 by ~1200, cap 0.20."""
     return round(0.20 * _clamp01(1 - target / 1200), 2)
+
+
+def tier_for(target: int) -> int | None:
+    """Endgame-book skill tier by Elo band — a weak rung shouldn't play
+    flawless KBNK. 0=no books, 1=Basic (trivial mates), 2=Intermediate
+    (opposition/piece technique), None=Full. (Endgames are a small slice of
+    games, so this barely moves the Elo; it's a believability default.)"""
+    if target < 1000:
+        return 0
+    if target < 1400:
+        return 1
+    if target < 1800:
+        return 2
+    return None
 
 
 def invert_rank(curve: list[tuple[float, int]], elo: float) -> float:
@@ -137,15 +152,17 @@ def design_bot(target: int) -> tuple[BotConfig, dict]:
     # one (1.25 isn't settable; it also measured ~100 Elo high). The final
     # solver must do the same when emitting a config for a target Elo.
     rank = round(max(1.0, invert_rank(RANK_CURVES[base_name], residual)), 1)
+    eg = tier_for(target)
     cfg = BotConfig(
         name=f"t{target}",
         avg_move_rank=rank,
         miss_chance=miss,
         blunder_chance=blunder,
+        endgame_skill=eg,
         **kwargs,
     )
     info = dict(base=base_name, rank=rank, miss=miss, blunder=blunder,
-                noise_cost=round(noise_cost), full=full)
+                noise_cost=round(noise_cost), full=full, eg=eg)
     return cfg, info
 
 
@@ -175,11 +192,12 @@ def main() -> None:
 
     # ---- the predicted design table -------------------------------------
     print("=== designed rungs (predicted) ===")
-    print(f"{'target':>7}  {'base':<6}{'rank':>6}{'miss':>6}{'blndr':>6}  config dials")
+    print(f"{'target':>7}  {'base':<6}{'rank':>6}{'miss':>6}{'blndr':>6}{'eg':>5}  config dials")
     for cfg, info in designed:
         dials = " ".join(cfg.uci_args()[1:-2])  # drop 'uci' and trailing --seed N
+        eg = "Full" if info["eg"] is None else str(info["eg"])
         print(f"{cfg.name:>7}  {info['base']:<6}{info['rank']:>6.2f}"
-              f"{info['miss']:>6.0%}{info['blunder']:>6.0%}  {dials}")
+              f"{info['miss']:>6.0%}{info['blunder']:>6.0%}{eg:>5}  {dials}")
     print(f"\n{len(designed)} designed + {len(FIXED)} fixed + 9 Maia")
     if args.design_only:
         return
