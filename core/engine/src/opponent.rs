@@ -145,14 +145,18 @@ pub enum BookSelection {
 }
 
 /// Move-sampling noise: how often the bot picks a top-K alternative
-/// instead of the search's #1, plus the probability of a deliberate
-/// worse-than-good move ("blunder").
+/// instead of the search's #1 (the variety dial), plus the mate-floor
+/// guarantee.
+///
+/// The explicit `miss_chance` / `blunder_chance` dials were REMOVED
+/// 2026-06-07: real misses and blunders are pattern-shaped, not coin
+/// flips, and both now emerge organically from the perception lever
+/// ([`crate::visibility`]) — a miss is a winning move the bot didn't
+/// see; a blunder is an opponent refutation it didn't see (Hope
+/// Chess). Residual "tilt" randomness is `avg_move_rank`'s job.
 ///
 /// All fields default to a no-op profile (the bot always plays
-/// `lines[0]`). The CLI / desktop layers expose individual knobs so a
-/// student can dial up variety ("don't see the same Italian Game line
-/// every time") or exploitable mistakes ("give me practice spotting
-/// blunders") without weakening one to weaken the other.
+/// `lines[0]`).
 #[derive(Clone, Debug)]
 pub struct NoiseProfile {
     /// Variety dial: the **average rank of the move the bot plays**,
@@ -165,54 +169,6 @@ pub struct NoiseProfile {
     /// surfaced, very high centres skew a little lower than the dial
     /// suggests (the distribution is clamped at the last line).
     pub avg_move_rank: f32,
-    /// Probability per move of deliberately dropping a "blunder" — a
-    /// move that, by force, **loses material** (the bot ends up down
-    /// material at the resolved end of the line), with the amount of
-    /// material hung falling in the band
-    /// `[blunder_min_material_cp, blunder_max_material_cp]`. `0.0`
-    /// (default) disables the branch. Setting this > 0 widens the
-    /// requested MultiPV to [`crate::noise::NOISE_MULTI_PV`] so the
-    /// engine surfaces enough candidate moves to find a material-losing
-    /// one.
-    ///
-    /// This is the chess.com sense of "blunder" (added 2023): a move
-    /// that *loses your own material*, as distinct from a [`miss`](
-    /// Self::miss_chance), which merely fails to capitalise on a
-    /// material-winning chance. We classify by the actual material
-    /// outcome of the line, not by centipawn swing — a 1.5-pawn
-    /// *positional* drop is not a blunder.
-    pub blunder_chance: f32,
-    /// Smallest material loss (in material-centipawns, where a pawn =
-    /// `100` and standard values apply — N/B = 300, R = 500, Q = 900)
-    /// for a move to count as an "in band" blunder. Default `100` — a
-    /// hung pawn, the lightest mistake a student can cleanly punish.
-    pub blunder_min_material_cp: i32,
-    /// Largest material loss (material-centipawns, pawn = `100`) for a
-    /// move to count as "in band". Default `400` — caps deliberate
-    /// blunders at roughly a minor-piece-and-pawn / exchange, so the
-    /// bot won't cheesily gift its queen at high blunder rates. Raise
-    /// toward `900` to permit hanging heavier material.
-    ///
-    /// The two thresholds are a **preference band**: when a roll fires
-    /// but no material-losing move sits inside it, the picker takes
-    /// the line(s) whose material loss is closest to the band (from
-    /// below, then above), so the bot still registers a blunder
-    /// without lurching to a wildly out-of-band sacrifice.
-    pub blunder_max_material_cp: i32,
-    /// Probability per move of deliberately playing a "miss" — when a
-    /// move is available that *wins material* by force, the bot
-    /// refuses it and plays the best move that does **not** win
-    /// material (even if that move is itself losing). `0.0` (default)
-    /// disables the branch. The roll only has an effect when a
-    /// material-winning move actually exists in the searched lines;
-    /// otherwise there is nothing to miss.
-    ///
-    /// This is the chess.com "Miss" — failing to capitalise on a
-    /// tactic — kept separate from [`blunder_chance`](
-    /// Self::blunder_chance) (losing your own material) because they
-    /// are different mistakes a student learns to exploit differently.
-    /// Mate-guarded like the other branches.
-    pub miss_chance: f32,
     /// Smallest mate the bot is **guaranteed** to play through —
     /// blunders are suppressed when `lines[0]` is a mate-in-N for
     /// `N <= guaranteed_mate_in`. Default `1`: mate-in-1 is never
@@ -222,24 +178,16 @@ pub struct NoiseProfile {
     pub guaranteed_mate_in: u32,
 }
 
-/// MultiPV the play search surfaces whenever any line-based noise
-/// (variety / blunder / miss) is active. A single fixed width — rather
-/// than a user-tunable pool — because all three consumers want "enough
-/// of the move list to work with": the variety dial samples a rank
-/// within it, and blunder/miss classify material across it. 10 is wide
-/// enough that genuine punishable hangs (which rank deep in quiet
-/// positions) and the variety distribution's tail both fit, while
-/// keeping the per-bot-move cost modest.
+/// MultiPV the play search surfaces when the variety dial is active.
+/// A single fixed width because the rank sampler wants "enough of the
+/// move list to work with": 10 fits the variety distribution's tail
+/// while keeping the per-bot-move cost modest.
 pub const NOISE_MULTI_PV: usize = 10;
 
 impl Default for NoiseProfile {
     fn default() -> Self {
         Self {
             avg_move_rank: 1.0,
-            blunder_chance: 0.0,
-            blunder_min_material_cp: 100,
-            blunder_max_material_cp: 400,
-            miss_chance: 0.0,
             guaranteed_mate_in: 1,
         }
     }
@@ -250,20 +198,14 @@ impl NoiseProfile {
     /// the play loop uses this to skip the picker entirely. The variety
     /// dial is off at its `1.0` floor (zero spread → always #1).
     pub fn is_off(&self) -> bool {
-        self.blunder_chance <= 0.0 && self.miss_chance <= 0.0 && self.avg_move_rank <= 1.0
-    }
-
-    /// True when a branch that reads the ranked line list is active
-    /// (variety, blunder, or miss) — i.e. every active branch.
-    fn needs_lines(&self) -> bool {
-        self.avg_move_rank > 1.0 || self.blunder_chance > 0.0 || self.miss_chance > 0.0
+        self.avg_move_rank <= 1.0
     }
 
     /// MultiPV the play search should request given this profile.
-    /// Line-based noise widens to the fixed [`NOISE_MULTI_PV`]; a
-    /// wild-only or off profile keeps the single-PV fast path.
+    /// The variety dial widens to the fixed [`NOISE_MULTI_PV`]; an
+    /// off profile keeps the single-PV fast path.
     pub fn effective_multi_pv(&self) -> usize {
-        if self.needs_lines() {
+        if self.avg_move_rank > 1.0 {
             NOISE_MULTI_PV
         } else {
             1
@@ -478,23 +420,4 @@ mod tests {
         assert_eq!(n.effective_multi_pv(), NOISE_MULTI_PV);
     }
 
-    #[test]
-    fn noise_profile_blunder_widens_to_noise_multi_pv() {
-        let n = NoiseProfile {
-            blunder_chance: 0.1,
-            ..Default::default()
-        };
-        assert!(!n.is_off());
-        assert_eq!(n.effective_multi_pv(), NOISE_MULTI_PV);
-    }
-
-    #[test]
-    fn noise_profile_miss_widens_to_noise_multi_pv() {
-        let n = NoiseProfile {
-            miss_chance: 0.2,
-            ..Default::default()
-        };
-        assert!(!n.is_off());
-        assert_eq!(n.effective_multi_pv(), NOISE_MULTI_PV);
-    }
 }

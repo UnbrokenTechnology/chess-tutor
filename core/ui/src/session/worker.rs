@@ -16,37 +16,13 @@ use crate::worker::{NoisePickInfo, WorkerJob, WorkerResult};
 /// Extracted from [`Session::handle_worker_result`] so the same
 /// log line still fires when `log_to_stderr` is on without
 /// inlining the match over every variant in the hot path.
-pub(crate) fn log_noise_pick_to_stderr(info: &NoisePickInfo, pos: &Position, _mv: Move) {
+pub(crate) fn log_noise_pick_to_stderr(info: &NoisePickInfo, _pos: &Position, _mv: Move) {
     match info {
         NoisePickInfo::Variety {
             pick_idx,
             num_lines,
         } => {
             eprintln!("noise: variety played #{} of {}", pick_idx + 1, num_lines);
-        }
-        NoisePickInfo::Blunder {
-            pick_idx,
-            num_lines,
-            delta_from_top_cp,
-        } => {
-            eprintln!(
-                "noise: blunder picked #{} of {} ({:+} cp from #1)",
-                pick_idx + 1,
-                num_lines,
-                delta_from_top_cp,
-            );
-        }
-        NoisePickInfo::Miss {
-            pick_idx,
-            num_lines,
-            engine_top,
-        } => {
-            eprintln!(
-                "noise: miss — bot declined material-winning {} and played #{} of {}.",
-                san::format(pos, *engine_top),
-                pick_idx + 1,
-                num_lines,
-            );
         }
     }
 }

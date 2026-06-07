@@ -43,8 +43,7 @@ pub(crate) fn draw(ui: &mut egui::Ui, view: &BotStripView) {
 /// teaching prose.
 fn handicap_label(handicap: BotHandicap) -> String {
     match handicap {
-        BotHandicap::BlunderChance(p) => format!("blunder {}%", (p * 100.0).round() as i32),
-        BotHandicap::MissChance(p) => format!("miss {}%", (p * 100.0).round() as i32),
+        BotHandicap::Perception(p) => format!("perception {}%", (p * 100.0).round() as i32),
         BotHandicap::Variety(rank) => format!("variety {rank:.1}"),
         BotHandicap::EvalMask(n) => {
             if n == 1 {

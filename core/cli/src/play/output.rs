@@ -81,26 +81,6 @@ fn format_noise_tag(info: &NoisePickInfo) -> String {
             pick_idx,
             num_lines,
         } => format!("[noise: variety #{} of {}]", pick_idx + 1, num_lines),
-        NoisePickInfo::Blunder {
-            pick_idx,
-            num_lines,
-            delta_from_top_cp,
-        } => format!(
-            "[noise: blunder #{} of {} ({:+} cp)]",
-            pick_idx + 1,
-            num_lines,
-            delta_from_top_cp,
-        ),
-        NoisePickInfo::Miss {
-            pick_idx,
-            num_lines,
-            engine_top,
-        } => format!(
-            "[noise: miss — declined material-winning {:?}, played #{} of {}]",
-            engine_top,
-            pick_idx + 1,
-            num_lines,
-        ),
     }
 }
 

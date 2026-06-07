@@ -55,12 +55,10 @@ pub struct PlayerStripView {
 /// layer). Each variant carries the magnitude the renderer formats.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BotHandicap {
-    /// Per-move probability the bot deliberately drops material
-    /// (chess.com "blunder"). Carries the fraction in `[0,1]`.
-    BlunderChance(f32),
-    /// Per-move probability the bot fails to capitalise on a
-    /// material-winning chance (chess.com "miss"). Fraction in `[0,1]`.
-    MissChance(f32),
+    /// Move-visibility dial — below `1.0` the bot is blind to
+    /// geometrically subtle moves (backward moves, knight punishes,
+    /// pinched diagonals). Carries the perception level in `[0,1)`.
+    Perception(f32),
     /// Move-variety dial — the average rank of the move the bot plays
     /// (`> 1.0` means it doesn't always pick the engine's #1).
     Variety(f32),

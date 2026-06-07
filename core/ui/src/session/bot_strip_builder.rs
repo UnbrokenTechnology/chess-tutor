@@ -58,20 +58,16 @@ impl Session {
 }
 
 /// Translate the opponent profile's active knobs into the structured
-/// [`BotHandicap`] list. Order is fixed (blunder, miss, variety, mask)
+/// [`BotHandicap`] list. Order is fixed (perception, variety, mask)
 /// so the strip reads consistently game to game. Returns empty when
 /// the bot plays at full strength.
 fn bot_handicaps(opponent: &chess_tutor_engine::opponent::OpponentProfile) -> Vec<BotHandicap> {
     let mut out = Vec::new();
-    let noise = &opponent.noise;
-    if noise.blunder_chance > 0.0 {
-        out.push(BotHandicap::BlunderChance(noise.blunder_chance));
+    if opponent.perception < 1.0 {
+        out.push(BotHandicap::Perception(opponent.perception));
     }
-    if noise.miss_chance > 0.0 {
-        out.push(BotHandicap::MissChance(noise.miss_chance));
-    }
-    if noise.avg_move_rank > 1.0 {
-        out.push(BotHandicap::Variety(noise.avg_move_rank));
+    if opponent.noise.avg_move_rank > 1.0 {
+        out.push(BotHandicap::Variety(opponent.noise.avg_move_rank));
     }
     if !opponent.eval_mask.is_empty() {
         out.push(BotHandicap::EvalMask(opponent.eval_mask.disabled_iter().count()));

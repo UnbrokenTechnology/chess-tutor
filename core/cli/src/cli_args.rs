@@ -488,38 +488,6 @@ pub enum Command {
         /// widens to 10 lines (≈K× the per-move time).
         #[arg(long = "avg-move-rank", value_name = "RANK", default_value_t = 1.0)]
         avg_move_rank: f32,
-        /// Per-move probability the bot drops a deliberate blunder — a
-        /// move that loses material by force (range 0.0–1.0). Default
-        /// 0.0 (off). When > 0, the search widens to surface candidate
-        /// moves to classify.
-        #[arg(long = "blunder-chance", value_name = "P", default_value_t = 0.0)]
-        blunder_chance: f32,
-        /// Smallest material loss (in points; a pawn = 1.0) for a move
-        /// to count as an "in band" blunder. Default 1.0 — a hung pawn,
-        /// the lightest punishable mistake.
-        #[arg(
-            long = "blunder-min-material",
-            value_name = "PTS",
-            default_value_t = 1.0
-        )]
-        blunder_min_material: f32,
-        /// Largest material loss (points; pawn = 1.0) for a move to
-        /// count as "in band". Default 4.0 — caps deliberate blunders
-        /// at roughly a minor-and-pawn / the exchange, so the bot won't
-        /// gift its queen. Raise toward 9.0 for heavier hangs.
-        #[arg(
-            long = "blunder-max-material",
-            value_name = "PTS",
-            default_value_t = 4.0
-        )]
-        blunder_max_material: f32,
-        /// Per-move probability the bot plays a "miss" — declining a
-        /// move that wins material by force and playing the best move
-        /// that doesn't (range 0.0–1.0). Default 0.0 (off). No effect
-        /// when no material-winning move exists. Same mate-guard as
-        /// `--blunder-chance`.
-        #[arg(long = "miss-chance", value_name = "P", default_value_t = 0.0)]
-        miss_chance: f32,
         /// Smallest mate the bot is guaranteed to convert — blunders
         /// are suppressed when `lines[0]` is a mate-in-N for
         /// `N <= guaranteed_mate_in`. Default 1 (mate-in-1 is never
@@ -583,30 +551,6 @@ pub enum Command {
         /// > 1.0.
         #[arg(long = "avg-move-rank", value_name = "RANK", default_value_t = 1.0)]
         avg_move_rank: f32,
-        /// Per-move probability of a deliberate material-losing blunder
-        /// (0.0–1.0). Default 0.0 (off).
-        #[arg(long = "blunder-chance", value_name = "P", default_value_t = 0.0)]
-        blunder_chance: f32,
-        /// Smallest material loss (points; pawn = 1.0) counting as an
-        /// in-band blunder. Default 1.0.
-        #[arg(
-            long = "blunder-min-material",
-            value_name = "PTS",
-            default_value_t = 1.0
-        )]
-        blunder_min_material: f32,
-        /// Largest material loss (points; pawn = 1.0) counting as an
-        /// in-band blunder. Default 4.0.
-        #[arg(
-            long = "blunder-max-material",
-            value_name = "PTS",
-            default_value_t = 4.0
-        )]
-        blunder_max_material: f32,
-        /// Per-move probability of a "miss" — declining a forced
-        /// material win (0.0–1.0). Default 0.0 (off).
-        #[arg(long = "miss-chance", value_name = "P", default_value_t = 0.0)]
-        miss_chance: f32,
         /// Shortest mate the bot is guaranteed to convert (blunders /
         /// miss suppressed at or within this depth). Default 1.
         #[arg(long = "guaranteed-mate-in", value_name = "N", default_value_t = 1)]

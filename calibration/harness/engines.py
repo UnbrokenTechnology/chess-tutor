@@ -36,10 +36,6 @@ class BotConfig:
     depth: int
     threads: int = 1
     avg_move_rank: float = 1.0
-    blunder_chance: float = 0.0
-    blunder_min_material: float = 1.0
-    blunder_max_material: float = 4.0
-    miss_chance: float = 0.0
     guaranteed_mate_in: int = 1
     #: Quiescence horizon cap (tactical-vision dial). None = full vision;
     #: 0 = tactically blind (hangs pieces). Replaces the retired wild dial.
@@ -66,15 +62,6 @@ class BotConfig:
             args += ["--threads", str(self.threads)]
         if self.avg_move_rank != 1.0:
             args += ["--avg-move-rank", f"{self.avg_move_rank}"]
-        if self.blunder_chance != 0.0:
-            args += ["--blunder-chance", f"{self.blunder_chance}"]
-            # Only meaningful alongside a blunder chance; emit when non-default.
-            if self.blunder_min_material != 1.0:
-                args += ["--blunder-min-material", f"{self.blunder_min_material}"]
-            if self.blunder_max_material != 4.0:
-                args += ["--blunder-max-material", f"{self.blunder_max_material}"]
-        if self.miss_chance != 0.0:
-            args += ["--miss-chance", f"{self.miss_chance}"]
         if self.qsearch_depth is not None:
             args += ["--qsearch-depth", str(self.qsearch_depth)]
         if self.endgame_skill is not None:

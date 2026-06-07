@@ -336,68 +336,10 @@ fn draw_strength_controls(
             );
             ui.end_row();
 
-            ui.label("Blunder chance:")
-                .on_hover_text(
-                    "Per-move probability of a deliberate blunder — a move that \
-                     loses material by force (the bot ends up down material). \
-                     Best-effort: only fires when a move hanging material in the \
-                     band below is actually available, so it's common in sharp \
-                     positions and rare in quiet ones.",
-                );
-            ui.add(
-                egui::Slider::new(&mut noise.blunder_chance, 0.0..=1.0)
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-            );
-            ui.end_row();
-
-            ui.label("Miss chance:")
-                .on_hover_text(
-                    "Per-move probability of a deliberate miss — when a move wins \
-                     material by force, the bot declines it and plays the best \
-                     move that doesn't (even if that move is itself losing). \
-                     Models 'saw the winning tactic, didn't play it.' No effect \
-                     when no material-winning move is on the board.",
-                );
-            ui.add(
-                egui::Slider::new(&mut noise.miss_chance, 0.0..=1.0)
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-            );
-            ui.end_row();
-
-            // Blunder severity is expressed in points of material (a pawn
-            // = 1.0); stored internally as material-centipawns (pawn = 100).
-            ui.label("Blunder min material (pts):")
-                .on_hover_text(
-                    "Smallest amount of material a deliberate blunder must hang, \
-                     in points (pawn = 1, minor = 3, rook = 5, queen = 9). 1.0 = \
-                     a hung pawn, the lightest punishable mistake.",
-                );
-            let mut min_pts = noise.blunder_min_material_cp as f32 / 100.0;
-            let max_pts = (noise.blunder_max_material_cp.max(0) as f32 / 100.0).max(0.0);
-            if ui
-                .add(egui::Slider::new(&mut min_pts, 0.0..=max_pts.max(0.5)).step_by(0.5))
-                .changed()
-            {
-                noise.blunder_min_material_cp = (min_pts * 100.0) as i32;
-            }
-            ui.end_row();
-
-            ui.label("Blunder max material (pts):")
-                .on_hover_text(
-                    "Largest amount of material a deliberate blunder may hang, in \
-                     points. 4.0 caps blunders at roughly a minor-and-pawn / the \
-                     exchange so the bot won't gift its queen; raise toward 9.0 \
-                     to allow heavier hangs. A hang above this cap is never played.",
-                );
-            let mut max_pts = noise.blunder_max_material_cp as f32 / 100.0;
-            let min_pts2 = (noise.blunder_min_material_cp.max(0) as f32) / 100.0;
-            if ui
-                .add(egui::Slider::new(&mut max_pts, min_pts2..=12.0).step_by(0.5))
-                .changed()
-            {
-                noise.blunder_max_material_cp = (max_pts * 100.0) as i32;
-            }
-            ui.end_row();
+            // The explicit blunder/miss sliders were removed 2026-06-07:
+            // both mistakes now emerge organically from the Perception
+            // dial above (a miss = a winning move the bot didn't see; a
+            // blunder = an opponent refutation it didn't see).
 
             ui.label("Average move rank:")
                 .on_hover_text(

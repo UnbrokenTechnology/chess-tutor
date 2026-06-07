@@ -212,13 +212,8 @@ pub(super) fn format_noise_summary(n: &NoiseProfile) -> String {
         return "off (bot always plays #1)".to_string();
     }
     format!(
-        "avg-rank={:.1} · blunder={:.0}% (hangs {:.1}–{:.1} pts) · miss={:.0}% · guaranteed mate-in {}",
-        n.avg_move_rank,
-        n.blunder_chance * 100.0,
-        n.blunder_min_material_cp as f32 / 100.0,
-        n.blunder_max_material_cp as f32 / 100.0,
-        n.miss_chance * 100.0,
-        n.guaranteed_mate_in,
+        "avg-rank={:.1} · guaranteed mate-in {}",
+        n.avg_move_rank, n.guaranteed_mate_in,
     )
 }
 
@@ -243,48 +238,6 @@ pub(super) fn run_noise_command(
             }
             _ => writeln!(out, "usage: noise rank <>= 1.0>"),
         },
-        "blunder" => match subarg.parse::<f32>() {
-            Ok(p) if (0.0..=1.0).contains(&p) => {
-                noise.blunder_chance = p;
-                writeln!(out, "noise: blunder chance set to {:.0}%.", p * 100.0)
-            }
-            _ => writeln!(out, "usage: noise blunder <0.0-1.0>"),
-        },
-        "miss" => match subarg.parse::<f32>() {
-            Ok(p) if (0.0..=1.0).contains(&p) => {
-                noise.miss_chance = p;
-                writeln!(
-                    out,
-                    "noise: miss chance set to {:.0}% (decline a material-winning move when one exists).",
-                    p * 100.0,
-                )
-            }
-            _ => writeln!(out, "usage: noise miss <0.0-1.0>"),
-        },
-        // Material band is in points (a pawn = 1.0); stored as
-        // material-cp internally (pawn = 100).
-        "min-material" | "min_material" => match subarg.parse::<f32>() {
-            Ok(pts) if pts >= 0.0 && (pts * 100.0) as i32 <= noise.blunder_max_material_cp => {
-                noise.blunder_min_material_cp = (pts * 100.0) as i32;
-                writeln!(out, "noise: blunder min material set to {pts:.1} pts.")
-            }
-            _ => writeln!(
-                out,
-                "usage: noise min-material <0..= current max ({:.1} pts)>",
-                noise.blunder_max_material_cp as f32 / 100.0,
-            ),
-        },
-        "max-material" | "max_material" => match subarg.parse::<f32>() {
-            Ok(pts) if (pts * 100.0) as i32 >= noise.blunder_min_material_cp => {
-                noise.blunder_max_material_cp = (pts * 100.0) as i32;
-                writeln!(out, "noise: blunder max material set to {pts:.1} pts.")
-            }
-            _ => writeln!(
-                out,
-                "usage: noise max-material <≥ current min ({:.1} pts)>",
-                noise.blunder_min_material_cp as f32 / 100.0,
-            ),
-        },
         "guarantee" => match subarg.parse::<u32>() {
             Ok(n) => {
                 noise.guaranteed_mate_in = n;
@@ -298,7 +251,7 @@ pub(super) fn run_noise_command(
         }
         other => writeln!(
             out,
-            "unknown noise subcommand {other:?} — try: show | rank R | blunder F | miss F | min-material PTS | max-material PTS | guarantee N | reset",
+            "unknown noise subcommand {other:?} — try: show | rank R | guarantee N | reset",
         ),
     }
 }

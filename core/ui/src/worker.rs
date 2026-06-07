@@ -115,23 +115,11 @@ pub(crate) enum WorkerResult {
 #[derive(Clone, Debug)]
 pub enum NoisePickInfo {
     /// Variety branch fired — sampled `pick_idx` from the ranked lines
-    /// per the `avg_move_rank` dial.
+    /// per the `avg_move_rank` dial. (The retired miss/blunder branch
+    /// infos went with their dials, 2026-06-07: those mistakes now
+    /// emerge inside the search via the perception lever and aren't
+    /// noise picks at all.)
     Variety { pick_idx: usize, num_lines: usize },
-    /// Blunder branch fired — picked a line that loses material inside
-    /// the configured band. `pick_idx` is always `>= 1`.
-    Blunder {
-        pick_idx: usize,
-        num_lines: usize,
-        delta_from_top_cp: i32,
-    },
-    /// Miss branch fired — a material-winning move was available and
-    /// the bot deliberately declined it, playing the best non-winning
-    /// line. `engine_top` is the winning move that was passed up.
-    Miss {
-        pick_idx: usize,
-        num_lines: usize,
-        engine_top: Move,
-    },
 }
 
 pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, repaint: RepaintFn) {
@@ -184,30 +172,6 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                                 num_lines: lines.len(),
                             })
                         };
-                        (mv, line, info)
-                    }
-                    NoisePick::Blunder(idx) => {
-                        let line = lines.get(idx).cloned();
-                        let mv = line.as_ref().and_then(|l| l.pv.first().copied());
-                        let info = lines.get(idx).map(|l| NoisePickInfo::Blunder {
-                            pick_idx: idx,
-                            num_lines: lines.len(),
-                            delta_from_top_cp: l.score.0 - lines[0].score.0,
-                        });
-                        (mv, line, info)
-                    }
-                    NoisePick::Miss(idx) => {
-                        // Declined a material-winning move (#1) and
-                        // played the best non-winning line at `idx`.
-                        let line = lines.get(idx).cloned();
-                        let mv = line.as_ref().and_then(|l| l.pv.first().copied());
-                        let info = lines.first().and_then(|top| top.pv.first().copied()).map(
-                            |engine_top| NoisePickInfo::Miss {
-                                pick_idx: idx,
-                                num_lines: lines.len(),
-                                engine_top,
-                            },
-                        );
                         (mv, line, info)
                     }
                 };

@@ -35,7 +35,10 @@ REFERENCE_BOTS: list[BotConfig] = [
     BotConfig("ref-d2-q0", depth=2, qsearch_depth=0),
     BotConfig("ref-d4-q1", depth=4, qsearch_depth=1),     # sees initial capture
     BotConfig("ref-d4-q2", depth=4, qsearch_depth=2),     # sees the recapture
-    BotConfig("ref-d4-b70", depth=4, blunder_chance=0.7), # ~1245
+    # Mid-band perception rung (replaces the retired blunder ref —
+    # miss/blunder dials removed 2026-06-07; perception sweep measured
+    # d2q2-p0.2 ~= 1395).
+    BotConfig("ref-d2q2-p02", depth=2, qsearch_depth=2, perception=0.2),
     BotConfig("ref-d1", depth=1),                          # ~1750
     BotConfig("ref-d4", depth=4),                          # ~2100
     BotConfig("ref-d6", depth=6),                          # ~2435

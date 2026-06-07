@@ -91,7 +91,7 @@ pub fn run(cfg: UciConfig) -> Result<()> {
     // Surface the resolved config on stderr (stdout is the UCI channel)
     // so harness logs record exactly what was measured.
     eprintln!(
-        "uci-shim: depth={} qsearch_depth={:?} endgame_skill={:?} perception={} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, blunder={} [{}..{}cp], miss={}, guaranteed_mate_in={}}}",
+        "uci-shim: depth={} qsearch_depth={:?} endgame_skill={:?} perception={} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, guaranteed_mate_in={}}}",
         cfg.depth,
         cfg.qsearch_max_plies,
         cfg.endgame_skill,
@@ -104,10 +104,6 @@ pub fn run(cfg: UciConfig) -> Result<()> {
             .collect::<Vec<_>>()
             .join(","),
         cfg.noise.avg_move_rank,
-        cfg.noise.blunder_chance,
-        cfg.noise.blunder_min_material_cp,
-        cfg.noise.blunder_max_material_cp,
-        cfg.noise.miss_chance,
         cfg.noise.guaranteed_mate_in,
     );
 
@@ -256,10 +252,10 @@ fn choose_move(
         },
     };
     let lines = engine.search(pos, params);
-    // Every noise branch (engine-best / variety / blunder / miss) yields a
-    // ranked line; report that line's own score and PV.
+    // The noise pick (engine-best / variety) yields a ranked line;
+    // report that line's own score and PV.
     match noise::pick(&cfg.noise, seed, ply, pos, &lines) {
-        NoisePick::Line(idx) | NoisePick::Blunder(idx) | NoisePick::Miss(idx) => {
+        NoisePick::Line(idx) => {
             let line = lines.get(idx).or_else(|| lines.first())?;
             Some(MoveChoice {
                 mv: *line.pv.first()?,
