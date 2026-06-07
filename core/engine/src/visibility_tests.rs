@@ -39,20 +39,17 @@ fn adjacent_recapture_is_fully_visible() {
 }
 
 #[test]
-fn distant_recapture_pays_attention_and_threading_costs() {
-    // After 1.e4 d5 2.exd5 (locus d5): ...Qxd5 recaptures, but (a) the
+fn distant_recapture_pays_only_the_attention_cost() {
+    // After 1.e4 d5 2.exd5 (locus d5): ...Qxd5 recaptures, and the
     // queen starts 3 squares from the locus -> one A_NEAR endpoint
-    // factor, and (b) the d8->d5 slide threads past the home-rank
-    // clutter (c7/e7 pawns + c8/e8 pieces flank the d6/d7 interior) ->
-    // heavy threading. The two-endpoint design intentionally prices
-    // "you saw the capture square but must notice the distant piece
-    // reaches it"; the home-nest threading hit is a FEEL-TEST flag —
-    // if real play shows queen sorties over-missed, narrow the
-    // threading neighbourhood.
+    // factor. The d8->d5 slide out of the home nest is an ORTHOGONAL
+    // corridor — always a full square wide, no squeeze to visualize —
+    // so it carries no path penalty (the gap-width model; this
+    // resolved the earlier "queen sorties over-missed" feel flag).
     let pos = parse("rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKB1R b KQkq - 0 2");
     let d5 = Square::from_algebraic("d5").unwrap();
     let got = v(&pos, "Qxd5", Some(d5));
-    assert!((got - A_NEAR * O_THREAD_HEAVY).abs() < EPS, "got {got}");
+    assert!((got - A_NEAR).abs() < EPS, "got {got}");
 }
 
 #[test]
@@ -130,21 +127,36 @@ fn discovered_attack_vehicle_is_penalized() {
 }
 
 #[test]
-fn threaded_slider_path_is_penalized() {
-    // White bishop a1 -> f6: the a1-f6 diagonal (interior b2,c3,d4,e5)
-    // stays empty, but four pawns sit immediately adjacent to it
-    // (b3, d3, c4, e4) -> traffic >= 4 -> heavy threading penalty.
+fn diagonal_pinch_point_is_penalized_single_flanks_are_not() {
+    // White bishop a1 -> f6: the c3->d4 step is flanked by BOTH c4 and
+    // d3 pawns -> the bishop squeezes through a zero-width corner gap:
+    // exactly one pinch point. (b3 and e4 are single flanks on their
+    // steps -- the visual ray shifts into the open square, no pinch.)
     let pos = parse("k7/8/8/8/2p1p3/1P1P4/8/B6K w - - 0 1");
     let got = v(&pos, "Bf6", None);
-    assert!(
-        (got - O_THREAD_HEAVY).abs() < EPS,
-        "threaded bishop: {got}"
-    );
+    assert!((got - O_PINCH).abs() < EPS, "pinched bishop: {got}");
 
-    // Same move on an empty board: no traffic, no penalty.
+    // Remove c4: every step now has at most ONE occupied flank -> the
+    // gap is a full square somewhere on every step -> no penalty.
+    let single = parse("k7/8/8/8/4p3/1P1P4/8/B6K w - - 0 1");
+    let open = v(&single, "Bf6", None);
+    assert!((open - 1.0).abs() < EPS, "single-flank bishop: {open}");
+
+    // Empty board: trivially no penalty.
     let empty = parse("k7/8/8/8/8/8/8/B6K w - - 0 1");
     let clear = v(&empty, "Bf6", None);
     assert!((clear - 1.0).abs() < EPS, "clear bishop: {clear}");
+}
+
+#[test]
+fn the_bxa1_snipe_carries_exactly_one_pinch() {
+    // Playtest regression (2026-06-07): a p=0.0 bot uncorked Bxa1,
+    // squeezing e5->a1 between the c4 and d3 pawns. The d4->c3 step is
+    // the lone pinch point (b3/e3/a3 are single flanks of their
+    // steps). Without an attention locus the whole score is the pinch.
+    let pos = parse("rnb1k2r/pp1p3p/6pn/4bp2/p1P3P1/BP1PP3/5P1P/R2NK2R b KQkq - 0 1");
+    let got = v(&pos, "Bxa1", None);
+    assert!((got - O_PINCH).abs() < EPS, "Bxa1: {got}");
 }
 
 #[test]

@@ -116,10 +116,16 @@ pub const K_KNIGHT: f64 = 0.85;
 /// are a follow-up.)
 pub const O_VEHICLE: f64 = 0.75;
 
-/// Slider path threading traffic: occupied squares adjacent to the
-/// path interior.
-pub const O_THREAD_HEAVY: f64 = 0.85; // >= 4 neighbours
-pub const O_THREAD_LIGHT: f64 = 0.92; // 2..=3 neighbours
+/// Diagonal pinch point: a diagonal path step both of whose flank
+/// squares (the other two corners of the step's 2×2 block) are
+/// occupied. The moving piece passes through a ZERO-WIDTH corner gap —
+/// the "squeeze between two pawns" that makes long-diagonal snipes so
+/// hard to visualize. Applied once per pinch point along the path.
+/// Orthogonal slides are deliberately exempt: their corridor is always
+/// a full square wide (the gap-width model — a rook gliding a clean
+/// file between flanking pieces is easy to see), which also keeps
+/// ordinary queen/rook sorties out of the home nest penalty-free.
+pub const O_PINCH: f64 = 0.70;
 
 /// Per-endpoint attention factor by Chebyshev distance from the
 /// opponent's last-move square: `<=2 -> 1.0`, `3..=4 ->`
@@ -229,29 +235,38 @@ pub fn visibility(pos: &Position, mv: Move, ctx: &VisibilityContext) -> f64 {
             o *= O_VEHICLE;
         }
     }
-    // Threading: slider path squeezing past traffic. Neighbours of the
-    // path interior (excluding the endpoints themselves) that are
-    // occupied.
+    // Pinch points: a DIAGONAL slider path step whose two flank squares
+    // (the other corners of the step's 2×2 block) are both occupied —
+    // the piece squeezes through a zero-width corner gap. Counted per
+    // step over the whole path (leaving the from-square and entering
+    // the to-square included). Orthogonal slides are exempt: their
+    // corridor is a full square wide however crowded the walls
+    // (gap-width model). Single-step moves have no interior and skip
+    // (an adjacent diagonal capture touches its target — no squeeze
+    // to visualize).
     if matches!(
         mover,
         PieceType::Bishop | PieceType::Rook | PieceType::Queen
     ) && mv.kind() == MoveKind::Normal
+        && from.file() != to.file()
+        && from.rank() != to.rank()
+        && between_bb(from, to).any()
     {
-        let interior = between_bb(from, to);
-        if interior.any() {
-            let mut neighbours = Bitboard::EMPTY;
-            let mut walk = interior;
-            while walk.any() {
-                let sq = walk.pop_lsb();
-                neighbours |= pseudo_attacks(PieceType::King, sq);
+        let df = (to.file() as i32 - from.file() as i32).signum();
+        let dr = (to.rank() as i32 - from.rank() as i32).signum();
+        let step = 8 * dr + df;
+        let occupied = pos.occupied();
+        let mut a = from.index() as i32;
+        while a != to.index() as i32 {
+            // Flanks of the step a -> a+step: same rank/other file and
+            // same file/other rank — always on-board for a diagonal
+            // step between two on-board squares.
+            let flank_file = Square::from_index((a + df) as u8);
+            let flank_rank = Square::from_index((a + 8 * dr) as u8);
+            if occupied.contains(flank_file) && occupied.contains(flank_rank) {
+                o *= O_PINCH;
             }
-            neighbours = neighbours.without(from).without(to) & !interior;
-            let traffic = (neighbours & pos.occupied()).popcount();
-            o *= match traffic {
-                0..=1 => 1.0,
-                2..=3 => O_THREAD_LIGHT,
-                _ => O_THREAD_HEAVY,
-            };
+            a += step;
         }
     }
 
