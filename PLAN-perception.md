@@ -412,47 +412,77 @@ where the side-not-being-modeled moves, use `V^1.5` before the curve —
 a power barely moves V≈1 (adjacent recapture stays seen — Einstellung)
 but crushes V≈0.3 (subtle refutations vanish — Hope Chess).
 
-**S — salience class (sets the base):**
+**Composition rule:** every sub-factor is an independent multiplier
+defaulting to 1.0 when not applicable; `V = S × D × K × (∏O) × (∏A)`,
+clamped to a small floor.
+
+**S — salience = RULE-FAMILIARITY ONLY (user recalibration
+2026-06-07):** normal moves — quiet, captures, checks, promotions to
+queen — are all base **1.00**; "marching a pawn is never hard to see."
+What earns a salience penalty is depending on a special rule /
+abnormal piece movement:
 
 | class | S |
 |---|---|
-| capture-check / queen promotion | 1.00 |
-| recapture (capture on the last-move square) | 0.95 |
-| castling | 0.90 |
-| capture | 0.85 |
-| quiet check | 0.75 |
+| any normal move (quiet / capture / check / Q-promotion) | 1.00 |
+| castling | 0.80 |
 | en passant | 0.55 |
-| quiet move | 0.45 |
 | underpromotion | 0.25 |
 
+The earlier capture>quiet gradient is deliberately dropped: a
+recapture's easiness comes out of the ATTENTION factor organically
+(the capture square *is* the last-move locus → A = 1.0), not from a
+class bonus. Quiet *key* moves are hard because of their geometry
+(backward / threading / far endpoints / vehicle) or because their
+payoff is beyond the horizon (the depth/qsearch levers' job) — never
+because they are quiet.
+
 **D — direction (mover-relative rank delta):** forward 1.00 · sideways
-0.85 · backward 0.65.
+0.70 · backward 0.55.
 
-**K — piece:** knight 0.80 · all others 1.00.
+**K — piece:** knight 0.75 · all others 1.00.
 
-**O — ray occlusion (multiplicative, sliders + vehicles):**
-discovered-attack vehicle (mover unveils a friendly slider's attack on
-an enemy piece) ×0.65 · slider path threads traffic (occupied squares
-adjacent to the path interior: ≥4 → ×0.75, 2–3 → ×0.85) · long slider
-move (Chebyshev ≥ 5) ×0.85 (mild — distance is a modulator, never
-standalone).
+**O — ray occlusion:** discovered-attack vehicle (mover unveils a
+friendly slider's attack on an enemy piece) ×0.60 · slider path
+threads traffic (occupied squares adjacent to the path interior: ≥4 →
+×0.75, 2–3 → ×0.85). (No standalone long-move factor — length is
+subsumed by the two-endpoint attention term.)
 
-**A — attention (state inputs, neutral when absent):** distance from
-the opponent's last-move square `d = min(cheby(from,last_to),
-cheby(to,last_to))`: ≤2 → 1.0, 3–4 → 0.9, ≥5 → 0.75 · mover dormancy
-(≥12 plies unmoved) ×0.9 — dormancy is v1-OPTIONAL (needs per-piece
-last-moved tracking; the ctx field defaults neutral).
+**A — attention (state inputs, neutral when absent):**
+**two-endpoint** distance from the opponent's last-move square (a move
+is a relation; you must attend BOTH ends — seeing the bishop doesn't
+mean seeing its far target, and vice versa):
+`A = g(cheby(from, last_to)) × g(cheby(to, last_to))`,
+`g: ≤2 → 1.0 · 3–4 → 0.92 · ≥5 → 0.85` (both-far = 0.72) · mover
+dormancy (≥12 plies unmoved) ×0.90 — dormancy is v1-OPTIONAL (needs
+per-piece last-moved tracking; the ctx field defaults neutral).
 
-**Worked archetypes** (P(see) at mid perception p = 0.5, i.e. P = V):
+**Worked archetypes** (own-ply; opponent plies apply V^1.5 first):
 
 | Move | V | Reads as |
 |---|---|---|
-| Adjacent queen recapture | .95 (p=0: .90) | never declined in effect — Einstellung boundary ✔ |
-| Backward quiet queen fork (the Qe1 case) | .45×.65 ≈ **.29** (p=.8: .61, p=0: .09) | the classroom anecdote, scaled by rating ✔ |
-| Cross-board knight capture of a hung queen | .85×.80×.75 ≈ **.51** (p=.2: .34) | the unpunished-queen-blunder observation ✔ |
-| Sniper-bishop quiet move on a threaded long diagonal | .45×.75×.85 ≈ **.29** | the low-ELO snipe, gone ✔ |
-| Quiet discovered-attack vehicle move | .45×.65 ≈ **.29** (as a capture: .55) | hardest motif class (puzzle data) ✔ |
-| Forcing mate line links (checks/captures) | .75–1.0 each | compounding stays high — forcing chains survive ✔ |
+| Adjacent queen recapture | **1.00** | literally never declined (it IS the attention locus) ✔ |
+| Backward quiet queen fork (the Qe1 case) | 1.0×.55 = **.55** | p=.7: .70 · p=.4: .49 · p=0: .30 |
+| Cross-board knight capture of a hung queen | 1.0×.75×.85 ≈ **.64** | as opponent's refutation: .51; at p=.2: .34 — the unpunished-queen case ✔ |
+| Sniper bishop, threaded diagonal + both endpoints far | 1.0×.8×.72 ≈ **.58** (clear diagonal at target near action: ~1.0) | hard only when screened/remote — the corrected claim ✔ |
+| Quiet discovered-attack vehicle move | 1.0×.60 = **.60** | hardest motif class carries its own penalty ✔ |
+| Quiet 3-move plan of normal moves | 1.0³ = **1.00** | ordinary plans fully findable; payoff-beyond-horizon is the depth/qsearch levers' job ✔ |
+
+**P(see) reference table** — `P = V^(2(1−p))`:
+
+| V \ p | 1.0 | 0.7 | 0.4 | 0.2 | 0.0 |
+|---|---|---|---|---|---|
+| 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+| 0.80 | 1.00 | .87 | .76 | .70 | .64 |
+| 0.60 | 1.00 | .74 | .54 | .44 | .36 |
+| 0.40 | 1.00 | .58 | .33 | .23 | .16 |
+| 0.20 | 1.00 | .38 | .14 | .08 | .04 |
+
+`p = 0` means **maximally geometry-blind, not move-blind**: every
+V = 1.0 move (pawn marches, ordinary captures) is still always seen —
+the bot still plays chess; its weakness comes from the geometric blind
+spots plus the other levers. If p = 0 should bite harder, κ is the
+knob (κ = 3 → V=.4 at p=0 drops .16 → .06).
 
 Line-level findability (retrospective): `∏ P(see pv[i])` over the
 mover's plies through `material_settled`, evaluated at a fixed
