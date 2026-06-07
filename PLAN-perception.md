@@ -205,25 +205,116 @@ land.
 
 ---
 
-## Difficulty scorer sketch (v1, weights to feel-tune then freeze)
+## Research synthesis (2026-06-06, five parallel research agents)
 
-Subscores in [0,1], combined (weighted sum or max — decide during build):
+Five evidence angles — coaching curricula, Reddit/forum self-reports,
+academic/data-driven studies, low-ELO game commentary, engine-humanization
+prior art — converged on the feature set below. Full agent reports are in
+the session transcript; key sources cited inline.
 
-- **Direction** (mover-relative): forward easy · sideways harder ·
-  backward hardest.
-- **Distance**: Chebyshev distance of the move; long = harder.
-- **Mover type**: knight moves (esp. retreats) harder; diagonal sliders
-  harder than orthogonal.
-- **Ray traffic**: slider path passing adjacent-to / between pieces =
-  harder.
-- **Payoff depth**: plies until `material_settled` claims the line's
-  material (0 for immediate; scales up). This is the component that may
-  subsume `miss_chance`.
-- Salience floors zero the difficulty outright (checks, recaptures,
-  capture-of-last-mover).
+### Prior-art conclusions (engine-humanization survey)
 
-Monotone-in-depth by construction → "fails a 2-ply tactic but sees a 6-ply
-one" cannot happen (the believability constraint that killed checkboxes).
+- **Nobody has built geometric move-visibility filtering.** All existing
+  weakening = score-noise, depth limiting, or NN imitation (Maia). The
+  axis is unoccupied.
+- **The universal critique of every existing weak bot** (SF Skill Level,
+  Komodo personalities → chess.com bots, Maia): *"plays like Stockfish
+  for 30 moves, then drops the queen"* — perfect play punctuated by
+  random catastrophe. The fix critics ask for is **consistent,
+  patterned, position-explainable misses** — exactly what a
+  deterministic feature-based scorer produces. (talkchess t=73603,
+  t=55011; Kaufman on Komodo personalities.)
+- **The Beal effect kills score-noise approaches structurally**: random
+  eval + normal search still plays ~1700 — depth launders noise back
+  into strength. SF skill-level shows the same ("right Elo number, wrong
+  behavior" — K+P endgame shuffling). **Pre-search candidate pruning is
+  the robust mechanism** (search cannot recover a move that was never in
+  the tree) — independent confirmation of our in-search decision.
+- **The residual defect everywhere is tactical sharpness surviving
+  weakening.** Quiet / backward / deep-payoff moves are where humans go
+  blind and where alpha-beta stays superhuman — that intersection is the
+  scorer's target.
+- **Maia's two gaps are determinism and explainability** — the two
+  properties the teaching product needs most; geometric scoring provides
+  both. Allie (arXiv 2410.03893) models per-position *effort* (thinking
+  time); per-move *visibility* is the complementary unbuilt axis.
+
+### Evidence-ranked feature set
+
+**Tier 1 — multi-angle, some quantitative:**
+
+| Feature | Direction | Evidence |
+|---|---|---|
+| **Ray occlusion** (move's value rides a screened ray: discovered piece behind the mover, X-ray attacker/defender, target behind a blocker) | HARDER — the strongest single geometric signal | lichess puzzle data: discovered-check/pin median ~2200 vs fork ~1450 (artefact2); X-ray counting errors + discovered attacks + screened-diagonal misses are three independent observed failure families |
+| **Salience gradient** capture-check > capture > recapture > quiet-check > quiet | forcing = EASIER (modest boost — low-ELO still misses checks); quiet = HARDER | CCT doctrine universal across coaches; Maia: obvious-recapture = most predictable move; eye-tracking: saccades drawn to checks/captures/high-value targets |
+| **Direction** forward < sideways < backward (mover-relative) | backward = HARDER (strong); sideways mild | The Qe7-found/Qe1-never classroom test; GM-level documented misses (Karpov, Topalov — ChessMood); "programmed not to look for them." Caveat: no measured blunder-rate statistic — strong *pedagogical* prior |
+| **Knight moves** (non-collinear destination) | HARDER; backward-knight = stacked worst case | "Hardest piece to visualize" consensus; forks appear off-line where no ray is scanned |
+| **Distance — as a modulator, NOT standalone** | long = HARDER *only* combined with occlusion / distance-from-action | KEY CORRECTION: a clear long diagonal already pointed at the target is "so obvious it's just a plain blunder" (sniper-bishop threads); eye-tracking visual-span literature supports distance-from-focal-action, not raw move length |
+
+**Tier 2 — attention/state features (cheap from move history; co-equal
+with geometry per the coaching + self-report corpora):**
+
+| Feature | Direction | Evidence |
+|---|---|---|
+| **Distance from opponent's last-move square** | far = HARDER | "Attention follows the last-moved piece" — the single most-cited low-ELO vision failure |
+| **Plies since the moving piece last moved** | dormant = HARDER | "Easy to forget a piece you moved several turns ago"; "no trigger" |
+| **Own-ply vs opponent-ply asymmetry** | opponent's moves HARDER (tunnel vision / "I saw it for me but not for them") | Most-reported single blunder cause; for the in-search filter this is a *feature*: harsher pruning on opponent plies = the human projection "I can't see it so they won't play it" |
+| **Rim/edge origin square** | mild HARDER | weaker than expected — fold into distance-from-action, no standalone weight |
+
+**Special cases:** en passant = HARDER despite being a capture (the only
+capture not landing on the victim's square); promotion-to-queen = always
+visible (existing easing stays); underpromotion = effectively invisible
+(already SF11-faithful behavior).
+
+**Calibration anchors (payoff depth):** <800 ≈ 1–2 plies practical
+horizon, ~1200 ≈ 3–4, forced lines much deeper (Heisman "Real Chess" =
+3-ply; depth-vs-rating folk numbers). Anderson et al.: inherent position
+difficulty predicts blunders at 73% vs skill 55% — difficulty features
+dominate rating, which is why this scorer can work at all.
+
+### Architectural consequence: payoff depth is NOT an in-search feature
+
+The in-search filter prunes moves *before* searching them, so it cannot
+know a move's payoff depth — and it doesn't need to. **Depth difficulty
+falls out of compounding**: a combination is seen only if every link is
+seen, so P(see line) = ∏ P(see move). Deep *quiet* payoffs become
+invisible automatically (quiet links are individually low-visibility)
+while *forcing* chains survive (checks/captures are high-salience) —
+which is exactly the forcing-chain discount every evidence angle
+demanded, by construction. The explicit line-level number
+(`line_difficulty = ∏ P(see pv[i]) for i ≤ material_settled`) exists
+only on the **retrospective** side, where the PV is known and the
+question is "was this line humanly findable."
+
+### Scorer shape (v1, weights to feel-tune then freeze)
+
+Per-move `P(see | perception)`, all features cheap at movegen time:
+
+1. **Salience class** (capture-check / capture / recapture / quiet-check
+   / quiet / en-passant) — sets the base visibility.
+2. **Direction class** (forward / sideways / backward) — multiplier.
+3. **Knight bump** — multiplier.
+4. **Ray occlusion** — multiplier (v1: mover is a discovered-attack
+   vehicle, or the move's ray to its highest-value target is screened;
+   reuse the existing alignment scan primitives where possible).
+5. **Distance from opponent's last-move square** + **mover dormancy** —
+   state multipliers (need last-move + per-piece last-moved-ply, both
+   already available / trivially tracked in search state).
+6. **Opponent-ply multiplier** — harsher filter on plies where the
+   side-not-being-modeled moves.
+7. Salience floors stay absolute: a check, a recapture on the
+   just-captured square, and capture-of-last-mover are never pruned
+   (mate-guard + believability floor).
+
+Position-level blunder-potential (Anderson β = fraction of candidate
+moves that lose) is a **deferred v2 multiplier** — at the root it's
+nearly free from the MultiPV deltas; in-tree it is not cheap. Note it,
+don't build it.
+
+The believability constraint that killed checkboxes ("fails a 2-ply
+tactic but sees a 6-ply one" must be impossible) holds by construction:
+one perception dial gates compounded per-move probabilities, so deeper =
+strictly less visible at equal salience.
 
 ## Sequencing (agreed order)
 
