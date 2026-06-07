@@ -1,10 +1,10 @@
-//! Settled-ply detection ([`stm_after_ply`], `compute_settled_ply`) and
-//! the small TT/stack value helpers (`value_to_tt`, `value_from_tt`,
-//! `cont_key_at`).
+//! Material-settled detection ([`stm_after_ply`],
+//! `compute_material_settled`) and the small TT/stack value helpers
+//! (`value_to_tt`, `value_from_tt`, `cont_key_at`).
 
 use super::*;
-use crate::eval::EvalTrace;
-use crate::types::Value;
+use crate::position::Position;
+use crate::types::{Move, MoveKind, Value};
 
 /// Side-to-move at the position reached after playing `ply + 1` moves
 /// from a root where `root_stm` was to move. Exposed publicly so the
@@ -21,63 +21,78 @@ pub fn stm_after_ply(root_stm: crate::types::Color, ply: usize) -> crate::types:
     }
 }
 
-/// Compute the settled-ply index for a PV's per-ply trace sequence.
+/// Length of the run of consecutive non-forcing plies that closes the
+/// material-resolution window in [`compute_material_settled`]. 3
+/// bridges the longest quiet gap inside a single tactic we care about:
+/// a fork is quiet-move → quiet-flee → capture, a 2-quiet-ply gap.
+/// Deflection→fork chain links are mostly checks/captures and don't
+/// open a gap at all.
+pub const MATERIAL_QUIET_RUN: usize = 3;
+
+/// Compute the **material-settled** ply for a PV: the ply index of the
+/// last *forcing event* (capture, promotion, or check) before the
+/// first run of [`MATERIAL_QUIET_RUN`] consecutive non-forcing plies.
+/// `Some(0)` for a line whose first quiet run starts immediately —
+/// "settles at once, banks nothing." `None` only for an empty PV.
 ///
-/// Walks backward from the end of the PV looking for the latest
-/// index `i` (≥ 2) where the white-POV score differs from the score
-/// **two plies earlier** by at least [`SETTLED_THRESHOLD_CP`]. When
-/// such an `i` exists *and* the PV has at least one more ply, we
-/// return `i + 1` — the position right after the last shift has
-/// fully resolved. When the PV ends mid-shift (the unstable `i` is
-/// the leaf), we return `i` itself, since there's no post-resolution
-/// trace to land on. When the PV is uniformly quiet, we return 0.
+/// This is the cap the material classifiers walk to (`noise.rs`
+/// miss/blunder pools, `analysis::compute_material_outcome`): material
+/// up to this ply is *forced* — what the line actually banks — while
+/// captures past it are speculative deep-line trading that must not
+/// count toward "this move wins/loses material."
 ///
-/// **Why 2 plies, not 1**: every move temporarily shifts the eval in
-/// the mover's favor — their choice is committed but the opponent
-/// hasn't responded. Adjacent plies have opposite side-to-move and
-/// show the "sawtooth" of these unanswered commitments, routinely
-/// 100–300 cp even in quiet positions. Same-side-to-move plies (2
-/// apart) represent complete exchanges, so the delta between them
-/// reflects what really changed — material swings, positional gains,
-/// etc. — not the artificial side-to-move asymmetry.
+/// Design notes (settled-audit, 2026-06-06 — see PLAN-perception.md):
 ///
-/// **Why land on `i + 1`**: with the 2-ply rule the largest
-/// same-side jump often lands on the peak of a mid-exchange position
-/// (e.g. white plays Bxe6, ply `i`'s trace shows white temporarily
-/// up a bishop, but black's recapture on ply `i + 1` is already
-/// part of the PV and restores parity). Consumers that walk the PV
-/// up to the settled ply want the *resolved* position, not the
-/// peak.
-///
-/// `root_stm` is the side to move at the PV's root; the helper walks
-/// the alternation to pick the right sign for each ply's white-POV
-/// normalization.
-pub(crate) fn compute_settled_ply(traces: &[EvalTrace], root_stm: crate::types::Color) -> Option<usize> {
-    if traces.is_empty() {
+/// - **Events, not eval deltas.** The previous implementation walked
+///   the per-ply eval traces *backward* for the last 2-ply swing
+///   ≥ 25 cp. On deep PVs the horizon tail always carries such a
+///   swing, so ~90 % of lines "settled" at the leaf (at d12: 100 % of
+///   lines had settled-cap material ≡ whole-PV material), and quiet
+///   opening moves classified as material losses off speculative
+///   12-ply gambit lines. Captures/promotions/checks are discrete
+///   facts; positional wobble can't trigger them.
+/// - **First resolution, not last shift.** Every consumer wants "when
+///   does this move's claim resolve"; a payoff several quiet plies
+///   later is a plan, not banked material. The original backward walk
+///   existed to avoid stopping at a quiet move *inside* a tactic
+///   (a skewer's quiet first move); the quiet-run length handles that
+///   without inheriting the tail noise.
+/// - **Checks count as forcing** even when they capture nothing: they
+///   keep a combination's window open (check → block → fork) exactly
+///   as a human reads "still forcing."
+/// - **Eval reads do NOT belong here.** The eval-swing consumer
+///   (`initiative_outcome`) reads the *leaf* trace — a stable-eval
+///   read-point, a different question; the sacrifice-compensation
+///   climax has its own forcing-tail walk in `core/teaching`. One
+///   number cannot serve all three (that conflation produced the old
+///   25-cp design).
+pub(crate) fn compute_material_settled(root: &Position, pv: &[Move]) -> Option<usize> {
+    if pv.is_empty() {
         return None;
     }
-    if traces.len() == 1 {
-        return Some(0);
-    }
-
-    let white_pov: Vec<i32> = traces
-        .iter()
-        .enumerate()
-        .map(|(i, t)| t.white_pov_value(stm_after_ply(root_stm, i)).0)
-        .collect();
-
-    for i in (2..white_pov.len()).rev() {
-        let delta = (white_pov[i] - white_pov[i - 2]).abs();
-        if delta >= SETTLED_THRESHOLD_CP {
-            // Prefer the post-resolution ply when one exists.
-            return if i + 1 < white_pov.len() {
-                Some(i + 1)
-            } else {
-                Some(i)
-            };
+    let mut scratch = root.clone();
+    let mut last_event = 0usize;
+    let mut quiet_run = 0usize;
+    for (ply, &mv) in pv.iter().enumerate() {
+        let is_capture = match mv.kind() {
+            MoveKind::Castling => false,
+            MoveKind::EnPassant => true,
+            _ => scratch.piece_on(mv.to()).is_some(),
+        };
+        let forcing =
+            is_capture || mv.kind() == MoveKind::Promotion || scratch.gives_check(mv);
+        if forcing {
+            last_event = ply;
+            quiet_run = 0;
+        } else {
+            quiet_run += 1;
+            if quiet_run >= MATERIAL_QUIET_RUN {
+                break;
+            }
         }
+        scratch.do_move(mv);
     }
-    Some(0)
+    Some(last_event)
 }
 
 // =========================================================================

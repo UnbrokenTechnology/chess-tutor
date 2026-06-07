@@ -126,11 +126,14 @@ const TT_HIT_AVERAGE_INIT: i64 = TT_HIT_AVERAGE_WINDOW * TT_HIT_AVERAGE_RESOLUTI
 /// (484 M → 226 k, 2,140×).
 const MOVE_COUNT_PRUNING_UNIVERSAL: bool = true;
 
-/// Adjacent-ply |Δwhite-POV-score| below which the PV is considered
-/// "settled". In Stockfish-internal centipawns (roughly: PawnEG = 213),
-/// so 25 cp is about one-tenth of a pawn — tight enough to treat small
-/// positional wobble as noise, wide enough to not get tricked by a 10-cp
-/// mobility swing. Tuneable once we see real output on test positions.
+/// |Δwhite-POV-score| between same-side plies at which the CLI's
+/// `search --debug` trajectory table marks a swing as significant.
+/// In Stockfish-internal centipawns (roughly: PawnEG = 213), so 25 cp
+/// is about one-tenth of a pawn. **Display-only**: settled-ply
+/// detection no longer reads eval deltas at all (it walks the PV's
+/// forcing events — see [`settled::compute_material_settled`]); this
+/// threshold survives purely as the debug renderer's annotation
+/// cutoff.
 pub const SETTLED_THRESHOLD_CP: i32 = 25;
 
 /// Number of sentinel frames prepended to the per-ply stack so that
@@ -159,7 +162,7 @@ mod state;
 mod tests;
 
 // External API surface (preserve `crate::search::X` paths).
-pub use settled::stm_after_ply;
+pub use settled::{stm_after_ply, MATERIAL_QUIET_RUN};
 
 // Re-export submodule items as crate-internal so the sibling submodules and
 // the test module resolve them via `use super::*`. Glob re-exports (not

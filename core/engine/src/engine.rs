@@ -190,11 +190,16 @@ pub struct SearchLine {
     /// evaluation of the position after playing `pv[0..=i]`. The leaf
     /// trace is `ply_traces.last()`. Empty iff `pv` is empty.
     pub ply_traces: Vec<EvalTrace>,
-    /// Index into [`ply_traces`] at which the evaluation is deemed to
-    /// have "settled" — subsequent plies don't shift the white-POV score
-    /// by more than [`crate::search::SETTLED_THRESHOLD_CP`]. `None` when
-    /// `pv` is empty. `Some(0)` means the first move already decided
-    /// things and the rest is follow-through.
+    /// The **material-settled** ply: index of the last forcing event
+    /// (capture / promotion / check) in [`pv`] before the first run of
+    /// [`crate::search::MATERIAL_QUIET_RUN`] consecutive non-forcing
+    /// plies. The cap the material classifiers walk to — material up
+    /// to here is what the line forcibly banks; captures past it are
+    /// speculative deep-line trading. `Some(0)` for a line whose first
+    /// quiet run starts immediately ("settles at once, banks
+    /// nothing" when `pv[0]` is itself quiet). `None` when `pv` is
+    /// empty. NOT an eval read-point: consumers that want the line's
+    /// resolved *evaluation* read the leaf trace.
     pub settled_ply: Option<usize>,
 }
 

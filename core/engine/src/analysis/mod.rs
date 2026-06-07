@@ -5,17 +5,20 @@
 //!
 //! For each root move the search produced, we:
 //!
-//! 1. Walk the PV to the "settled" ply (the point past which the
-//!    white-POV score stops shifting materially — see
-//!    [`crate::search::compute_settled_ply`]).
-//! 2. Diff that settled [`crate::eval::EvalTrace`] against the
-//!    trace of the root position (the `pre_move_trace` baseline)
-//!    term-by-term.
-//! 3. Taper each term's `(mg, eg)` delta with the same phase and
-//!    endgame-scale-factor the main evaluator used for the settled
-//!    position, so the resulting `delta_tapered` is in the same
-//!    engine-internal cp the search scores are in.
-//! 4. Sort by absolute tapered delta so the biggest strategic
+//! 1. Diff the ply-1 [`crate::eval::EvalTrace`] (the position right
+//!    after the user's move — the honest "what changed on the board"
+//!    snapshot) against the trace of the root position (the
+//!    `pre_move_trace` baseline) term-by-term. Tactical futures live
+//!    in `score`, `pv`, and [`material_outcome`] — which walks
+//!    captures up to the line's *material-settled* ply (see
+//!    [`crate::search::settled`]: the last forcing event before the
+//!    first quiet run; forced material only, never speculative
+//!    deep-tail trades).
+//! 2. Taper each term's `(mg, eg)` delta with the same phase and
+//!    endgame-scale-factor the main evaluator used, so the resulting
+//!    `delta_tapered` is in the same engine-internal cp the search
+//!    scores are in.
+//! 3. Sort by absolute tapered delta so the biggest strategic
 //!    swing is first.
 //!
 //! Units everywhere inside [`MoveAnalysis`] are engine-internal

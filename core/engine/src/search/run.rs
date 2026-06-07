@@ -170,17 +170,16 @@ impl<'a> Search<'a> {
         }
 
         // Build the output vector. For each PV slot, walk the line and
-        // capture per-ply traces, then compute the settled-ply index
-        // from the white-POV score trajectory. Slots that never got
+        // capture per-ply traces, then compute the material-settled
+        // ply from the line's forcing events. Slots that never got
         // scored (we aborted before any iteration finished) are dropped.
-        let root_stm = pos.side_to_move();
         let mut out = Vec::with_capacity(self.multi_pv);
         for rm in self.root_moves.iter().take(self.multi_pv) {
             if rm.score == -Value::INFINITE {
                 continue;
             }
             let ply_traces = self.trace_along_pv(pos, &rm.pv);
-            let settled_ply = compute_settled_ply(&ply_traces, root_stm);
+            let settled_ply = compute_material_settled(pos, &rm.pv);
             out.push(SearchLine {
                 pv: rm.pv.clone(),
                 score: rm.score,

@@ -149,28 +149,34 @@ fn inspect_opponent_reply(
     (is_check, is_capture, Some(san_string))
 }
 
-/// Eval swing ply-1 → settled-ply (user POV) plus a derived
-/// "user still favored" flag. Returns `(0, false)` if `ply_traces`
-/// is empty (terminal-after-user-move; no eval to read).
+/// Eval swing ply-1 → leaf (user POV) plus a derived "user still
+/// favored" flag. Returns `(0, false)` if `ply_traces` is empty
+/// (terminal-after-user-move; no eval to read).
+///
+/// Reads the **leaf** trace deliberately, not `settled_ply`. This
+/// consumer asks "where does the line *trend* once it plays out" — a
+/// stable-evaluation read-point — which for a quiet positional line is
+/// the line's end. `settled_ply` answers a different question ("when
+/// does the line's *material* claim resolve"; it is `0` on a quiet
+/// line, which would degenerate the swing to zero). Before the
+/// 2026-06 settled redesign the old leaf-dragging settled value was
+/// de-facto the leaf anyway, so this is the behavior-preserving
+/// explicit form. See PLAN-perception.md "The no-tactic question."
 fn compute_eval_swing(ma: &MoveAnalysis, root_stm: Color) -> (i32, bool) {
     let Some(p1_trace) = ma.ply_traces.first() else {
         return (0, false);
     };
 
-    // Pick the same trace `MoveAnalysis::diff_trace` would: settled
-    // when available, else leaf. The `ply_traces.is_empty()` short
-    // circuit above guarantees `last()` is `Some` here.
-    let settled_idx = ma
-        .settled_ply
-        .filter(|i| *i < ma.ply_traces.len())
-        .unwrap_or(ma.ply_traces.len() - 1);
-    let settled_trace = &ma.ply_traces[settled_idx];
+    // The `ply_traces.is_empty()` short circuit above guarantees
+    // `last()` is `Some` here.
+    let leaf_idx = ma.ply_traces.len() - 1;
+    let leaf_trace = &ma.ply_traces[leaf_idx];
 
     let p1_user = ply_trace_user_pov(p1_trace, 0, root_stm).0;
-    let settled_user = ply_trace_user_pov(settled_trace, settled_idx, root_stm).0;
+    let leaf_user = ply_trace_user_pov(leaf_trace, leaf_idx, root_stm).0;
 
-    let swing = settled_user - p1_user;
-    let user_still_favored = settled_user > 0;
+    let swing = leaf_user - p1_user;
+    let user_still_favored = leaf_user > 0;
     (swing, user_still_favored)
 }
 

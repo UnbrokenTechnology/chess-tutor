@@ -242,10 +242,11 @@ pub enum Command {
         multi_pv: usize,
         /// Dump a per-ply trajectory table for each PV: the white-POV,
         /// tempo-free score at each ply along with the delta from the
-        /// previous ply. Useful for tuning the settled-ply threshold
-        /// and for understanding the ply-to-ply "sawtooth" where each
-        /// side's move temporarily shifts the eval before the opponent
-        /// responds.
+        /// previous ply. Useful for understanding the ply-to-ply
+        /// "sawtooth" where each side's move temporarily shifts the
+        /// eval before the opponent responds. (The settled marker in
+        /// the table is the material-settled ply — forcing events,
+        /// not eval deltas.)
         #[arg(long)]
         debug: bool,
         /// For each returned PV, print the teaching-pipeline term-delta

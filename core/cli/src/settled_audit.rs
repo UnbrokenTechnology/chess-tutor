@@ -36,6 +36,7 @@ use chess_tutor_engine::engine::{Engine, SearchParams};
 use chess_tutor_engine::movegen::legal_moves_vec;
 use chess_tutor_engine::noise::WIN_MATERIAL_CP;
 use chess_tutor_engine::position::Position;
+use chess_tutor_engine::search::MATERIAL_QUIET_RUN;
 use chess_tutor_engine::san::pv_to_san;
 use chess_tutor_engine::types::{Color, Move, MoveKind, PieceType, Value};
 
@@ -53,12 +54,10 @@ pub struct SettledAuditArgs {
     pub examples: usize,
 }
 
-/// Length of the run of consecutive non-forcing plies that ends the
-/// prototype's "still resolving" window. 3 bridges the longest quiet
-/// gap inside a single tactic we care about (a fork is quiet-move →
-/// quiet-flee → capture = a 2-quiet-ply gap); deflection→fork chain
-/// links are mostly checks/captures and don't open a gap at all.
-const QUIET_RUN_LEN: usize = 3;
+/// The prototype's quiet-run length — now the ENGINE's own constant
+/// (the redesign landed; this tool doubles as its regression check:
+/// post-redesign, "current" and "prototype" must agree).
+const QUIET_RUN_LEN: usize = MATERIAL_QUIET_RUN;
 
 pub fn run(args: SettledAuditArgs) -> Result<()> {
     if args.multi_pv < 1 {

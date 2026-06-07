@@ -280,9 +280,20 @@ one" cannot happen (the believability constraint that killed checkboxes).
      tautology (current ≈ leaf ≈ where the search scored). Confirms
      the three-way split: material classifiers → `material_settled`;
      eval-swing → leaf; climax → forcing tail.
-2. **Settled redesign** — `material_settled` event-walk; migrate consumers
-   per the inventory table (noise + material_outcome → new; initiative →
-   leaf; CLI display follows); oracle-corpus tests.
+2. **Settled redesign** — LANDED. `compute_material_settled`
+   (`search/settled.rs`, replacing the eval-delta backward walk;
+   `MATERIAL_QUIET_RUN = 3` exported, audit tool imports it so they can't
+   drift). `SearchLine.settled_ply` now carries the new semantics —
+   noise + material_outcome consumers needed **zero code changes** (they
+   cap walks on the field); `initiative_outcome::compute_eval_swing`
+   switched to an explicit **leaf** read (behavior-preserving: the old
+   leaf-dragging value was de facto the leaf). `SETTLED_THRESHOLD_CP`
+   survives display-only (the `--debug` trajectory marker). All 1,332
+   workspace tests pass with no fixture fallout. **Regression check
+   (re-run audit, d12 × mpv 10): current ≡ prototype — 0 class flips,
+   eval-gap 0; corrected classifier: 35 win / 296 neutral / 85 loss (was
+   77/197/142).** Knock-on: the bands' miss/blunder pools changed under
+   this fix — re-derivation (step 7) is mandatory, as planned.
 3. **Difficulty scorer** (`analysis/`, fixed weights, shared surface).
 4. **In-search perception filter** — zobrist-keyed seeding, salience
    floors, never-empty guard, ≥1.0 bypass. A/B: full-strength bench

@@ -2,7 +2,7 @@
 //! inline `#[cfg(test)] mod tests` block).
 
 use super::*;
-use crate::eval::{evaluate_with_trace, EvalTrace};
+use crate::eval::evaluate_with_trace;
 use crate::movepick::BUTTERFLY_HISTORY_BOUND;
 use crate::position::{Position, StateInfo};
 use crate::tt::TranspositionTable;
@@ -461,116 +461,94 @@ fn settled_ply_none_on_terminal_position() {
     assert!(lines.is_empty());
 }
 
-#[test]
-fn settled_ply_zero_when_single_move_pv() {
-    // Constructed scenario: if the PV has length 1, there's no
-    // adjacent delta to evaluate, so settled_ply == 0 trivially.
-    // Direct unit-level check of the helper.
-    use crate::types::Color;
-    let trace = EvalTrace::zero();
-    let result = compute_settled_ply(&[trace], Color::White);
-    assert_eq!(result, Some(0));
-}
-
-#[test]
-fn settled_ply_none_when_no_traces() {
-    use crate::types::Color;
-    let result = compute_settled_ply(&[], Color::White);
-    assert_eq!(result, None);
-}
-
-#[test]
-fn settled_ply_zero_when_every_delta_below_threshold() {
-    // Hand-constructed trace sequence where the white-POV score
-    // barely moves. Must settle at 0 regardless of length.
-    use crate::types::{Color, Value};
-    let mut traces = Vec::new();
-    for i in 0..6 {
-        let mut t = EvalTrace::zero();
-        // Alternate sign on final_value per ply to mimic
-        // side-to-move oscillation. With i % 2 == 0 meaning stm is
-        // black, the white-POV converts to -t.final_value + tempo.
-        // We want a stable white-POV of ~+5, so:
-        //   - even i (black-to-move): final_value = -(5 - TEMPO) = TEMPO - 5.
-        //   - odd  i (white-to-move): final_value = 5 + TEMPO.
-        let tempo = t.tempo.0;
-        let fv = if i % 2 == 0 { tempo - 5 } else { 5 + tempo };
-        t.final_value = Value(fv);
-        traces.push(t);
-    }
-    assert_eq!(compute_settled_ply(&traces, Color::White), Some(0));
-}
-
-/// Build a trace sequence with the given white-POV targets for
-/// each ply, assuming `root_stm == White` (so the stm-after-ply
-/// pattern is Black, White, Black, ...).
-fn traces_from_white_pov(targets_white_pov: &[i32]) -> Vec<EvalTrace> {
-    use crate::types::Value;
-    let tempo = EvalTrace::zero().tempo.0;
-    targets_white_pov
-        .iter()
-        .enumerate()
-        .map(|(i, &w)| {
-            let mut t = EvalTrace::zero();
-            // Even i → stm is black (root is White, flipped once).
-            // White-POV w means stm_unsigned = -w, and final_value
-            // = stm_unsigned + tempo = -w + tempo.
-            // Odd i → stm is white. final_value = w + tempo.
-            let fv = if i % 2 == 0 { -w + tempo } else { w + tempo };
-            t.final_value = Value(fv);
-            t
+/// Parse a SAN move list into a legal PV from `pos`.
+fn pv_from_san(pos: &Position, sans: &[&str]) -> Vec<Move> {
+    let mut scratch = pos.clone();
+    sans.iter()
+        .map(|s| {
+            let mv = crate::san::parse(&mut scratch, s).expect("test SAN must be legal");
+            scratch.do_move(mv);
+            mv
         })
         .collect()
 }
 
 #[test]
-fn settled_ply_filters_the_single_ply_sawtooth() {
-    // A canonical sawtooth: alternating 20/300 white-POV values
-    // with every 1-ply delta huge (280 cp) but every 2-ply delta
-    // exactly zero. Must settle at 0 — the eval is actually stable
-    // across complete exchanges, the 1-ply swings are just the
-    // "I moved but you haven't responded yet" asymmetry.
-    use crate::types::Color;
-    let traces = traces_from_white_pov(&[20, 300, 20, 300, 20, 300]);
-    assert_eq!(compute_settled_ply(&traces, Color::White), Some(0));
+fn material_settled_none_on_empty_pv() {
+    let pos = Position::startpos();
+    assert_eq!(compute_material_settled(&pos, &[]), None);
 }
 
 #[test]
-fn settled_ply_detects_two_ply_shift_on_top_of_sawtooth() {
-    // Same sawtooth as above for the first four plies, then a
-    // 180-cp lift: ply 4 = 200 (same side as ply 2 = 20, diff
-    // 180), ply 5 = 480 (same side as ply 3 = 300, diff 180).
-    // Under 2-ply comparison both plies 4 and 5 show big deltas
-    // against their same-side predecessor; scanning backward
-    // finds the last unstable at ply 5. PV ends mid-shift (no
-    // post-resolution ply available), so we land on 5 itself.
-    use crate::types::Color;
-    let traces = traces_from_white_pov(&[20, 300, 20, 300, 200, 480]);
-    assert_eq!(compute_settled_ply(&traces, Color::White), Some(5));
+fn material_settled_zero_on_quiet_line() {
+    // Uniformly quiet development: the first quiet run starts at ply
+    // 0 — the line banks nothing, immediately.
+    let pos = Position::startpos();
+    let pv = pv_from_san(&pos, &["e4", "e5", "Nf3", "Nc6", "Bc4"]);
+    assert_eq!(compute_material_settled(&pos, &pv), Some(0));
 }
 
 #[test]
-fn settled_ply_lands_on_post_resolution_when_available() {
-    // Mid-exchange peak modelled on the Nf3 → Bxe6 fxe6 scenario:
-    // ply 4 (white-side) shows white temporarily up a bishop
-    // (white_pov 950, up from 50 two plies back — 900 cp jump,
-    // unstable). Ply 5 (black-side post-recapture) restores
-    // parity (white_pov 60, 10 cp from ply 3's 50 — stable).
-    // Walking backward, the loop finds ply 4 unstable; with a
-    // post-resolution ply available (5), settle there rather
-    // than on the peak (4).
-    use crate::types::Color;
-    let traces = traces_from_white_pov(&[0, 0, 50, 50, 950, 60]);
-    assert_eq!(compute_settled_ply(&traces, Color::White), Some(5));
+fn material_settled_lands_on_the_recapture() {
+    // 3...exd4 4.Nxd4 then quiet development: the exchange resolves
+    // at the recapture (ply 1); the quiet tail must not extend it.
+    let pos = Position::from_fen(
+        "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+    )
+    .unwrap();
+    let pv = pv_from_san(&pos, &["exd4", "Nxd4", "Nf6", "Nc3", "Bb4"]);
+    assert_eq!(compute_material_settled(&pos, &pv), Some(1));
 }
 
 #[test]
-fn settled_ply_reports_zero_on_short_pv_below_two_plies() {
-    // A 2-ply trace sequence cannot use the 2-ply comparison
-    // (there's no index >= 2). Settles trivially at 0.
-    use crate::types::Color;
-    let traces = traces_from_white_pov(&[0, 100]);
-    assert_eq!(compute_settled_ply(&traces, Color::White), Some(0));
+fn material_settled_bridges_a_two_quiet_ply_gap() {
+    // Scandinavian shape: 2.exd5 Nf6 3.Nc3 Nxd5 — capture, two quiet
+    // plies, capture. The 2-quiet gap (the fork shape: quiet-move,
+    // quiet-flee, capture) stays inside one resolution window under
+    // MATERIAL_QUIET_RUN = 3, so the window closes on the ply-3
+    // recapture, not the ply-0 capture.
+    let pos = Position::from_fen(
+        "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+    )
+    .unwrap();
+    let pv = pv_from_san(&pos, &["exd5", "Nf6", "Nc3", "Nxd5"]);
+    assert_eq!(compute_material_settled(&pos, &pv), Some(3));
+}
+
+#[test]
+fn material_settled_excludes_the_deep_tail_past_a_quiet_run() {
+    // Same opening, but the recapture only comes after THREE quiet
+    // plies: the window closes at the ply-0 capture and the ply-4
+    // capture is speculative tail — exactly the deep-line trading
+    // that must not count as banked material.
+    let pos = Position::from_fen(
+        "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+    )
+    .unwrap();
+    let pv = pv_from_san(&pos, &["exd5", "Nf6", "Nc3", "g6", "Nf3", "Nxd5"]);
+    assert_eq!(compute_material_settled(&pos, &pv), Some(0));
+}
+
+#[test]
+fn material_settled_checks_keep_the_window_open() {
+    // Rook checks bridge the quiet replies: Rd8+ Ka7 Rd7+ Ka6 Rxh7.
+    // Each king move is a lone quiet ply between forcing events, so
+    // the window stays open to the ply-4 pawn grab. (Without checks
+    // counting as forcing, the run would close at ply 2 and report 0.)
+    let pos = Position::from_fen("k7/7p/8/8/8/8/8/K2R4 w - - 0 1").unwrap();
+    let pv = pv_from_san(&pos, &["Rd8+", "Ka7", "Rd7+", "Ka6", "Rxh7"]);
+    assert_eq!(compute_material_settled(&pos, &pv), Some(4));
+}
+
+#[test]
+fn material_settled_counts_a_promotion() {
+    // A bare promotion is a forcing event: settles on it.
+    let pos = Position::from_fen("8/4P3/8/8/8/2k5/8/4K3 w - - 0 1").unwrap();
+    let pv = pv_from_san(&pos, &["e8=Q"]);
+    assert_eq!(compute_material_settled(&pos, &pv), Some(0));
+    // A quiet (non-checking) tail after it doesn't move the window.
+    let pv = pv_from_san(&pos, &["e8=Q", "Kb3", "Qe4", "Ka3"]);
+    assert_eq!(compute_material_settled(&pos, &pv), Some(0));
 }
 
 #[test]

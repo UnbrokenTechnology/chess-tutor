@@ -413,10 +413,13 @@ fn standard_piece_value_cp(pt: PieceType) -> i32 {
 
 /// Net material the side-to-move gains (positive) or loses (negative)
 /// at the settled end of `line`, in material-centipawns (pawn = 100,
-/// standard values). Walks the PV through `settled_ply` (or the PV end
-/// if it never settled). The settled cap keeps the count quiescent — it
-/// stops once the tactics have resolved rather than counting a
-/// mid-exchange snapshot.
+/// standard values). Walks the PV through `settled_ply` — the
+/// *material-settled* ply (last forcing event before the first quiet
+/// run; see `search::settled`) — or the PV end when `None`. The cap is
+/// what keeps the count honest in both directions: it includes the
+/// full forced exchange (never a mid-exchange snapshot) and excludes
+/// the speculative deep-tail trades a long PV wanders into (which
+/// previously classified quiet opening moves as material wins/losses).
 fn line_material_delta_cp(root: &Position, line: &SearchLine, root_stm: Color) -> i32 {
     if line.pv.is_empty() {
         return 0;
