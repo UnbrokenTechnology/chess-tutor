@@ -495,10 +495,17 @@ documented low-ELO behavior the lever must stay able to produce.
 **K — piece:** knight 0.85 · all others 1.00.
 
 **O — ray occlusion:** discovered-attack vehicle (mover unveils a
-friendly slider's attack on an enemy piece) ×0.75 · slider path
-threads traffic (occupied squares adjacent to the path interior: ≥4 →
-×0.85, 2–3 → ×0.92). (No standalone long-move factor — length is
-subsumed by the two-endpoint attention term.)
+friendly slider's attack on an enemy piece) ×0.75 · **diagonal pinch
+points** ×0.70 each (user's gap-width model, 2026-06-07, replacing the
+king-ring traffic count): a diagonal path step both of whose flank
+squares are occupied passes through a ZERO-width corner gap — the true
+"squeeze between two pawns" (the Bxa1 playtest snipe: one pinch at
+d4→c3 between c4/d3 → P ≈ 2.5% at p=0, was 18%). Orthogonal slides
+are exempt (their corridor is always a full square wide — resolves
+the queen-sortie-from-the-nest over-pricing); single occupied flanks
+are free (the visual ray widens into the open square). (No standalone
+long-move factor — length is subsumed by the two-endpoint attention
+term.)
 
 **A — attention (state inputs, neutral when absent):**
 **two-endpoint** distance from the opponent's last-move square (a move
@@ -546,6 +553,38 @@ Line-level findability (retrospective): `∏ P(see pv[i])` over the
 mover's plies through `material_settled`, evaluated at a fixed
 "strong-human reference" perception (≈0.75) — replaces/augments the
 depth-honesty heuristics.
+
+### Perception → Elo sweeps (2026-06-07, run_perception_sweep.py)
+
+Bare bases (rank 1.0, no noise) × p ∈ {0.0..1.0 step 0.1}, round-robin
+with the Maia ladder, 7,600 games per base. **Shape: smoothly
+saturating, knee at p ≈ 0.6 on both bases** — no staircase from the
+discrete factors at 0.1 resolution. Post-pinch numbers (pre-pinch in
+runs/perception_sweep/*.pre-pinch.*; deltas within ±65 error —
+the pinch redesign redistributes WHICH moves are missed without moving
+the strength curve):
+
+```
+        p=0.0   0.1    0.2    0.3    0.4    0.5    0.6   0.7–1.0
+d2q2:   1020   1199   1395   1530   1656   1762   1813   ~1800 flat
+d1q1:    897   1113   1275   1374   1500   1568   1579   ~1590 flat
+```
+
+- Useful dial range is **p ∈ [0, 0.6]**: grid samples densely there,
+  sparsely above (above the knee = statistically the bare base).
+- Bottom slope ~+165–215 Elo per 0.1 tick; spans ~+700–850.
+- Perception alone floors at ~900–1000 lichess (≈600–700 chess.com) —
+  Martin-tier needs stacking with rank / qsearch-0 / endgame tiers.
+- Bypass cross-check: p=1.0 measured ≈ the pre-perception bare-base
+  figures (d2q2 1813 vs 1859 prior; d1q1 1593 vs 1661 prior — within
+  pool noise).
+- CAVEAT: the d2q2 pool's Maia anchors compress (~150 Elo spread vs
+  ~300 expected; the d1q1 pool's were sane) — treat d2q2 absolutes as
+  ±100 soft; shapes robust. Investigate before any rung-locking uses
+  these numbers.
+- Playtest texture confirmed the design's determinism story: a missed
+  queen-grab (lost 63% roll) was punished one position later (new
+  zobrist → new roll) — blind spots breathe with the position.
 
 ## Sequencing (agreed order)
 
