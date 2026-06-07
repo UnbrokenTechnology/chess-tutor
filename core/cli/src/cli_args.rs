@@ -376,6 +376,32 @@ pub enum Command {
         #[arg(long, default_value = "default")]
         fen_file: String,
     },
+    /// TEMPORARY instrumentation (PLAN-perception.md step 1): audit
+    /// where `settled_ply` lands across a corpus of MultiPV searches,
+    /// compare the material classification the noise miss/blunder
+    /// branches derive from it against a prototype of the proposed
+    /// `material_settled` semantics (forward event-walk, first
+    /// quiet-run stop), and report the gap to the tactic-detector
+    /// oracle. Remove together with the plan.
+    SettledAudit {
+        /// Transposition-table size in MB.
+        #[arg(long, default_value_t = 16)]
+        tt_mb: usize,
+        /// Search depth. Repeatable (`--depth 8 --depth 12`) to show
+        /// how leaf-drag scales with depth; one aggregate block each.
+        #[arg(long = "depth", default_values_t = [12u32])]
+        depths: Vec<u32>,
+        /// MultiPV width. Default 10 mirrors the play noise path.
+        #[arg(long, default_value_t = 10)]
+        multi_pv: usize,
+        /// `default` for the built-in 45-position SF11 set, or a path
+        /// to a FEN file (same format as `chess-tutor bench`).
+        #[arg(long, default_value = "default")]
+        fen_file: String,
+        /// Max classification-flip examples printed in full per depth.
+        #[arg(long, default_value_t = 5)]
+        examples: usize,
+    },
     /// Interactive REPL. Human enters SAN or UCI; engine replies on
     /// its turn.
     Play {

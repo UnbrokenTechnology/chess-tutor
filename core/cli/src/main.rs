@@ -22,6 +22,7 @@ mod noise_bench;
 mod piece_fmt;
 mod play;
 mod search_report;
+mod settled_audit;
 mod square_view;
 mod summary;
 mod tactics_view;
@@ -1280,6 +1281,21 @@ fn main() -> Result<()> {
                 threads,
                 runs,
                 fen_file,
+            })?;
+        }
+        Command::SettledAudit {
+            tt_mb,
+            depths,
+            multi_pv,
+            fen_file,
+            examples,
+        } => {
+            settled_audit::run(settled_audit::SettledAuditArgs {
+                tt_mb,
+                depths,
+                multi_pv,
+                fen_file,
+                examples,
             })?;
         }
         Command::Play {
