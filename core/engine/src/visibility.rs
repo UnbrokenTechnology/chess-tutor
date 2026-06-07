@@ -41,12 +41,23 @@
 //!   move can't have both endpoints near one locus.
 //!
 //! `P(see)` is a margin model on `m = p − (1 − V)` (how far perception
-//! clears the move's difficulty): cleared → a high plateau ramping to
-//! a deterministic 1.0 ("reliably sees" classes — the believability
-//! critique of existing weak bots is *inconsistency*); missed → a
-//! quadratic cliff to literal 0 (at `p = 0`, everything `V < 0.55` is
-//! never seen, while every V = 1.0 normal move always is: maximally
-//! geometry-blind, not move-blind).
+//! clears the move's difficulty): cleared → a **perception-scaled**
+//! plateau ramping to a deterministic 1.0 ("reliably sees" classes —
+//! the believability critique of existing weak bots is
+//! *inconsistency*; and a sharper scan is also a more reliable scan,
+//! so the fumble rate on cleared moves shrinks as p rises, converging
+//! smoothly into the p = 1.0 bypass); missed → a quadratic cliff to
+//! literal 0 (at `p = 0`, everything `V < 0.55` is never seen, while
+//! every V = 1.0 normal move always is: maximally geometry-blind, not
+//! move-blind).
+//!
+//! Because the per-game roll is deterministic, a per-move miss
+//! probability is really a **permanent blind-spot rate**: P = 0.9
+//! means ~10% of such moves are invisible for the whole game, every
+//! re-search agreeing. Per-move values therefore sit deliberately
+//! high (hardest common stacks ≈ 0.5); the weakness comes from
+//! compounding — across the plies of a line and across the game's
+//! many decisions — not from single moves being coin-flips.
 //!
 //! **Opponent-ply asymmetry**: on plies where the side-not-being-
 //! modeled moves, `V^OPP_EXPONENT` is applied before the curve — a
@@ -86,34 +97,54 @@ pub const S_CASTLING: f64 = 0.80;
 pub const S_EN_PASSANT: f64 = 0.55;
 pub const S_UNDERPROMOTION: f64 = 0.25;
 
-/// Direction factors, mover-relative.
-pub const D_SIDEWAYS: f64 = 0.70;
-pub const D_BACKWARD: f64 = 0.55;
+/// Direction factors, mover-relative. Applied in FULL to quiet moves;
+/// square-rooted for captures (the target piece pulls the eye,
+/// overriding path-direction bias — the forward-attention evidence is
+/// about quiet moves; an open-board sideways rook *take* is nothing
+/// like a quiet rank slide). Checks deliberately do NOT get the
+/// attenuation: missed checks (including mate-in-1) are documented
+/// low-ELO behavior the lever must stay able to produce.
+pub const D_SIDEWAYS: f64 = 0.85;
+pub const D_BACKWARD: f64 = 0.75;
 
 /// Knight moves are non-collinear — the hardest piece to visualize.
-pub const K_KNIGHT: f64 = 0.75;
+pub const K_KNIGHT: f64 = 0.85;
 
 /// Discovered-attack vehicle: the mover's departure unveils a friendly
 /// slider's attack on the enemy king. (v1 scope: king targets only —
 /// the cached `blockers_for_king` makes it free; queen/rook targets
 /// are a follow-up.)
-pub const O_VEHICLE: f64 = 0.60;
+pub const O_VEHICLE: f64 = 0.75;
 
 /// Slider path threading traffic: occupied squares adjacent to the
 /// path interior.
-pub const O_THREAD_HEAVY: f64 = 0.75; // >= 4 neighbours
-pub const O_THREAD_LIGHT: f64 = 0.85; // 2..=3 neighbours
+pub const O_THREAD_HEAVY: f64 = 0.85; // >= 4 neighbours
+pub const O_THREAD_LIGHT: f64 = 0.92; // 2..=3 neighbours
 
 /// Per-endpoint attention factor by Chebyshev distance from the
 /// opponent's last-move square: `<=2 -> 1.0`, `3..=4 ->`
 /// [`A_NEAR`], `>=5 ->` [`A_FAR`]. Applied to BOTH endpoints.
-pub const A_NEAR: f64 = 0.92;
-pub const A_FAR: f64 = 0.85;
+pub const A_NEAR: f64 = 0.95;
+pub const A_FAR: f64 = 0.90;
 
-/// Margin-curve shape: perception clears difficulty → P starts at
-/// [`PLATEAU`] and ramps to 1.0 over [`RAMP`] of margin; perception
-/// falls short → quadratic cliff hitting literal 0 at −[`CLIFF`].
-pub const PLATEAU: f64 = 0.80;
+/// Endpoint clutter (visual crowding): occupied squares in the union
+/// of the from/to king-rings (the two endpoints excluded). Dense
+/// middlegame tangles degrade perception ("misses spike when pieces
+/// start staring at each other"); thresholds are set high enough that
+/// ordinary opening formations (home-rank neighbours of a pawn push)
+/// stay neutral.
+pub const A_CLUTTER_LIGHT: f64 = 0.94; // 7..=9 occupied ring squares
+pub const A_CLUTTER_HEAVY: f64 = 0.88; // >= 10
+
+/// Margin-curve shape: perception clears difficulty → P starts at the
+/// perception-scaled plateau `1 − (1 − PLATEAU_FLOOR)·(1 − p)` and
+/// ramps to 1.0 over [`RAMP`] of margin; perception falls short →
+/// quadratic cliff (from the same plateau) hitting literal 0 at
+/// −[`CLIFF`]. Scaling the plateau by `p` means "how often you fumble
+/// a move you're capable of seeing" shrinks as perception rises, and
+/// the curve converges smoothly into the `p = 1.0` bypass instead of
+/// jumping (a p = 0.95 bot fumbles ~1%, not a flat 20%).
+pub const PLATEAU_FLOOR: f64 = 0.80;
 pub const RAMP: f64 = 0.30;
 pub const CLIFF: f64 = 0.45;
 
@@ -168,7 +199,9 @@ pub fn visibility(pos: &Position, mv: Move, ctx: &VisibilityContext) -> f64 {
     };
 
     // D — direction, mover-relative (perspective flip makes "forward"
-    // = increasing rank for both colors).
+    // = increasing rank for both colors). Captures get the attenuated
+    // (square-rooted) penalty: the target pulls the eye.
+    let is_capture = pos.is_capture(mv);
     let from_rank = from.from_perspective(us).rank() as i8;
     let to_rank = to.from_perspective(us).rank() as i8;
     let d = match to_rank - from_rank {
@@ -176,6 +209,7 @@ pub fn visibility(pos: &Position, mv: Move, ctx: &VisibilityContext) -> f64 {
         0 => D_SIDEWAYS,
         _ => D_BACKWARD,
     };
+    let d = if is_capture { d.sqrt() } else { d };
 
     // K — piece type. `piece_on(from)` exists for any legal move.
     let mover = pos
@@ -227,6 +261,15 @@ pub fn visibility(pos: &Position, mv: Move, ctx: &VisibilityContext) -> f64 {
         a *= endpoint_attention(from, locus);
         a *= endpoint_attention(to, locus);
     }
+    // Endpoint clutter: visual crowding around the move's two squares.
+    let rings = (pseudo_attacks(PieceType::King, from) | pseudo_attacks(PieceType::King, to))
+        .without(from)
+        .without(to);
+    a *= match (rings & pos.occupied()).popcount() {
+        0..=6 => 1.0,
+        7..=9 => A_CLUTTER_LIGHT,
+        _ => A_CLUTTER_HEAVY,
+    };
 
     (s * d * k * o * a).clamp(f64::MIN_POSITIVE, 1.0)
 }
@@ -246,7 +289,8 @@ fn endpoint_attention(sq: Square, locus: Square) -> f64 {
 
 /// Probability the move is seen, given its visibility score and the
 /// bot's perception level (`0.0..=1.0`; `>= 1.0` bypasses — always
-/// seen). Margin model: `m = p − (1 − V)`.
+/// seen). Margin model: `m = p − (1 − V)`, with a perception-scaled
+/// plateau (a sharper scan is also a more *reliable* scan).
 ///
 /// `V == 1.0` is an exact special case (factors are discrete; a move
 /// with zero difficulty flags has nothing to miss) — so even at
@@ -256,15 +300,16 @@ pub fn p_see(v: f64, perception: f64) -> f64 {
     if perception >= 1.0 || v >= 1.0 {
         return 1.0;
     }
+    let plateau = 1.0 - (1.0 - PLATEAU_FLOOR) * (1.0 - perception);
     let m = perception + v - 1.0;
     if m >= 0.0 {
-        PLATEAU + (1.0 - PLATEAU) * (m / RAMP).min(1.0)
+        plateau + (1.0 - plateau) * (m / RAMP).min(1.0)
     } else {
         let t = 1.0 + m / CLIFF;
         if t <= 0.0 {
             0.0
         } else {
-            PLATEAU * t * t
+            plateau * t * t
         }
     }
 }

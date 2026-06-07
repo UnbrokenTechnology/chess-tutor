@@ -405,29 +405,60 @@ strictly less visible at equal salience.
 ### v1 weight table (proposed 2026-06-06, feel-tune then freeze)
 
 `V(mv) = S × D × K × O × A ∈ (0, 1]`, then the **margin curve**
-(user-steepened 2026-06-07, replacing the earlier `V^(κ(1−p))` power
-form which couldn't give both a low-V cliff and a generous
-above-threshold plateau): with margin `m = p − (1 − V)` (how far
-perception clears the move's difficulty),
+(user-steepened 2026-06-07; **re-leveled + perception-scaled plateau
+after the first playtest**, same day — see "Playtest revision" below):
+with margin `m = p − (1 − V)` and
+`plateau(p) = 1 − (1 − PLATEAU_FLOOR)·(1 − p)`,
 
 ```
-P = 1.0                              if V == 1.0  (no difficulty flags → nothing to miss; exact-match special case is principled: factors are discrete)
-P = PLATEAU + (1−PLATEAU)·min(1, m/RAMP)    if m ≥ 0
-P = PLATEAU · max(0, 1 + m/CLIFF)²          if m < 0  (quadratic cliff to literal 0)
-PLATEAU = 0.8 · RAMP = 0.3 · CLIFF = 0.45
+P = 1.0                                     if V == 1.0  (no difficulty flags → nothing to miss; exact-match special case is principled: factors are discrete)
+P = plateau(p) + (1−plateau(p))·min(1, m/RAMP)   if m ≥ 0
+P = plateau(p) · max(0, 1 + m/CLIFF)²            if m < 0  (quadratic cliff to literal 0)
+PLATEAU_FLOOR = 0.8 · RAMP = 0.3 · CLIFF = 0.45
 ```
 
-Properties: perception clears difficulty → P ≥ 0.8 ramping to a
+Properties: perception clears difficulty → P ≥ plateau(p) ramping to a
 deterministic 1.0 at margin ≥ 0.3 ("reliably sees" classes — the
-believability-consistency ask); below threshold, quadratic cliff
-hitting **literal zero** at margin −0.45, so at p = 0 everything
-V < 0.55 is never seen while every V = 1.0 normal move always is.
-`p ≥ 1.0` → bypass (always seen). Deterministic roll per
-`(game_seed, zobrist, move)`. **Opponent-ply asymmetry:** on plies
-where the side-not-being-modeled moves, use `V^1.5` before the curve —
-barely moves V≈1 (adjacent recapture stays seen — Einstellung) but
-pushes subtle refutations deep into the cliff (Hope Chess); e.g. the
-knight-punish refutation V .64 → .51 → P = .10 at p = 0.2.
+believability-consistency ask). The plateau **scales with p** ("how
+often you fumble a move you're capable of seeing" shrinks as the scan
+sharpens: p=0 → 0.80, p=0.5 → 0.90, p=0.95 → 0.99) and converges
+smoothly into the `p ≥ 1.0` bypass instead of jumping. Below
+threshold, quadratic cliff hitting **literal zero** at margin −0.45.
+Deterministic roll per `(game_seed, zobrist, move)`.
+**Opponent-ply asymmetry:** `V^1.5` before the curve on plies where
+the side-not-being-modeled moves. Curve visualization:
+`calibration/plot_perception_curve.py`.
+
+### Playtest revision (2026-06-07, after the first feel game)
+
+User played a "perfect" bot (d10/q∞/r1) at p=0.5 and won off a
+too-weak blunder: in `5kn1/5p2/p2N2p1/8/5P2/1r6/7r/k2R4 b` the bot
+played Rh1?? blind to the open-board recapture Rxh1. Autopsy: V =
+sideways .70 × A_NEAR .92 = .64 → opp-ply .52 → P = .81 — and **the
+deterministic roll makes any per-move miss probability a PERMANENT
+game-long blind spot** (19% lottery, hit). Compounding is double:
+across a line's plies (a d10 PV's integrity needs every reply-roll to
+succeed) and across the game's hundreds of node decisions. Fixes, all
+landed:
+
+1. **Direction square-rooted for captures** (the targeted fix — the
+   forward-bias evidence is about quiet moves; a sideways rook TAKE
+   has a target pulling the eye). Checks excluded on purpose.
+2. **Weights re-leveled up** (hardest common stacks ≈ 0.5; the
+   weakness now comes from compounding + the residual lottery, not
+   from single moves being coin flips — user's diagnosis).
+3. **Perception-scaled plateau** (user: "shouldn't the plateau rise
+   with perception?" — it also fixes the discontinuity at the bypass).
+4. **Endpoint-clutter factor added** (user-requested; penalizes dense
+   middlegame tangles, neutral on open boards and opening formations —
+   it would NOT have saved the Rh1 case, which is why 1–3 are the
+   load-bearing fixes).
+
+Post-revision: Rxh1 reads V ≈ .88 → opp .82 → margin +0.32 → **P = 1.0
+deterministic**. The trade accepted: single-move blindness migrates
+down-dial (the quiet backward Qe1 at p=.5 is now ~98% seen; the
+classroom blindness lives at p≈0–0.2), and a given p plays stronger
+than before — where each p lands on the ELO ladder is the grid's job.
 
 **Composition rule:** every sub-factor is an independent multiplier
 defaulting to 1.0 when not applicable; `V = S × D × K × (∏O) × (∏A)`,
@@ -455,14 +486,18 @@ payoff is beyond the horizon (the depth/qsearch levers' job) — never
 because they are quiet.
 
 **D — direction (mover-relative rank delta):** forward 1.00 · sideways
-0.70 · backward 0.55.
+0.85 · backward 0.75 — applied in FULL to quiet moves, **square-rooted
+for captures** (the target piece pulls the eye; the forward-bias
+evidence is about quiet moves — the Rh1 playtest fix). Checks
+deliberately do NOT get the attenuation: missed checks/mates are
+documented low-ELO behavior the lever must stay able to produce.
 
-**K — piece:** knight 0.75 · all others 1.00.
+**K — piece:** knight 0.85 · all others 1.00.
 
 **O — ray occlusion:** discovered-attack vehicle (mover unveils a
-friendly slider's attack on an enemy piece) ×0.60 · slider path
+friendly slider's attack on an enemy piece) ×0.75 · slider path
 threads traffic (occupied squares adjacent to the path interior: ≥4 →
-×0.75, 2–3 → ×0.85). (No standalone long-move factor — length is
+×0.85, 2–3 → ×0.92). (No standalone long-move factor — length is
 subsumed by the two-endpoint attention term.)
 
 **A — attention (state inputs, neutral when absent):**
@@ -470,40 +505,42 @@ subsumed by the two-endpoint attention term.)
 is a relation; you must attend BOTH ends — seeing the bishop doesn't
 mean seeing its far target, and vice versa):
 `A = g(cheby(from, last_to)) × g(cheby(to, last_to))`,
-`g: ≤2 → 1.0 · 3–4 → 0.92 · ≥5 → 0.85` (both-far = 0.72) · mover
+`g: ≤2 → 1.0 · 3–4 → 0.95 · ≥5 → 0.90` (both-far = 0.81) ·
+**endpoint clutter** (visual crowding; user-requested from playtest):
+occupied squares in the union of the from/to king-rings (endpoints
+excluded): 7–9 → ×0.94, ≥10 → ×0.88 (thresholds sit above ordinary
+opening formations — 1. e4's ring count is 5 → neutral) · mover
 dormancy (≥12 plies unmoved) ×0.90 — dormancy is v1-OPTIONAL (needs
 per-piece last-moved tracking; the ctx field defaults neutral).
 
 **Worked archetypes** (own-ply; opponent plies apply V^1.5 first):
 
-| Move | V | Reads as |
+| Move | V (revised) | Reads as |
 |---|---|---|
 | Adjacent queen recapture | **1.00** | literally never declined (it IS the attention locus) ✔ |
-| Backward quiet queen fork (the Qe1 case) | 1.0×.55 = **.55** | p=.7: .97 · p=.4: .63 · p=0: **0** |
-| Cross-board knight capture of a hung queen | 1.0×.75×.85 ≈ **.64** | as opponent's refutation: .51 → P = .10 at p=.2 — the unpunished-queen case ✔ |
-| Sniper bishop, threaded diagonal + both endpoints far | 1.0×.8×.72 ≈ **.58** (clear diagonal at target near action: ~1.0) | hard only when screened/remote — the corrected claim ✔ |
-| Quiet discovered-attack vehicle move | 1.0×.60 = **.60** | hardest motif class carries its own penalty ✔ |
-| Quiet 3-move plan of normal moves | 1.0³ = **1.00** | ordinary plans fully findable; payoff-beyond-horizon is the depth/qsearch levers' job ✔ |
+| Open-board sideways rook take (the Rh1 case) | √.85×.95 ≈ **.88** → opp .82 | margin +0.32 at p=.5 → **P = 1.0 deterministic** ✔ |
+| Backward quiet queen fork (the Qe1 case) | **.75** | p=.7: 1.0 · p=.4: .94 · p=0: **.16** — classroom blindness lives down-dial now |
+| Cross-board knight capture of a hung queen | .85×.90 ≈ **.77** | as opponent's refutation: .67 → P = .42 at p=.2 — still the unpunished-queen case ✔ |
+| Sniper bishop, threaded + both endpoints far | .85×.81 ≈ **.69** (clear diagonal at target near action: ~1.0) | hard only when screened/remote ✔ |
+| Quiet discovered-attack vehicle move | **.75** (stacked with knight/backward/clutter → .4–.5) | hardest motif class; deep intersections still go low ✔ |
+| Quiet 3-move plan of normal moves | 1.0³ = **1.00** | ordinary plans fully findable ✔ |
 
-**P(see) reference table** — margin curve:
+**P(see) reference table** — revised curve (scaled plateau):
 
 | V \ p | 1.0 | 0.7 | 0.4 | 0.2 | 0.0 |
 |---|---|---|---|---|---|
 | 1.00 (normal move) | 1.00 | 1.00 | 1.00 | 1.00 | **1.00** |
-| 0.92 (slightly far) | 1.00 | 1.00 | 1.00 | .88 | .54 |
-| 0.80 (castling) | 1.00 | 1.00 | .93 | .80 | .25 |
-| 0.60 | 1.00 | 1.00 | .80 | .25 | .01 |
-| 0.40 | 1.00 | .87 | .25 | .01 | **0** |
-| 0.20 | 1.00 | .48 | .01 | 0 | 0 |
+| 0.92 | 1.00 | 1.00 | 1.00 | .90 | .54 |
+| 0.80 (castling) | 1.00 | 1.00 | .96 | .84 | .25 |
+| 0.60 | 1.00 | 1.00 | .88 | .26 | .01 |
+| 0.40 | 1.00 | .96 | .27 | .01 | **0** |
+| 0.20 | 1.00 | .57 | .01 | 0 | 0 |
 
 `p = 0` means **maximally geometry-blind, not move-blind**: every
-V = 1.0 move (pawn marches, ordinary captures) is always seen — the
-bot still plays chess — while everything V < 0.55 is *never* seen
-(backward queen moves, cross-board knight punishes, en passant). The
-plateau means margin ≥ 0.3 → P = 1.0 exactly: deterministic "reliably
-sees" classes per rung (the consistency the believability critique
-demands); if a thin miss-tail above threshold turns out more
-believable, cap the ramp at 0.97 instead of 1.0.
+V = 1.0 move is always seen, the cliff floor (literal zero) now needs
+V < 0.55 = multi-factor stacks. The scaled plateau means a high-p bot
+fumbles cleared moves at `(1−PLATEAU_FLOOR)·(1−p)` — ~1% at p=0.95 —
+not a flat 20%.
 
 Line-level findability (retrospective): `∏ P(see pv[i])` over the
 mover's plies through `material_settled`, evaluated at a fixed

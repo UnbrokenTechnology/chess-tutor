@@ -149,11 +149,12 @@ fn threaded_slider_path_is_penalized() {
 
 #[test]
 fn attention_penalizes_both_far_endpoints_independently() {
-    // White rook a1 -> a8 (forward, clear file). Locus at h1: the rook's
+    // White rook a1 -> a8 (forward, clear file; checks the h8 king along
+    // the 8th rank -- checks don't enter V). Locus at h1: the rook's
     // from-square a1 is 7 away (far) and to-square a8 is 7 away (far)
     // -> A_FAR twice. Locus at a2: from is adjacent (1.0), to is 6 away
     // -> A_FAR once.
-    let pos = parse("k7/8/8/8/8/8/8/R3K3 w - - 0 1");
+    let pos = parse("7k/8/8/8/8/8/8/R3K3 w - - 0 1");
     let h1 = Square::from_algebraic("h1").unwrap();
     let a2 = Square::from_algebraic("a2").unwrap();
     let both_far = v(&pos, "Ra8+", Some(h1));
@@ -162,27 +163,68 @@ fn attention_penalizes_both_far_endpoints_independently() {
     assert!((one_far - A_FAR).abs() < EPS, "one far: {one_far}");
 }
 
+#[test]
+fn capture_attenuates_the_direction_penalty() {
+    // White rook a1: Rb1 is a sideways QUIET move (full sideways
+    // penalty); Rxh1 is a sideways CAPTURE (the target pulls the eye:
+    // square-rooted penalty). The open-board sideways rook take that
+    // motivated this rule (the Rh1 playtest blunder) must read as
+    // near-visible.
+    let pos = parse("1k6/8/8/8/8/8/4K3/R6r w - - 0 1");
+    let quiet = v(&pos, "Rb1", None);
+    let take = v(&pos, "Rxh1", None);
+    assert!((quiet - D_SIDEWAYS).abs() < EPS, "quiet sideways: {quiet}");
+    assert!(
+        (take - D_SIDEWAYS.sqrt()).abs() < EPS,
+        "sideways capture: {take}"
+    );
+}
+
+#[test]
+fn endpoint_clutter_penalizes_dense_tangles_not_openings() {
+    // Qd4 boxed in by ten pawns: Qxe5's two endpoint rings hold 9
+    // occupied squares -> light clutter penalty. (Capture + forward,
+    // adjacent move: every other factor neutral.)
+    let pos = parse("k7/8/3ppp2/2p1p3/2pQp3/2ppp3/8/K7 w - - 0 1");
+    let got = v(&pos, "Qxe5", None);
+    assert!((got - A_CLUTTER_LIGHT).abs() < EPS, "cluttered take: {got}");
+
+    // Ordinary opening formations stay neutral: 1. e4's ring count (5
+    // home-rank neighbours) sits below the clutter threshold -- covered
+    // by normal_forward_quiet_move_has_no_difficulty asserting V = 1.0.
+}
+
 // ---- the margin curve ----
 
 #[test]
 fn curve_hits_the_plan_reference_points() {
-    // The PLAN-perception.md reference table.
+    // The PLAN-perception.md reference table (perception-scaled plateau:
+    // plateau(p) = 1 - (1 - PLATEAU_FLOOR)*(1 - p)).
     let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+    let plateau = |p: f64| 1.0 - (1.0 - PLATEAU_FLOOR) * (1.0 - p);
     // V = 1.0: always seen, any perception.
     assert!(close(p_see(1.0, 0.0), 1.0));
     assert!(close(p_see(1.0, 0.7), 1.0));
-    // V = 0.4 at p = 0.7: margin .1 -> .8 + .2*(1/3) = .8667
-    assert!(close(p_see(0.4, 0.7), 0.8 + 0.2 / 3.0));
-    // V = 0.4 at p = 0.4: margin -.2 -> .8*(1 - .2/.45)^2 ~= .2469
-    assert!(close(p_see(0.4, 0.4), 0.8 * (1.0 - 0.2 / 0.45_f64).powi(2)));
+    // V = 0.4 at p = 0.7: margin .1 -> plateau(.7)=.94 + .06*(1/3) = .96
+    assert!(close(p_see(0.4, 0.7), plateau(0.7) + (1.0 - plateau(0.7)) / 3.0));
+    // V = 0.4 at p = 0.4: margin -.2 -> .88*(1 - .2/.45)^2
+    assert!(close(
+        p_see(0.4, 0.4),
+        plateau(0.4) * (1.0 - 0.2 / 0.45_f64).powi(2)
+    ));
     // V = 0.4 at p = 0: margin -.6 below -CLIFF -> literal zero.
     assert!(close(p_see(0.4, 0.0), 0.0));
     // V = 0.55 at p = 0: margin -.45 == -CLIFF -> exactly zero.
     assert!(close(p_see(0.55, 0.0), 0.0));
-    // Margin >= RAMP -> deterministic 1.0.
+    // Margin >= RAMP -> deterministic 1.0 at any level.
     assert!(close(p_see(0.9, 0.4), 1.0));
-    // Plateau floor exactly at margin 0.
-    assert!(close(p_see(0.6, 0.4), PLATEAU));
+    // Plateau exactly at margin 0, scaled by perception: a sharper scan
+    // fumbles less (the user's "plateau should rise with p").
+    assert!(close(p_see(0.6, 0.4), plateau(0.4))); // 0.88
+    assert!(close(p_see(0.8, 0.2), plateau(0.2))); // 0.84
+    assert!(close(p_see(0.2, 0.8), plateau(0.8))); // 0.96
+    // The curve converges into the p = 1.0 bypass instead of jumping.
+    assert!(p_see(0.5, 0.99) > 0.99);
 }
 
 #[test]

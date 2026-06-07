@@ -833,10 +833,16 @@ fn perception_zero_terminal_positions_stay_terminal() {
 
 #[test]
 fn perception_zero_misses_the_backward_mate_unless_root_checks_exempt() {
-    // Qe1# is the only mate-in-1 and it is a BACKWARD queen move
-    // (V = 0.55 -> P(see) = 0 at p = 0: below the cliff). Without the
-    // root-check exemption the bot cannot play it; with the exemption
-    // (the guaranteed_mate_in contract patch) it must.
+    // Qe1# is the only mate-in-1 and it is a BACKWARD quiet check
+    // (V = D_BACKWARD = 0.75; checks deliberately don't get the
+    // capture attenuation — missed mates are documented low-ELO
+    // behavior). At p = 0 that's P(see) ~ 0.16, and the per-game roll
+    // for seed 7 hides it — deterministic for this seed, not literal
+    // zero (the 2026-06-07 re-leveling moved single-factor moves off
+    // the cliff floor). If a weight change flips the roll, pick a
+    // hiding seed rather than weakening the assertion. With the
+    // root-check exemption (the guaranteed_mate_in contract patch)
+    // the mate must be found regardless.
     let fen = "8/4Q3/8/8/8/6K1/8/7k w - - 0 1";
     let mate = Move::normal(Square::E7, Square::E1);
 
