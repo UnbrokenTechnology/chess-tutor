@@ -404,13 +404,30 @@ strictly less visible at equal salience.
 
 ### v1 weight table (proposed 2026-06-06, feel-tune then freeze)
 
-`V(mv) = S × D × K × O × A ∈ (0, 1]`, then
-`P(see | perception p) = V^(κ·(1−p))` with `κ = 2.0`; `p ≥ 1.0` →
-bypass (always seen). Deterministic roll per
+`V(mv) = S × D × K × O × A ∈ (0, 1]`, then the **margin curve**
+(user-steepened 2026-06-07, replacing the earlier `V^(κ(1−p))` power
+form which couldn't give both a low-V cliff and a generous
+above-threshold plateau): with margin `m = p − (1 − V)` (how far
+perception clears the move's difficulty),
+
+```
+P = 1.0                              if V == 1.0  (no difficulty flags → nothing to miss; exact-match special case is principled: factors are discrete)
+P = PLATEAU + (1−PLATEAU)·min(1, m/RAMP)    if m ≥ 0
+P = PLATEAU · max(0, 1 + m/CLIFF)²          if m < 0  (quadratic cliff to literal 0)
+PLATEAU = 0.8 · RAMP = 0.3 · CLIFF = 0.45
+```
+
+Properties: perception clears difficulty → P ≥ 0.8 ramping to a
+deterministic 1.0 at margin ≥ 0.3 ("reliably sees" classes — the
+believability-consistency ask); below threshold, quadratic cliff
+hitting **literal zero** at margin −0.45, so at p = 0 everything
+V < 0.55 is never seen while every V = 1.0 normal move always is.
+`p ≥ 1.0` → bypass (always seen). Deterministic roll per
 `(game_seed, zobrist, move)`. **Opponent-ply asymmetry:** on plies
 where the side-not-being-modeled moves, use `V^1.5` before the curve —
-a power barely moves V≈1 (adjacent recapture stays seen — Einstellung)
-but crushes V≈0.3 (subtle refutations vanish — Hope Chess).
+barely moves V≈1 (adjacent recapture stays seen — Einstellung) but
+pushes subtle refutations deep into the cliff (Hope Chess); e.g. the
+knight-punish refutation V .64 → .51 → P = .10 at p = 0.2.
 
 **Composition rule:** every sub-factor is an independent multiplier
 defaulting to 1.0 when not applicable; `V = S × D × K × (∏O) × (∏A)`,
@@ -462,27 +479,31 @@ per-piece last-moved tracking; the ctx field defaults neutral).
 | Move | V | Reads as |
 |---|---|---|
 | Adjacent queen recapture | **1.00** | literally never declined (it IS the attention locus) ✔ |
-| Backward quiet queen fork (the Qe1 case) | 1.0×.55 = **.55** | p=.7: .70 · p=.4: .49 · p=0: .30 |
-| Cross-board knight capture of a hung queen | 1.0×.75×.85 ≈ **.64** | as opponent's refutation: .51; at p=.2: .34 — the unpunished-queen case ✔ |
+| Backward quiet queen fork (the Qe1 case) | 1.0×.55 = **.55** | p=.7: .97 · p=.4: .63 · p=0: **0** |
+| Cross-board knight capture of a hung queen | 1.0×.75×.85 ≈ **.64** | as opponent's refutation: .51 → P = .10 at p=.2 — the unpunished-queen case ✔ |
 | Sniper bishop, threaded diagonal + both endpoints far | 1.0×.8×.72 ≈ **.58** (clear diagonal at target near action: ~1.0) | hard only when screened/remote — the corrected claim ✔ |
 | Quiet discovered-attack vehicle move | 1.0×.60 = **.60** | hardest motif class carries its own penalty ✔ |
 | Quiet 3-move plan of normal moves | 1.0³ = **1.00** | ordinary plans fully findable; payoff-beyond-horizon is the depth/qsearch levers' job ✔ |
 
-**P(see) reference table** — `P = V^(2(1−p))`:
+**P(see) reference table** — margin curve:
 
 | V \ p | 1.0 | 0.7 | 0.4 | 0.2 | 0.0 |
 |---|---|---|---|---|---|
-| 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
-| 0.80 | 1.00 | .87 | .76 | .70 | .64 |
-| 0.60 | 1.00 | .74 | .54 | .44 | .36 |
-| 0.40 | 1.00 | .58 | .33 | .23 | .16 |
-| 0.20 | 1.00 | .38 | .14 | .08 | .04 |
+| 1.00 (normal move) | 1.00 | 1.00 | 1.00 | 1.00 | **1.00** |
+| 0.92 (slightly far) | 1.00 | 1.00 | 1.00 | .88 | .54 |
+| 0.80 (castling) | 1.00 | 1.00 | .93 | .80 | .25 |
+| 0.60 | 1.00 | 1.00 | .80 | .25 | .01 |
+| 0.40 | 1.00 | .87 | .25 | .01 | **0** |
+| 0.20 | 1.00 | .48 | .01 | 0 | 0 |
 
 `p = 0` means **maximally geometry-blind, not move-blind**: every
-V = 1.0 move (pawn marches, ordinary captures) is still always seen —
-the bot still plays chess; its weakness comes from the geometric blind
-spots plus the other levers. If p = 0 should bite harder, κ is the
-knob (κ = 3 → V=.4 at p=0 drops .16 → .06).
+V = 1.0 move (pawn marches, ordinary captures) is always seen — the
+bot still plays chess — while everything V < 0.55 is *never* seen
+(backward queen moves, cross-board knight punishes, en passant). The
+plateau means margin ≥ 0.3 → P = 1.0 exactly: deterministic "reliably
+sees" classes per rung (the consistency the believability critique
+demands); if a thin miss-tail above threshold turns out more
+believable, cap the ramp at 0.97 instead of 1.0.
 
 Line-level findability (retrospective): `∏ P(see pv[i])` over the
 mover's plies through `material_settled`, evaluated at a fixed
