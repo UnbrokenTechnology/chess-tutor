@@ -18,17 +18,29 @@
 //! mistakes read as human.)
 //!
 //! **Variety branch** (when [`NoiseProfile::avg_move_rank`] > 1.0):
-//! first *filter out* lines whose move hangs material (value-scaled —
-//! a queen-hang always dropped, a pawn almost never; #0 always kept as
-//! a possible sacrifice), then sample which surviving line *rank* to
-//! play from a normal distribution centred on `avg_move_rank` (spread
-//! scales with the dial). So the bot plays the Nth-best *safe* move:
-//! weak and varied, but it won't drop its queen to a one-move capture
-//! (which a qsearch-0 bot, blind to the recapture, otherwise would).
-//! At the `1.0` floor the spread is zero, so it returns the best safe
-//! move. Two material easings ride on top: an immediate winning capture
+//! first *filter out* lines that throw away **saveable, perceived**
+//! material — a line whose own PV settles with the bot down material
+//! that a better line would have kept (value- and rank-scaled: a queen
+//! is saved through ~rank 4, a pawn almost never; #0 always kept as a
+//! possible sacrifice), then sample which surviving line *rank* to play
+//! from a normal distribution centred on `avg_move_rank` (spread scales
+//! with the dial). "Perceived" is the load-bearing word: the gate reads
+//! each line's settled material delta straight off the
+//! perception-filtered search PV, so a loss the bot never *saw* — the
+//! punishing capture was pruned by [`crate::visibility`], so it isn't in
+//! the PV — is **not** filtered, and the bot commits the realistic,
+//! geometry-shaped blunder. A loss it *did* see (a fresh recapture at
+//! the attention locus, sitting in the PV) is saved. This also catches
+//! pieces the move *abandons*, not just the moved piece — any material
+//! the line gives up by its settled ply. So the bot plays the Nth-best
+//! *materially-sane* move: weak and varied, but it won't knowingly hand
+//! over a queen (a qsearch-0 bot, blind to the recapture, has no such
+//! protection — by design; its PV never shows the loss).
+//! At the `1.0` floor the spread is zero, so it returns the best line.
+//! Two material easings ride on top: an immediate winning capture
 //! or pawn promotion at #0 is snapped back to (you don't leave a free
-//! piece / decline a queening). See [`sample_rank`], [`self_hang_pawns`].
+//! piece / decline a queening). See [`sample_rank`],
+//! [`self_hang_drop_prob`].
 //! Mate-guarded: a forced mate the engine has resolved within
 //! [`NoiseProfile::guaranteed_mate_in`] moves is never demoted — see
 //! [`mate_guarded`].
@@ -51,7 +63,7 @@
 use crate::engine::SearchLine;
 use crate::opponent::NoiseProfile;
 use crate::position::Position;
-use crate::types::{Color, Move, MoveKind, PieceType, Value};
+use crate::types::{Color, MoveKind, PieceType, Value};
 
 /// Outcome of [`pick`]. The branch that fired is encoded in the
 /// variant so the caller can render it accurately in diagnostic
@@ -121,30 +133,38 @@ pub fn pick(
         return NoisePick::Line(0);
     }
 
-    // Variety branch with a self-hang FILTER. First drop the lines whose move
-    // hangs material — value-scaled, the capture rescue in reverse: a
-    // queen-hang is always dropped, a rook ~56%, a minor ~33%, a pawn ~11%
-    // (small material still hangs believably; the queen never drops to a
-    // one-move capture). #0 is always kept — if the engine's best move hangs,
-    // it's a sacrifice it chose on purpose, or the only fallback. Then sample
-    // the rank AMONG THE SURVIVORS, so the bot plays the Nth-best *safe* move
-    // and keeps its variety — instead of snapping to the single best
-    // non-hanging move, which both kills variety and floors the weakness (at
-    // high rank nearly everything hangs, so it always snapped back to #0). A
-    // qsearch-0 bot is blind to the recapture (it ranked `Qg6` #3, not seeing
-    // `hxg6`); this filter is its only protection.
+    // Variety branch with a self-hang FILTER. Drop the lines that throw away
+    // *saveable, perceived* material — a line whose own (perception-filtered)
+    // PV settles with the bot down material that a better line keeps. Reading
+    // the loss off the PV is what makes this perception-aware: a punishing
+    // capture the bot never saw was pruned from its search, so it isn't in the
+    // PV and the line reads as safe — the bot commits the realistic blunder; a
+    // loss it *did* see (a fresh recapture at the attention locus) is in the PV
+    // and gets filtered. This also catches abandoned pieces — any material the
+    // line gives up, not just the moved piece (the bug the old SEE check, which
+    // only looked at the moved piece's landing square, missed). The drop
+    // probability is value- and rank-scaled (see `self_hang_drop_prob`): a
+    // queen is saved through ~rank 4, smaller material hangs more, weaker
+    // (higher-rank) bots save less. #0 is always kept — if the engine's best
+    // move loses material, it's a sacrifice it chose, or the only fallback.
+    // Sampling the rank AMONG THE SURVIVORS keeps variety instead of snapping
+    // to the single best line.
+    let best_material = deltas.iter().copied().max().unwrap_or(0);
     let playable: Vec<usize> = (0..lines.len())
         .filter(|&i| {
             if i == 0 {
                 return true; // keep the engine's best (sacrifice / fallback)
             }
-            match self_hang_pawns(root, &lines[i]) {
-                None => true, // safe move
-                Some(v) => {
-                    // Drop with probability v / SELF_HANG_C; keep otherwise.
-                    let (roll, _) = roll_unit(mix(rng, SELF_HANG_SALT.wrapping_add(i as u64)));
-                    roll >= (v / SELF_HANG_C).min(1.0)
-                }
+            // Only a line that is (a) down material and (b) avoidably so — a
+            // better line keeps more — is a self-hang. A line that merely wins
+            // *less* than #0 is a miss, not a hang, and stays in the pool.
+            if deltas[i] < 0 && best_material > deltas[i] {
+                let lost_pawns = (best_material - deltas[i]) as f64 / WIN_MATERIAL_CP as f64;
+                let p_drop = self_hang_drop_prob(lost_pawns, noise.avg_move_rank);
+                let (roll, _) = roll_unit(mix(rng, SELF_HANG_SALT.wrapping_add(i as u64)));
+                roll >= p_drop // keep unless the roll lands in the drop mass
+            } else {
+                true // safe, or a mere miss → keep
             }
         })
         .collect();
@@ -214,10 +234,12 @@ pub fn pick(
 /// sample and the capture-rescue roll.
 const SELF_HANG_SALT: u64 = 0x5A1E_6005_E1F1_2AA9;
 
-/// Self-hang curve constant (pawns of hung material per certainty). 9 anchors
-/// the queen at always-saved (9/9 = 1); lower values still hang in proportion
-/// to size. Mirror of [`CAPTURE_RESCUE_C`] for the give-away direction.
-const SELF_HANG_C: f64 = 9.0;
+/// Self-hang curve constant (pawns of saveable material per rank-unit),
+/// mirroring [`CAPTURE_RESCUE_C`] for the give-away direction. `3` anchors the
+/// queen at always-saved through rank 4 (`9 / (3·(4−1)) = 1.0`): it takes a
+/// genuinely weak bot (rank > 4) to hang a queen. Smaller material hangs at
+/// lower ranks; weaker (higher-rank) bots save less. Lower = save more.
+const SELF_HANG_C: f64 = 3.0;
 
 /// Distinct SplitMix64 salt for the capture-rescue roll so it's independent
 /// of the rank sample that precedes it (same `rng`, different stream).
@@ -244,56 +266,19 @@ fn first_move_is_capture(root: &Position, line: &SearchLine) -> bool {
     }
 }
 
-/// If `line`'s first move parks the moved piece on a square where the
-/// opponent can win it by an immediate capture (SEE-positive), return the
-/// moved piece's standard value in pawns — the material that would hang.
-/// `None` when the move is safe (no winning enemy capture on the landing
-/// square). This is what the variety branch's self-hang guard keys on: a
-/// tactically-blind (qsearch-0) bot is happy to drop its queen to a pawn
-/// because it never sees the recapture; even a weak human doesn't. Only
-/// normal moves are considered — promotions are handled by their own rescue,
-/// and castling/en-passant aren't the "moved-into-a-capture" case.
-fn self_hang_pawns(root: &Position, line: &SearchLine) -> Option<f64> {
-    let mv = *line.pv.first()?;
-    if mv.kind() != MoveKind::Normal {
-        return None;
+/// Probability of dropping (saving the bot from) a variety line that
+/// needlessly throws away `lost_pawns` of saveable material. Rank-dependent
+/// like the capture rescue: weaker bots (higher `avg_move_rank`) save less and
+/// hang more. The queen anchor ([`SELF_HANG_C`] = 3) keeps a 9-pawn loss fully
+/// saved through rank 4 (`9 / (3·(4−1)) = 1.0`). At the `1.0` rank floor only
+/// #0 is played, so the value there is moot — the guard just avoids dividing
+/// by zero.
+fn self_hang_drop_prob(lost_pawns: f64, avg_move_rank: f32) -> f64 {
+    let r = avg_move_rank as f64;
+    if r <= 1.0 {
+        return 1.0;
     }
-    let moved = root.piece_on(mv.from())?;
-    let mut scratch = root.clone();
-    scratch.do_move(mv);
-    let dest = mv.to();
-    let opp = scratch.side_to_move();
-    let opp_attackers = scratch.attackers_to(dest, scratch.occupied()) & scratch.pieces_by_color(opp);
-    if opp_attackers.is_empty() {
-        return None; // not attacked on its new square → safe
-    }
-    // Name the cheapest enemy attacker so `see_ge` resolves the optimal
-    // exchange (least-valuable attacker first, our defenders included).
-    let from = [
-        PieceType::Pawn,
-        PieceType::Knight,
-        PieceType::Bishop,
-        PieceType::Rook,
-        PieceType::Queen,
-        PieceType::King,
-    ]
-    .into_iter()
-    .find_map(|pt| {
-        let bb = opp_attackers & scratch.pieces(pt);
-        if bb.any() {
-            Some(bb.lsb())
-        } else {
-            None
-        }
-    })?;
-    // `see_ge(.., Value(1))` ⇒ capturing our piece wins the opponent material
-    // (after all recaptures), i.e. our piece is hanging. Value at risk = the
-    // moved piece (the centerpiece of the lost exchange).
-    if scratch.see_ge(Move::normal(from, dest), Value(1)) {
-        Some(standard_piece_value_cp(moved.kind()) as f64 / WIN_MATERIAL_CP as f64)
-    } else {
-        None
-    }
+    (lost_pawns / (SELF_HANG_C * (r - 1.0))).min(1.0)
 }
 
 /// Standard "point value" of a piece in material-centipawns (pawn =

@@ -315,13 +315,18 @@ fn capture_rescue_falls_with_rank() {
 // ---- self-hang guard ---------------------------------------------
 
 /// Position 2 from the t600 vs Martin game: Black Qb1; White Qd8/Kd5/Ph5.
-/// `Qg6` (b1-g6) drops the queen to `hxg6` — a qsearch-0 bot ranked it #3,
-/// blind to the recapture. `Qd1+` is the safe (winning) move.
+/// `Qg6` (b1-g6) drops the queen to `hxg6`; `Qd1+` is the safe (winning) move.
+/// The filter reads the loss off the line's PV, so the hang must carry the
+/// recapture (`[Qg6, hxg6]`) to be detected — a bare `[Qg6]` models a bot
+/// that never saw `hxg6` (qsearch-0 / perception-pruned) and is NOT filtered.
 fn queen_hang_root() -> Position {
     Position::from_fen("3Q4/5k2/8/3K3P/8/8/8/1q6 b - - 0 1").unwrap()
 }
 fn qg6_hang() -> Move {
     Move::normal(Square::B1, Square::G6)
+}
+fn hxg6_recapture() -> Move {
+    Move::normal(Square::H5, Square::G6)
 }
 fn qd1_safe() -> Move {
     Move::normal(Square::B1, Square::D1)
@@ -333,46 +338,107 @@ fn qd1_safe() -> Move {
 fn rook_hang_root() -> Position {
     Position::from_fen("k2r4/8/8/8/4P3/8/8/7K b - - 0 1").unwrap()
 }
+fn rd5_hang() -> Move {
+    Move::normal(Square::D8, Square::D5)
+}
+fn exd5_recapture() -> Move {
+    Move::normal(Square::E4, Square::D5)
+}
+fn rd7_safe() -> Move {
+    Move::normal(Square::D8, Square::D7)
+}
 
-#[test]
-fn self_hang_detects_a_queen_drop() {
-    let root = queen_hang_root();
-    let hang = mat_line(100, vec![qg6_hang()], None);
-    let safe = mat_line(2000, vec![qd1_safe()], None);
-    assert_eq!(self_hang_pawns(&root, &hang), Some(9.0), "Qg6 hangs the queen to hxg6");
-    assert_eq!(self_hang_pawns(&root, &safe), None, "Qd1+ is safe");
+/// Black Kg8, Qb4 (already attacked by the white a3 pawn); White Ka1, Pa3.
+/// The bug this whole change fixes: `Kg7` keeps the *moved* piece (the king)
+/// safe but ABANDONS the queen to `axb4`. The old SEE check only looked at
+/// the moved piece's landing square, so it sailed through; the PV-delta gate
+/// catches it. `Qc5` retreats the queen to safety.
+fn abandon_queen_root() -> Position {
+    Position::from_fen("6k1/8/8/8/1q6/P7/8/K7 b - - 0 1").unwrap()
+}
+fn kg7_abandons() -> Move {
+    Move::normal(Square::G8, Square::G7)
+}
+fn axb4_grabs() -> Move {
+    Move::normal(Square::A3, Square::B4)
+}
+fn qc5_saves() -> Move {
+    Move::normal(Square::B4, Square::C5)
 }
 
 #[test]
-fn self_hang_guard_always_saves_the_queen() {
-    // A rank-4 bot samples the demoted Qg6 almost always; the guard (P=1 for a
-    // queen) must reject it every ply and fall back to the safe line.
+fn self_hang_saves_a_perceived_queen_drop() {
+    // The hang's PV carries the recapture (`[Qg6, hxg6]`), so the line settles
+    // a full queen down — the bot *saw* the loss. A rank-4 bot samples the
+    // demoted Qg6 almost always; the queen anchor (P=1 through rank 4) must
+    // reject it every ply and fall back to the safe line.
+    let root = queen_hang_root();
+    let noise = NoiseProfile { avg_move_rank: 4.0, ..Default::default() };
+    let lines = vec![
+        mat_line(2000, vec![qd1_safe()], None),
+        mat_line(100, vec![qg6_hang(), hxg6_recapture()], Some(1)),
+    ];
+    for ply in 0..300 {
+        assert_eq!(
+            pick(&noise, 0xABCD, ply, &root, &lines),
+            NoisePick::Line(0),
+            "must never knowingly drop the queen (recapture is in the PV)",
+        );
+    }
+}
+
+#[test]
+fn self_hang_ignores_an_unperceived_hang() {
+    // Same Qg6 move, but the PV is bare (`[Qg6]`) — the bot never saw `hxg6`
+    // (qsearch-0, or perception pruned the recapture). The line reads as
+    // materially neutral, so the filter does NOT fire and the bot commits the
+    // realistic, geometry-shaped blunder. This is the behavior the perception
+    // era wants and the old full-strength SEE check destroyed.
     let root = queen_hang_root();
     let noise = NoiseProfile { avg_move_rank: 4.0, ..Default::default() };
     let lines = vec![
         mat_line(2000, vec![qd1_safe()], None),
         mat_line(100, vec![qg6_hang()], None),
     ];
+    let hung = (0..400)
+        .filter(|&p| matches!(pick(&noise, 0xABCD, p, &root, &lines), NoisePick::Line(1)))
+        .count();
+    assert!(hung > 200, "an unperceived hang must be played often, got {hung}/400");
+}
+
+#[test]
+fn self_hang_filters_an_abandoned_piece() {
+    // The headline fix: the moved piece (the king) is perfectly safe, but the
+    // line abandons the queen to `axb4` — and that capture is in the PV. The
+    // old SEE check looked only at the king's landing square and missed it;
+    // the PV-delta gate saves the queen (P=1 through rank 4).
+    let root = abandon_queen_root();
+    let noise = NoiseProfile { avg_move_rank: 4.0, ..Default::default() };
+    let lines = vec![
+        mat_line(2000, vec![qc5_saves()], None),
+        mat_line(100, vec![kg7_abandons(), axb4_grabs()], Some(1)),
+    ];
     for ply in 0..300 {
         assert_eq!(
             pick(&noise, 0xABCD, ply, &root, &lines),
             NoisePick::Line(0),
-            "must never drop the queen to a one-move capture",
+            "abandoning the queen must be filtered even though the king is safe",
         );
     }
 }
 
 #[test]
 fn self_hang_scales_with_piece_value() {
+    // A rook is saved ~5 / (3·3) ≈ 56% at rank 4 — often, but NOT always
+    // (smaller material still hangs believably). Contrast the queen's
+    // always-save above. The recapture (`exd5`) is in the PV so the loss is
+    // perceived.
     let root = rook_hang_root();
-    let rd5 = Move::normal(Square::D8, Square::D5); // hangs the rook to exd5
-    let rd7 = Move::normal(Square::D8, Square::D7); // safe
-    assert_eq!(self_hang_pawns(&root, &mat_line(100, vec![rd5], None)), Some(5.0));
-    assert_eq!(self_hang_pawns(&root, &mat_line(2000, vec![rd7], None)), None);
-    // A rook is saved ~5/9 ≈ 56% — often, but NOT always (smaller material
-    // still hangs believably). Contrast the queen's always-save above.
     let noise = NoiseProfile { avg_move_rank: 4.0, ..Default::default() };
-    let lines = vec![mat_line(2000, vec![rd7], None), mat_line(100, vec![rd5], None)];
+    let lines = vec![
+        mat_line(2000, vec![rd7_safe()], None),
+        mat_line(100, vec![rd5_hang(), exd5_recapture()], Some(1)),
+    ];
     let saved = (0..3000)
         .filter(|&p| matches!(pick(&noise, 0xBEEF, p, &root, &lines), NoisePick::Line(0)))
         .count() as f64
