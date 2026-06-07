@@ -98,13 +98,26 @@ Dual use — one scorer, two consumers:
    scorer (product coherence: bot blind spots and verdict fairness agree on
    "hard to see").
 
-7. **`miss_chance` is a deletion candidate.** Real misses are
-   pattern-shaped (a tactic you aren't trained to see), not coin flips;
-   residual randomness (tilt, fatigue) is avg_rank's job. Validation gate
-   before deleting: perception must reproduce the role the measured miss
-   curves play in the t800–t1500 bands believably. Grid arithmetic is
-   neutral: drop the miss axis (×3), add a perception axis (×3) → grid
-   stays ~2880 configs / ~6.5 h.
+7. **`miss_chance` is a deletion candidate — and `blunder_chance` may
+   be too.** Real misses are pattern-shaped (a tactic you aren't
+   trained to see), not coin flips; residual randomness (tilt, fatigue)
+   is avg_rank's job. The blunder hypothesis (raised 2026-06-06): most
+   human blunders are caused by not seeing the OPPONENT's refutation —
+   Heisman's "Hope Chess" (moving without checking whether the
+   opponent's forcing replies can be met), counting errors ("I take,
+   he takes… oops" = blind to in-exchange replies), and the
+   tunnel-vision corpus all say so qualitatively, and our own qsearch-0
+   lever is the existence proof (TOTAL opponent-recapture blindness →
+   organic believable sub-600 blunders). Mechanism: perception pruning
+   on OPPONENT plies hides the punishing reply → the bot overvalues
+   its move → plays it → an organic blunder whose *severity* is
+   whatever the hidden reply wins (the blunder min/max band becomes
+   emergent rather than dialed — a control we'd lose; acceptable if
+   the emergent distribution is believable). Validation gate before
+   deleting either dial: perception must reproduce the measured roles
+   of the miss AND blunder curves in the bands. Grid arithmetic
+   improves further if both go: drop miss (×3) and blunder (×5), add
+   perception (×3–4) → grid shrinks.
 
 8. **Settled-ply redesign precedes the scorer** (the payoff-depth component
    keys on it, and today's value is broken — see below).
@@ -272,6 +285,46 @@ horizon, ~1200 ≈ 3–4, forced lines much deeper (Heisman "Real Chess" =
 difficulty predicts blunders at 73% vs skill 55% — difficulty features
 dominate rating, which is why this scorer can work at all.
 
+### Blunder causation (follow-up agent, 2026-06-06)
+
+Question: are blunders (losing own material) caused by not seeing the
+opponent's refutation — i.e., can perception subsume `blunder_chance`?
+
+- **Supported as the dominant avoidable cause below ~1600.** Heisman's
+  *Hope Chess* is the hypothesis verbatim — "didn't see it" is a
+  thought-process failure (didn't LOOK at the opponent's forcing
+  replies), his #1 diagnosis of why sub-1600 players lose. Maia proves
+  blunders are systematic and feature-reproducible (predicts the exact
+  human blunder ~25% of the time). No academic work decomposes causes
+  (Anderson predicts *when* via position difficulty, not *why*).
+- **Two counter-mechanisms a visibility-only filter won't capture — and
+  the second lever already covers one:** Heisman splits Hope Chess into
+  **Basic** (1200–1400: never checks the reply at all → opponent-ply
+  invisibility = the perception lever) and **Passive** (1200–1700: sees
+  the reply but evaluates it with shallow pattern-matching → **that is
+  the qsearch-depth lever**: the reply is in the tree but resolved
+  shallowly). Our two levers map 1:1 onto his two failure variants —
+  perception and qsearch-depth are complements, not substitutes.
+- **The Einstellung boundary condition (calibration rule):** in
+  eye-tracking studies, when the tempting move was *outright losing*,
+  even novices saw the danger and avoided it (experts F(1,66)=79.9,
+  p<.001) — fixation blindness produces *misses*, not material hangs.
+  Therefore **pruning probability must rise with the refutation's
+  geometric subtlety, never with its material payoff** — an adjacent
+  queen-recapture stays ~always visible even at low perception; a
+  knight-move or cross-board refutation is missable. This also answers
+  the emergent-severity worry: big hangs will occur predominantly to
+  *subtle* refutations, which is exactly the real-world queen-blunder
+  shape (and the user's observed cases).
+- **Data gap = in-house opportunity:** no public dataset measures
+  hanging-piece-capture rates by capture geometry (distance / piece
+  type / direction). We could derive the geometry weights EMPIRICALLY
+  from a lichess dump: filter to low-rated games, label hanging pieces
+  with our engine, record whether the reply captured and the
+  geometry of that reply, regress P(capture) on geometry. Optional
+  step 3.5 — converts the feel-tuned priors into measured weights
+  before the freeze. User decision pending.
+
 ### Architectural consequence: payoff depth is NOT an in-search feature
 
 The in-search filter prunes moves *before* searching them, so it cannot
@@ -302,9 +355,33 @@ Per-move `P(see | perception)`, all features cheap at movegen time:
    already available / trivially tracked in search state).
 6. **Opponent-ply multiplier** — harsher filter on plies where the
    side-not-being-modeled moves.
-7. Salience floors stay absolute: a check, a recapture on the
-   just-captured square, and capture-of-last-mover are never pruned
-   (mate-guard + believability floor).
+7. **No pedagogical salience floors** (user decision 2026-06-06,
+   reversing the earlier sketch). Checks / recaptures /
+   capture-of-last-mover are STRONG salience multipliers, never
+   absolute exemptions — the evidence says even these get missed when
+   the geometry is hard (queens blundered to a knight-move or
+   cross-board-rook capture go untaken; CCT exists as *training*
+   precisely because untrained players miss checks; chess.com's Martin
+   misses mate-in-1). Our own validation has both halves: the t400
+   adjacent-queen-recapture refusal was absurd (geometrically trivial
+   → easing was right), while "didn't punish the hung queen because
+   the capture was a knight move" is realistic (geometrically hard).
+   The perception score distinguishes exactly these; a floor can't.
+   The only ABSOLUTE exemptions are mechanical:
+   - **in-check nodes are never filtered** (all evasions considered —
+     same rule as the qsearch cap);
+   - **never empty the candidate list**;
+   - **`guaranteed_mate_in` contract patch:** when the dial is ≥ 1,
+     exempt *root* checking moves from the filter (cheap, bounded; a
+     mate-in-1 is then always resolved and the guard fires). Deeper
+     mates may go unresolved at low perception — consistent with the
+     dial's documented semantics ("a protection floor, not a search
+     cap", commit `7d8c03f`); rungs that should miss mates set the
+     dial to 0.
+   Long-term unification note: the noise layer's capture-rescue easing
+   (P(grab) by value/rank) could itself become perception-driven —
+   P(rescue) = P(see the capture) — collapsing two mechanisms into one
+   curve. Not v1.
 
 Position-level blunder-potential (Anderson β = fraction of candidate
 moves that lose) is a **deferred v2 multiplier** — at the root it's
