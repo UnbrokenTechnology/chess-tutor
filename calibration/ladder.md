@@ -1,57 +1,75 @@
-# Perception-era ELO ladder (FINAL candidate, 2026-06-07)
+# Perception-era ELO ladder — LOCKED candidate (2026-06-07)
 
-Lever set: depth · qsearch-depth · **perception** · avg-rank · endgame
-tier. (miss%/blunder% removed — both emerge organically from
-perception.) Rank on the 0.1 grid, perception on the 0.05 grid.
-ELOs are **lichess-anchored** (measured Maia rapid anchors); chess.com
-runs ~200–350 lower (e.g. test t500 against chess.com's ~250 bot).
+**Monotone-perception schedule** (user redesign): perception rises
+0.0 → 1.0 by t1400 and never retreats; above that, avg-rank is the
+judgment lever ("sees all moves, picks imperfectly"). The believable
+human arc — *can't see → vision fills in → sees all, misjudges* — maps
+to the dial schedule directly.
 
-Sources: basement = dense d1q0 rank curve (100 games/pair,
-`runs/extremes/basement_results.csv`); middle = ladder passes 1+2
-(`runs/ladder/ladder_pass{1,2}.pgn`); ceiling = dense ceiling run
-(`runs/extremes/ceiling_results.csv`). Reproduce: `python run_ladder.py`.
+Lever set: depth · qsearch-depth · perception · avg-rank · endgame
+tier. (miss%/blunder% removed — both emerge from perception.) Rank on
+the 0.1 grid, perception on the 0.05 grid.
 
-| rung | depth | qsearch | perception | rank | endgame | expected ELO | notes |
-|------|-------|---------|------------|------|---------|--------------|-------|
-| t100 | 1 | 0 | 0.00 | 5.0 | none | ~95 | dense curve, ±65 |
-| t200 | 1 | 0 | 0.00 | 4.0 | none | ~195 | dense curve |
-| t300 | 1 | 0 | 0.00 | 3.5 | none | ~300 | dense curve (interp) |
-| t400 | 1 | 0 | 0.00 | 3.0 | none | ~405 | dense curve (interp) |
-| t500 | 1 | 0 | 0.00 | 2.6 | none | ~485 | dense curve (interp) |
-| t600 | 1 | 0 | 0.00 | 2.0 | none | ~600 | dense curve |
-| t700 | 1 | 0 | 0.00 | 1.6 | basic | ~705 | extrapolated from p1/p2 |
-| t800 | 1 | 0 | 0.10 | 1.0 | basic | ~810 | extrapolated from p1/p2 |
-| t900 | 1 | 1 | 0.00 | 1.3 | basic | ~930 | p2: 914 |
-| t1000 | 2 | 2 | 0.00 | 1.0 | basic | ~1020 | p1/p2: 1025/1011 |
-| t1100 | 1 | 1 | 0.10 | 1.3 | basic | ~1115 | p2: 1117 |
-| t1200 | 2 | 2 | 0.10 | 1.2 | inter | ~1190 | p2: 1164 |
-| t1300 | 2 | 2 | 0.15 | 1.0 | inter | ~1310 | p1/p2: 1320/1298 |
-| t1400 | 2 | 2 | 0.20 | 1.0 | inter | ~1410 | p1/p2: 1414/1404 |
-| t1500 | 2 | 2 | 0.25 | 1.0 | inter | ~1490 | p2: 1490 |
-| t1600 | 2 | 2 | 0.35 | 1.0 | full | ~1623 | p1/p2: 1622/1623 |
-| t1700 | 2 | 2 | 0.45 | 1.0 | full | ~1715 | p1: 1733 |
-| t1800 | 2 | 2 | 0.60 | 1.0 | full | ~1800 | p1/p2: 1815/1787 |
-| t1900 | 4 | full | 0.50 | 1.0 | full | ~1880 | p2: 1872 |
-| t2000 | 4 | full | 1.00 | 1.0 | full | ~2005 | p1/p2: 2043/1969 |
-| t2100 | 5 | full | 0.60 | 1.0 | full | ~2100 | p1/p2: 2107/2089 |
-| t2200 | 5 | full | 1.00 | 1.0 | full | ~2150 | depth-quantized (−50) |
-| t2300 | 6 | full | 0.60 | 1.0 | full | ~2315 | dense ceiling |
-| t2400 | 6 | full | 1.00 | 1.0 | full | ~2360 | depth-quantized (−40) |
-| t2500 | 7 | full | 1.00 | 1.0 | full | ~2555 | depth-quantized (+55) |
+ELOs are **lichess-anchored** (measured Maia rapid anchors). chess.com
+runs ~200–350 lower — test e.g. t500 vs chess.com's ~250 bot.
 
-## Known structure (carries into the grid design)
+Confirming pass: bias −25, **RMSE 39** (at/below the ±50–60 per-config
+noise floor of 40-game pairings). The −25 is uniform loose-anchor drift
+(weak-heavy pool compresses the Maia anchors), absorbed at lock.
 
-- **Perception × qsearch is sub-additive**: on d1q0 the dial spans only
-  ~195 Elo (a blind bot is already blind); on d4 it spans ~960. The
-  lever's power scales with base strength.
-- **Perception saturates above its knee**, and the knee climbs with
-  depth (d1q1/d2q2 ≈ 0.6, d4 ≈ 0.6–0.8, d6+ ≈ inert by 0.6 with a
-  razor shoulder at 0.5–0.6). Useful dial range is below the knee.
-- **The top quantizes to depth**: d5 ≈ 2150, d6 ≈ 2350, d7 ≈ 2555,
-  d8 ≈ 2770. Smooth 100-point rungs above 2100 would need a finer
-  strength lever up there (e.g. node caps) — deferred.
-- **Extreme-band measurements float** (±100 run-to-run) unless played
-  densely: rungs below ~800 and above ~2200 only score against each
-  other, so use `run_extremes.py`-style dense mini-pools for them.
-- **Rank slopes shrink under perception** (~−120/unit on d1q0-p0 vs
-  ~−150 bare; ~−380..−450/unit on d2q2 mid-perception vs ~550 bare).
+| rung | depth | qsearch | perception | rank | endgame | ELO | source |
+|------|-------|---------|------------|------|---------|-----|--------|
+| t100 | 1 | 0 | 0.00 | 5.0 | none | ~100 | dense |
+| t200 | 1 | 0 | 0.00 | 4.0 | none | ~200 | dense |
+| t300 | 1 | 0 | 0.00 | 3.5 | none | ~300 | dense interp |
+| t400 | 1 | 0 | 0.00 | 3.0 | none | ~400 | dense interp |
+| t500 | 1 | 0 | 0.00 | 2.6 | none | ~490 | dense interp |
+| t600 | 1 | 0 | 0.00 | 2.0 | none | ~600 | dense |
+| t700 | 1 | 0 | 0.40 | 1.6 | basic | ~700 | cell |
+| t800 | 1 | 1 | 0.60 | 3.0 | basic | ~800 | cell |
+| t900 | 1 | 1 | 0.60 | 2.6 | basic | ~900 | cell interp |
+| t1000 | 1 | 1 | 0.70 | 2.3 | basic | ~1010 | cell |
+| t1100 | 2 | 2 | 0.80 | 2.5 | inter | ~1080 | cell |
+| t1200 | 2 | 2 | 0.80 | 2.2 | inter | ~1180 | cell interp |
+| t1300 | 2 | 2 | 0.90 | 2.0 | inter | ~1320 | cell |
+| t1400 | 2 | 2 | **1.00** | 1.7 | inter | ~1400 | curve |
+| t1500 | 2 | 2 | **1.00** | 1.6 | full | ~1470 | measured |
+| t1600 | 2 | 2 | **1.00** | 1.5 | full | ~1585 | curve |
+| t1700 | 2 | 2 | **1.00** | 1.3 | full | ~1730 | curve |
+| t1800 | 2 | 2 | **1.00** | 1.2 | full | ~1790 | measured |
+| t1900 | 4 | full | 1.00 | 1.6 | full | ~1905 | measured |
+| t2000 | 4 | full | 1.00 | 1.0 | full | ~2000 | measured |
+| t2100 | 5 | full | 1.00 | 1.2 | full | ~2110 | measured |
+| t2200 | 5 | full | 1.00 | 1.0 | full | ~2205 | measured |
+| t2300 | 6 | full | 0.60 | 1.0 | full | ~2300 | measured |
+| t2400 | 6 | full | 1.00 | 1.0 | full | ~2365 | depth-quantized |
+| t2500 | 7 | full | 1.00 | 1.0 | full | ~2475 | depth-quantized |
+
+(Perception column blank in the engine flags = 1.00; "full" qsearch =
+flag omitted. ELOs are the pooled best estimate: basement from the
+dense `run_extremes` curve, the rest from the monotone confirming pass.)
+
+## Structure (carries into the grid design)
+
+- **Perception is monotone in ELO** and saturates at 1.0 by t1400 — by
+  construction, so the solver never sees a dial flip.
+- **avg-rank is U-shaped**: high in the basement (no other lever there),
+  ~1.0 through the perception-driven middle, rising again from t1400 as
+  the judgment lever. Only perception must be monotone.
+- **Perception × qsearch is sub-additive**: spans ~195 Elo on d1q0 vs
+  ~960 on d4 — a blind base has little left for perception to hide. (So
+  perception is NOT depth-compensated in the engine; the calibration
+  cells price the interaction empirically.)
+- **Perception's knee climbs with depth** (d1q1/d2q2 ≈ 0.6, d4 ≈ 0.6–0.8,
+  d6+ ≈ inert by 0.6). Useful range is below the knee.
+- **The top (>2100) quantizes to depth**: d5 ≈ 2150, d6 ≈ 2350,
+  d7 ≈ 2475–2555, d8 ≈ 2750. Smooth 100-pt rungs up there would need a
+  finer strength lever (node caps) — deferred; above the product core.
+- **Extreme bands float ±100** unless measured densely (rungs only score
+  against each other) — use the `run_extremes.py` protocol.
+
+## Reproduce
+
+`python run_ladder.py` (monotone schedule + confirming pass);
+`python run_extremes.py --band basement|ceiling` (dense extremes);
+`python run_schedule_cells.py` (the transition/judgment cells).
