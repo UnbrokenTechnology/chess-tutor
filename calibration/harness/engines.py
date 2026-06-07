@@ -48,6 +48,10 @@ class BotConfig:
     #: flag is omitted). A weak rung should NOT play flawless KBNK, so the
     #: ladder sets this by band (see ``design_ladder.tier_for``).
     endgame_skill: int | None = None
+    #: Move-visibility ("perception") dial: 1.0 = sees every move (flag
+    #: omitted); lower prunes geometrically subtle moves from the bot's
+    #: search, deterministically per game seed.
+    perception: float = 1.0
     disable_eval: tuple[str, ...] = ()
     seed: int | None = None
 
@@ -75,6 +79,8 @@ class BotConfig:
             args += ["--qsearch-depth", str(self.qsearch_depth)]
         if self.endgame_skill is not None:
             args += ["--endgame-skill", str(self.endgame_skill)]
+        if self.perception < 1.0:
+            args += ["--perception", f"{self.perception}"]
         if self.guaranteed_mate_in != 1:
             args += ["--guaranteed-mate-in", str(self.guaranteed_mate_in)]
         if self.disable_eval:
