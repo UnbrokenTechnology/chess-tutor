@@ -297,14 +297,17 @@ opponent's refutation — i.e., can perception subsume `blunder_chance`?
   blunders are systematic and feature-reproducible (predicts the exact
   human blunder ~25% of the time). No academic work decomposes causes
   (Anderson predicts *when* via position difficulty, not *why*).
-- **Two counter-mechanisms a visibility-only filter won't capture — and
-  the second lever already covers one:** Heisman splits Hope Chess into
-  **Basic** (1200–1400: never checks the reply at all → opponent-ply
-  invisibility = the perception lever) and **Passive** (1200–1700: sees
-  the reply but evaluates it with shallow pattern-matching → **that is
-  the qsearch-depth lever**: the reply is in the tree but resolved
-  shallowly). Our two levers map 1:1 onto his two failure variants —
-  perception and qsearch-depth are complements, not substitutes.
+- **Lever mapping (corrected by the user 2026-06-06):** Heisman splits
+  Hope Chess into **Basic** (1200–1400: never checks the reply at all)
+  and **Passive** (1200–1700: checks, but with shallow
+  pattern-matching). *Never looking* is the **depth/qsearch** axis —
+  the reply simply isn't in the tree. **Perception is the Passive
+  refinement**: the player who DID try to check the reply but whose
+  pattern-scan missed it *because of board geometry* (the knight-move
+  capture, the cross-board rook). qsearch-depth covers the
+  seen-but-shallowly-resolved part of Passive; perception covers the
+  scanned-but-not-noticed part. Three complementary levers, no
+  substitutes.
 - **The Einstellung boundary condition (calibration rule):** in
   eye-tracking studies, when the tempting move was *outright losing*,
   even novices saw the danger and avoided it (experts F(1,66)=79.9,
@@ -316,14 +319,15 @@ opponent's refutation — i.e., can perception subsume `blunder_chance`?
   the emergent-severity worry: big hangs will occur predominantly to
   *subtle* refutations, which is exactly the real-world queen-blunder
   shape (and the user's observed cases).
-- **Data gap = in-house opportunity:** no public dataset measures
-  hanging-piece-capture rates by capture geometry (distance / piece
-  type / direction). We could derive the geometry weights EMPIRICALLY
-  from a lichess dump: filter to low-rated games, label hanging pieces
-  with our engine, record whether the reply captured and the
-  geometry of that reply, regress P(capture) on geometry. Optional
-  step 3.5 — converts the feel-tuned priors into measured weights
-  before the freeze. User decision pending.
+- **Data gap = FOLLOW-UP item (user decision 2026-06-06):** no public
+  dataset measures hanging-piece-capture rates by capture geometry.
+  Deriving weights empirically from a lichess dump (filter low-rated
+  games, label hanging pieces with our engine, record whether/how the
+  reply captured, regress P(capture) on geometry) is DEFERRED — v1
+  weights are tuned by feel/gut to get the proof-of-concept out. The
+  accepted cost: when the empirical calibration eventually lands, the
+  weights change and the **full grid re-runs**. Flagged in the backlog
+  below.
 
 ### Architectural consequence: payoff depth is NOT an in-search feature
 
@@ -371,13 +375,18 @@ Per-move `P(see | perception)`, all features cheap at movegen time:
    - **in-check nodes are never filtered** (all evasions considered —
      same rule as the qsearch cap);
    - **never empty the candidate list**;
-   - **`guaranteed_mate_in` contract patch:** when the dial is ≥ 1,
-     exempt *root* checking moves from the filter (cheap, bounded; a
-     mate-in-1 is then always resolved and the guard fires). Deeper
-     mates may go unresolved at low perception — consistent with the
-     dial's documented semantics ("a protection floor, not a search
-     cap", commit `7d8c03f`); rungs that should miss mates set the
-     dial to 0.
+   - **`guaranteed_mate_in` contract patch — KEPT (user decision
+     2026-06-06):** when the dial is ≥ 1, exempt *root* checking moves
+     from the filter (cheap, bounded; a mate-in-1 is then always
+     resolved and the guard fires). Rationale: the dial is a
+     **training feature**, not a realism feature — a student has to
+     learn to see checkmate threats, so the trainer-bot must reliably
+     deliver them. Realism-seeking rungs set the dial to 0 (and even
+     then the bot usually plays the mate on eval alone, unless
+     perception or avg_rank demotes it). Deeper mates may go
+     unresolved at low perception — consistent with the dial's
+     documented semantics ("a protection floor, not a search cap",
+     commit `7d8c03f`).
    Long-term unification note: the noise layer's capture-rescue easing
    (P(grab) by value/rank) could itself become perception-driven —
    P(rescue) = P(see the capture) — collapsing two mechanisms into one
@@ -392,6 +401,63 @@ The believability constraint that killed checkboxes ("fails a 2-ply
 tactic but sees a 6-ply one" must be impossible) holds by construction:
 one perception dial gates compounded per-move probabilities, so deeper =
 strictly less visible at equal salience.
+
+### v1 weight table (proposed 2026-06-06, feel-tune then freeze)
+
+`V(mv) = S × D × K × O × A ∈ (0, 1]`, then
+`P(see | perception p) = V^(κ·(1−p))` with `κ = 2.0`; `p ≥ 1.0` →
+bypass (always seen). Deterministic roll per
+`(game_seed, zobrist, move)`. **Opponent-ply asymmetry:** on plies
+where the side-not-being-modeled moves, use `V^1.5` before the curve —
+a power barely moves V≈1 (adjacent recapture stays seen — Einstellung)
+but crushes V≈0.3 (subtle refutations vanish — Hope Chess).
+
+**S — salience class (sets the base):**
+
+| class | S |
+|---|---|
+| capture-check / queen promotion | 1.00 |
+| recapture (capture on the last-move square) | 0.95 |
+| castling | 0.90 |
+| capture | 0.85 |
+| quiet check | 0.75 |
+| en passant | 0.55 |
+| quiet move | 0.45 |
+| underpromotion | 0.25 |
+
+**D — direction (mover-relative rank delta):** forward 1.00 · sideways
+0.85 · backward 0.65.
+
+**K — piece:** knight 0.80 · all others 1.00.
+
+**O — ray occlusion (multiplicative, sliders + vehicles):**
+discovered-attack vehicle (mover unveils a friendly slider's attack on
+an enemy piece) ×0.65 · slider path threads traffic (occupied squares
+adjacent to the path interior: ≥4 → ×0.75, 2–3 → ×0.85) · long slider
+move (Chebyshev ≥ 5) ×0.85 (mild — distance is a modulator, never
+standalone).
+
+**A — attention (state inputs, neutral when absent):** distance from
+the opponent's last-move square `d = min(cheby(from,last_to),
+cheby(to,last_to))`: ≤2 → 1.0, 3–4 → 0.9, ≥5 → 0.75 · mover dormancy
+(≥12 plies unmoved) ×0.9 — dormancy is v1-OPTIONAL (needs per-piece
+last-moved tracking; the ctx field defaults neutral).
+
+**Worked archetypes** (P(see) at mid perception p = 0.5, i.e. P = V):
+
+| Move | V | Reads as |
+|---|---|---|
+| Adjacent queen recapture | .95 (p=0: .90) | never declined in effect — Einstellung boundary ✔ |
+| Backward quiet queen fork (the Qe1 case) | .45×.65 ≈ **.29** (p=.8: .61, p=0: .09) | the classroom anecdote, scaled by rating ✔ |
+| Cross-board knight capture of a hung queen | .85×.80×.75 ≈ **.51** (p=.2: .34) | the unpunished-queen-blunder observation ✔ |
+| Sniper-bishop quiet move on a threaded long diagonal | .45×.75×.85 ≈ **.29** | the low-ELO snipe, gone ✔ |
+| Quiet discovered-attack vehicle move | .45×.65 ≈ **.29** (as a capture: .55) | hardest motif class (puzzle data) ✔ |
+| Forcing mate line links (checks/captures) | .75–1.0 each | compounding stays high — forcing chains survive ✔ |
+
+Line-level findability (retrospective): `∏ P(see pv[i])` over the
+mover's plies through `material_settled`, evaluated at a fixed
+"strong-human reference" perception (≈0.75) — replaces/augments the
+depth-honesty heuristics.
 
 ## Sequencing (agreed order)
 
@@ -477,8 +543,12 @@ strictly less visible at equal salience.
 
 ## Open questions / concerns
 
-- **Empirical grounding of geometric weights**: v1 is hand-picked +
-  feel-validated. Maia/lichess data could ground it later; don't block.
+- **Empirical grounding of geometric weights — FOLLOW-UP (decided
+  2026-06-06)**: v1 ships hand-picked + feel-validated. The in-house
+  lichess-dump analysis (P(hung piece captured) regressed on the
+  capturing move's geometry — no public dataset exists) is deferred to
+  get the proof-of-concept out; when it lands, weights change and the
+  **full grid re-runs** (cost accepted by the user).
 - **Perception × qsearch interaction**: composes, not replaces —
   qsearch-depth = how far you calculate; perception = which moves exist
   for you. Expect grid interaction terms (like miss×qsearch ≈ 0 at q0).
