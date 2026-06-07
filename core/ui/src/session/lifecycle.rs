@@ -229,6 +229,7 @@ impl Session {
         eval_mask: EvalMask,
         qsearch_max_plies: Option<u32>,
         endgame_skill: EndgameSkill,
+        perception: f32,
         book: BookSelection,
     ) {
         self.gen = self.gen.wrapping_add(1);
@@ -248,6 +249,7 @@ impl Session {
         self.opponent.eval_mask = eval_mask;
         self.opponent.qsearch_max_plies = qsearch_max_plies;
         self.opponent.endgame_skill = endgame_skill;
+        self.opponent.perception = perception;
         self.opponent.book = book;
         self.book_cursor = BookCursor::new(&self.opponent, &self.position);
         self.book_out_announced = false;
@@ -313,6 +315,7 @@ impl Session {
         let eval_mask = form.eval_mask;
         let qsearch_max_plies = form.qsearch_max_plies;
         let endgame_skill = form.endgame_skill;
+        let perception = form.perception;
         let book = form.book.to_book();
         // The Start screen is the true home of these options (PLAN
         // step 5): commit them onto the session before the game starts.
@@ -336,6 +339,7 @@ impl Session {
             eval_mask,
             qsearch_max_plies,
             endgame_skill,
+            perception,
             book,
         );
     }

@@ -766,3 +766,105 @@ fn force_include_preserves_natural_top_k() {
     }
     assert!(forced_moves.contains(&victim));
 }
+
+// ---- perception (move-visibility) filter ---------------------------
+
+/// Search with a perception filter (fixed seed, no attention locus).
+fn perception_search(
+    pos: &mut Position,
+    depth: u32,
+    level: f32,
+    exempt_root_checks: bool,
+) -> Vec<SearchLine> {
+    let mut engine = Engine::new(1);
+    let params = SearchParams {
+        max_depth: depth,
+        perception: Some(crate::visibility::PerceptionParams {
+            level,
+            seed: 7,
+            last_move_to: None,
+            exempt_root_checks,
+        }),
+        ..Default::default()
+    };
+    engine.search(pos, params)
+}
+
+#[test]
+fn perception_level_one_is_the_bypass() {
+    // level >= 1.0 normalizes to None at run(): identical output to an
+    // unfiltered search.
+    let mut pos = Position::startpos();
+    let plain = search_to_depth(&mut pos, 6);
+    let bypassed = perception_search(&mut pos, 6, 1.0, false);
+    assert_eq!(plain.pv, bypassed[0].pv);
+    assert_eq!(plain.score, bypassed[0].score);
+}
+
+#[test]
+fn perception_zero_still_returns_a_legal_move() {
+    // Maximally geometry-blind, but never move-blind: the search must
+    // still produce a legal move from any movable position (the
+    // never-empty fallback is load-bearing here).
+    for fen in [
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        // Cramped corner: king + rim knight, mostly low-visibility moves.
+        "N6k/8/8/8/8/8/8/K7 w - - 0 1",
+    ] {
+        let mut pos = Position::from_fen(fen).unwrap();
+        let lines = perception_search(&mut pos, 4, 0.0, false);
+        assert!(!lines.is_empty(), "no lines at p=0 for {fen}");
+        let mv = lines[0].pv[0];
+        assert!(
+            crate::movegen::legal_moves_vec(&mut pos).contains(&mv),
+            "illegal move at p=0 for {fen}"
+        );
+    }
+}
+
+#[test]
+fn perception_zero_terminal_positions_stay_terminal() {
+    // Stalemate (black to move, no legal moves): the fallback must not
+    // hallucinate a move where none exists.
+    let mut pos = Position::from_fen("k7/2Q5/8/8/8/8/8/4K3 b - - 0 1").unwrap();
+    let lines = perception_search(&mut pos, 4, 0.0, false);
+    assert!(lines.is_empty(), "stalemate must produce no lines");
+}
+
+#[test]
+fn perception_zero_misses_the_backward_mate_unless_root_checks_exempt() {
+    // Qe1# is the only mate-in-1 and it is a BACKWARD queen move
+    // (V = 0.55 -> P(see) = 0 at p = 0: below the cliff). Without the
+    // root-check exemption the bot cannot play it; with the exemption
+    // (the guaranteed_mate_in contract patch) it must.
+    let fen = "8/4Q3/8/8/8/6K1/8/7k w - - 0 1";
+    let mate = Move::normal(Square::E7, Square::E1);
+
+    let mut pos = Position::from_fen(fen).unwrap();
+    let blind = perception_search(&mut pos, 4, 0.0, false);
+    assert_ne!(
+        blind[0].pv[0], mate,
+        "backward mate must be invisible at p=0 without the exemption"
+    );
+
+    let exempt = perception_search(&mut pos, 4, 0.0, true);
+    assert_eq!(
+        exempt[0].pv[0], mate,
+        "root-check exemption must restore the mate"
+    );
+    assert!(
+        exempt[0].score.0 >= Value::MATE.0 - Value::MAX_PLY,
+        "expected a mate score with the exemption"
+    );
+}
+
+#[test]
+fn perception_is_deterministic_per_seed() {
+    // Same seed -> identical output; the lever never introduces
+    // run-to-run variance (the teaching contract).
+    let mut pos = Position::startpos();
+    let a = perception_search(&mut pos, 5, 0.4, false);
+    let b = perception_search(&mut pos, 5, 0.4, false);
+    assert_eq!(a[0].pv, b[0].pv);
+    assert_eq!(a[0].score, b[0].score);
+}

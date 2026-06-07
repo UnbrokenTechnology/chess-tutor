@@ -264,6 +264,9 @@ pub(crate) fn worker_loop(rx: Receiver<WorkerJob>, tx: Sender<WorkerResult>, rep
                     qsearch_max_plies: None,
                     // Analytical — full endgame books for true-best-play.
                     endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
+                    // Analytical — full perception; the filter is a
+                    // play-engine-only lever.
+                    perception: None,
                 };
                 let started = Instant::now();
                 let analyses = analyze_position(&mut analysis_engine, &mut pre_move_pos, params);

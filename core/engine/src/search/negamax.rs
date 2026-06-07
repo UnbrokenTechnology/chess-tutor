@@ -303,7 +303,7 @@ impl<'a> Search<'a> {
 
         // Iterate the legal moves with the full SF11 ordering/pruning
         // stack — see [`negamax_moves`].
-        let (best_score, best_move, raised_alpha, move_count) = match self.negamax_moves(
+        let mut outcome = self.negamax_moves(
             pos,
             alpha,
             beta,
@@ -319,13 +319,55 @@ impl<'a> Search<'a> {
             tt_pv,
             improving,
             cont_keys,
-        ) {
+            None,
+        );
+
+        // Perception never-empty fallback: the filter pruned every
+        // legal move at this node. A human always sees *something* —
+        // re-run the loop pinned to the single highest-visibility
+        // pruned move. Load-bearing for soundness too: without it,
+        // `move_count == 0` below would misread a movable position as
+        // checkmate/stalemate. At the root this only applies to the
+        // primary PV slot — secondary slots whose remaining moves are
+        // all unseen simply stay empty (the bot's candidate list is
+        // the seen moves), and their `-INFINITE` scores drop out of
+        // the output.
+        if let MovesOutcome::Done {
+            move_count: 0,
+            unseen_fallback: Some(fallback),
+            ..
+        } = outcome
+        {
+            if !(is_root && self.pv_idx > 0) {
+                outcome = self.negamax_moves(
+                    pos,
+                    alpha,
+                    beta,
+                    depth,
+                    ply,
+                    is_root,
+                    is_pv,
+                    cut_node,
+                    prev,
+                    in_check,
+                    static_eval,
+                    tt_move,
+                    tt_pv,
+                    improving,
+                    cont_keys,
+                    Some(fallback),
+                );
+            }
+        }
+
+        let (best_score, best_move, raised_alpha, move_count) = match outcome {
             MovesOutcome::Aborted => return Value::ZERO,
             MovesOutcome::Done {
                 best_score,
                 best_move,
                 raised_alpha,
                 move_count,
+                ..
             } => (best_score, best_move, raised_alpha, move_count),
         };
 

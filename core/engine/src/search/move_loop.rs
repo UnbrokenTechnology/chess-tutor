@@ -34,6 +34,11 @@ impl<'a> Search<'a> {
         tt_pv: bool,
         improving: bool,
         cont_keys: ContHistKeys,
+        // Perception never-empty fallback rerun: when `Some`, only this
+        // move is searched and the visibility filter is bypassed for it
+        // (the caller picked it as the highest-visibility pruned move
+        // after the normal pass came back empty).
+        visibility_override: Option<Move>,
     ) -> MovesOutcome {
         // --- Main move loop ---
         let counter_move = match prev {
@@ -68,6 +73,10 @@ impl<'a> Search<'a> {
         let mut best_score = -Value::INFINITE;
         let mut best_move = Move::NONE;
         let mut move_count = 0usize;
+        // Highest-visibility move the perception filter pruned at this
+        // node — the never-empty fallback candidate (see
+        // [`MovesOutcome::Done::unseen_fallback`]).
+        let mut best_unseen: Option<(Move, f64)> = None;
         // SF11 `moveCountPruning` (search.cpp:629/956/1002). Lifted out
         // of the depth-gated shallow-prune box so it can fire at any
         // depth — once `move_count` hits the LMP threshold, the picker
@@ -165,6 +174,28 @@ impl<'a> Search<'a> {
             // `do_move`/`undo_move` round-trip. `pos.legal` is
             // oracle-tested against the make/unmake filter it replaces.
             if !pos.legal(mv) {
+                continue;
+            }
+
+            // Perception filter ("a move you didn't see is never in
+            // your tree") — after legality so the fallback candidate is
+            // guaranteed playable, before `move_count += 1` so an
+            // unseen move never counts as searched. Never applied in
+            // check (evasions are forced — same rule as the qsearch
+            // cap). The override rerun pins the loop to the fallback
+            // move instead.
+            if let Some(forced) = visibility_override {
+                if mv != forced {
+                    continue;
+                }
+            } else if self.perception.is_some()
+                && !in_check
+                && !self.move_is_seen(pos, mv, ply)
+            {
+                let v = self.move_visibility(pos, mv, ply);
+                if best_unseen.is_none_or(|(_, bv)| v > bv) {
+                    best_unseen = Some((mv, v));
+                }
                 continue;
             }
 
@@ -466,6 +497,7 @@ impl<'a> Search<'a> {
             best_move,
             raised_alpha,
             move_count,
+            unseen_fallback: best_unseen.map(|(m, _)| m),
         }
     }
 }

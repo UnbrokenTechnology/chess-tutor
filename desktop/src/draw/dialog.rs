@@ -117,6 +117,7 @@ pub(crate) fn draw(
                     &mut form.depth,
                     &mut form.qsearch_max_plies,
                     &mut form.endgame_skill,
+                    &mut form.perception,
                     &mut form.noise,
                 );
 
@@ -237,11 +238,13 @@ fn draw_play_options(ui: &mut egui::Ui, form: &mut chess_tutor_ui::session::NewG
 /// the form's `None`). Finite caps occupy 0..9; the far-right notch is ∞.
 const QSEARCH_INF: u32 = 10;
 
+#[allow(clippy::too_many_arguments)]
 fn draw_strength_controls(
     ui: &mut egui::Ui,
     depth: &mut u32,
     qsearch: &mut Option<u32>,
     endgame_skill: &mut EndgameSkill,
+    perception: &mut f32,
     noise: &mut NoiseProfile,
 ) {
     egui::Grid::new("bot_strength_grid")
@@ -311,6 +314,26 @@ fn draw_strength_controls(
             if resp.changed() {
                 *endgame_skill = EndgameSkill::from_tier(tier as u8);
             }
+            ui.end_row();
+
+            // Perception = the move-visibility dial (geometric
+            // blindness). Far right (1.0) sees every move — normal
+            // play. Lower values make geometrically subtle moves
+            // (backward moves, knight punishes, long screened rays,
+            // moves far from the last move) invisible to the bot's
+            // search, with stable per-game blind spots.
+            ui.label("Perception:").on_hover_text(
+                "How reliably the bot notices hard-to-see moves. Far right \
+                 (100%) sees everything — normal play. Lower values make \
+                 geometrically subtle moves invisible to it: backward moves, \
+                 knight attacks, long moves through traffic, and moves far \
+                 from the action. Normal forward moves and obvious captures \
+                 are always seen. 0% = misses every subtle move.",
+            );
+            ui.add(
+                egui::Slider::new(perception, 0.0..=1.0)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+            );
             ui.end_row();
 
             ui.label("Blunder chance:")

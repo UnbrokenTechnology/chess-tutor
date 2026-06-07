@@ -579,10 +579,40 @@ depth-honesty heuristics.
    eval-gap 0; corrected classifier: 35 win / 296 neutral / 85 loss (was
    77/197/142).** Knock-on: the bands' miss/blunder pools changed under
    this fix — re-derivation (step 7) is mandatory, as planned.
-3. **Difficulty scorer** (`analysis/`, fixed weights, shared surface).
-4. **In-search perception filter** — zobrist-keyed seeding, salience
-   floors, never-empty guard, ≥1.0 bypass. A/B: full-strength bench
-   byte-identical with bypass; weak-bot games for feel.
+3. **Difficulty scorer** — LANDED (`core/engine/src/visibility.rs`,
+   top-level sibling of `noise.rs` so search doesn't depend on
+   `analysis/`). `visibility(pos, mv, ctx)` (V = S×D×K×O×A per the
+   table), `p_see` (margin curve), `sees` (zobrist-keyed roll),
+   `line_findability` (retrospective `∏ P(see)` to `material_settled`),
+   `PerceptionParams`. 16 unit tests pin the archetypes + curve
+   reference points. Feel-test flag from the tests: the threading
+   neighbourhood counts home-rank clutter, so a queen sortie down a
+   half-open file reads 0.75 ("leaving the nest") — if real play shows
+   queen sorties over-missed, narrow the neighbourhood.
+4. **In-search perception filter** — LANDED.
+   `SearchParams.perception: Option<PerceptionParams>` →
+   `Search.perception` (≥1.0 normalized to None at `run()`; bypass is
+   one dead branch per move — **verified byte-identical**: bench
+   16 1 14 = 9,745,694 nodes with and without the code, clean-worktree
+   A/B). Filter sits after legality in `negamax_moves` and in qsearch
+   (stand-pat is qsearch's natural fallback); in-check nodes never
+   filter; opponent plies apply `V^1.5`; inner-node attention locus
+   reads the parent stack frame, root locus passed by the caller.
+   **Never-empty fallback (N=1)**: `MovesOutcome.unseen_fallback`
+   carries the highest-V pruned move; negamax reruns the loop pinned to
+   it when a node comes back empty (load-bearing — `move_count == 0`
+   still means mate/stalemate); root fallback only for the primary PV
+   slot (secondary slots stay empty = the bot's candidate list is the
+   seen moves). Root-check exemption wired to
+   `guaranteed_mate_in >= 1`. Five search-level tests incl. the
+   backward-mate exemption pair. Wired end-to-end:
+   `OpponentProfile.perception` (manual `Default` — 1.0, not derived
+   0.0) + `perception_params()` → play worker (locus = user's last
+   move) / `--perception` on `play`, `uci` (per-game seed), `search`
+   (fixed seed 0 for reproducible inspection) / desktop New Game
+   "Perception" slider. Analytical paths pass `None` everywhere.
+   Smoke: `search "8/4Q3/8/8/8/6K1/8/7k w" --depth 4` finds Qe1#;
+   `--perception 0` plays Qd8 — the backward mate is invisible.
 5. **Feel-validation + weight FREEZE** (manual games) — pre-grid critical
    path.
 6. **Miss-subsumption check** → drop `miss_chance` if perception covers its

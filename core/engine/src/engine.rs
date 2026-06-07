@@ -20,6 +20,7 @@ use crate::position::Position;
 use crate::search::{Search, StopFlag};
 use crate::tt::{TranspositionTable, DEFAULT_TT_MB};
 use crate::types::{Move, Value};
+use crate::visibility::PerceptionParams;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -148,6 +149,16 @@ pub struct SearchParams {
     /// to a queen instead of the SF-quirk underpromotion). Play-engine-
     /// only, like [`Self::eval_mask`] / [`Self::qsearch_max_plies`].
     pub endgame_skill: EndgameSkill,
+
+    /// Move-visibility ("perception") filter: when `Some` with a level
+    /// below 1.0, the search prunes moves the bot "didn't see" —
+    /// deterministically per `(seed, zobrist, move)` — before searching
+    /// them. The geometric-blindness lever for believable weak bots
+    /// (backward moves, knight punishes, screened rays go unseen; see
+    /// [`crate::visibility`]). `None` (default) is the full-strength
+    /// bypass. Play-engine-only, like [`Self::eval_mask`] /
+    /// [`Self::qsearch_max_plies`] / [`Self::endgame_skill`].
+    pub perception: Option<PerceptionParams>,
 }
 
 impl Default for SearchParams {
@@ -164,6 +175,7 @@ impl Default for SearchParams {
             eval_mask: EvalMask::EMPTY,
             qsearch_max_plies: None,
             endgame_skill: EndgameSkill::Full,
+            perception: None,
         }
     }
 }

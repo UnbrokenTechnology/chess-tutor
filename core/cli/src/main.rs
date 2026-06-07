@@ -572,6 +572,7 @@ fn main() -> Result<()> {
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 qsearch_max_plies: None,
                 endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
+                perception: None,
             };
             let lines = engine.search(&mut pos, params);
             if lines.is_empty() {
@@ -711,6 +712,7 @@ fn main() -> Result<()> {
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 qsearch_max_plies: None,
                 endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
+                perception: None,
             };
             let lines = engine.search(&mut pos, search_params);
             let (score_source, headline_score) = if lines.is_empty() {
@@ -901,6 +903,7 @@ fn main() -> Result<()> {
             depth,
             qsearch_depth,
             endgame_skill,
+            perception,
             nodes,
             time_ms,
             multi_pv,
@@ -942,6 +945,17 @@ fn main() -> Result<()> {
                 qsearch_max_plies: qsearch_depth,
                 // ...and the explicit endgame-skill dial for inspection.
                 endgame_skill: endgame_skill.map_or(EndgameSkill::Full, EndgameSkill::from_tier),
+                // ...and the explicit perception dial for inspection.
+                // Fixed seed + no attention locus: repeat runs of the
+                // same command are identical.
+                perception: perception.filter(|p| *p < 1.0).map(|level| {
+                    chess_tutor_engine::visibility::PerceptionParams {
+                        level,
+                        seed: 0,
+                        last_move_to: None,
+                        exempt_root_checks: false,
+                    }
+                }),
             };
 
             let orientation = crate::units::Orientation::from_stm_flag(stm_mode);
@@ -1319,11 +1333,16 @@ fn main() -> Result<()> {
             blunder_max_material,
             miss_chance,
             guaranteed_mate_in,
+            perception,
         } => {
             let mut opponent = match seed {
                 Some(s) => chess_tutor_engine::opponent::OpponentProfile::with_seed(s),
                 None => chess_tutor_engine::opponent::OpponentProfile::new_random(),
             };
+            if !(0.0..=1.0).contains(&perception) {
+                anyhow::bail!("--perception must be in [0.0, 1.0], got {perception}");
+            }
+            opponent.perception = perception;
             if no_book {
                 opponent.book = chess_tutor_engine::opponent::BookSelection::None;
             }
@@ -1389,9 +1408,13 @@ fn main() -> Result<()> {
             blunder_max_material,
             miss_chance,
             guaranteed_mate_in,
+            perception,
         } => {
             use chess_tutor_engine::opponent::{EvalCategory, EvalMask, NoiseProfile};
             // Same dial validation as `play` — keep the two in sync.
+            if !(0.0..=1.0).contains(&perception) {
+                anyhow::bail!("--perception must be in [0.0, 1.0], got {perception}");
+            }
             if !(0.0..=1.0).contains(&blunder_chance) {
                 anyhow::bail!("--blunder-chance must be in [0.0, 1.0], got {blunder_chance}");
             }
@@ -1439,6 +1462,7 @@ fn main() -> Result<()> {
                 eval_mask,
                 qsearch_max_plies: qsearch_depth,
                 endgame_skill: endgame_skill.map_or(EndgameSkill::Full, EndgameSkill::from_tier),
+                perception,
                 noise,
             })?;
         }

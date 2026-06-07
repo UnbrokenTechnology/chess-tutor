@@ -113,6 +113,7 @@ pub fn run(args: NoiseBenchArgs) -> Result<()> {
                 eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
                 qsearch_max_plies: None,
                 endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
+                perception: None,
             };
             let analyses = analyze_position(&mut engine, &mut pos.clone(), params);
             for a in &analyses {

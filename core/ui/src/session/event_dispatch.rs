@@ -77,6 +77,7 @@ impl Session {
                     f.eval_mask = EvalMask::EMPTY;
                     f.qsearch_max_plies = None;
                     f.endgame_skill = EndgameSkill::Full;
+                    f.perception = 1.0;
                 }
             }
             Event::ApplyLearningPreset(preset) => {

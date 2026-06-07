@@ -269,6 +269,7 @@ fn build_params(limit_type: &str, limit: u64, threads: usize) -> Result<SearchPa
         eval_mask: chess_tutor_engine::opponent::EvalMask::EMPTY,
         qsearch_max_plies: None,
         endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
+        perception: None,
     };
     match limit_type {
         "depth" => {

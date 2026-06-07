@@ -31,4 +31,5 @@ pub mod search;
 pub mod traps;
 pub mod tt;
 pub mod types;
+pub mod visibility;
 pub mod zobrist;

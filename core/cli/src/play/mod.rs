@@ -368,6 +368,7 @@ fn analysis_params(depth: u32, time_ms: Option<u64>, multi_pv: usize) -> SearchP
         eval_mask: EvalMask::EMPTY,
         qsearch_max_plies: None,
         endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
+        perception: None,
     }
 }
 

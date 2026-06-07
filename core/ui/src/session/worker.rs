@@ -204,6 +204,13 @@ impl Session {
             // ...and its endgame-book skill tier (botches endgames it
             // doesn't yet "know", and queens instead of underpromoting).
             endgame_skill: self.opponent.endgame_skill,
+            // ...and its move-visibility filter (geometric blind spots:
+            // backward moves, knight punishes, screened rays). The
+            // attention locus is the user's move that triggered this
+            // engine turn.
+            perception: self
+                .opponent
+                .perception_params(self.history.last().map(|e| e.mv.to())),
         };
         self.engine_thinking = true;
         let _ = self.worker_tx.send(WorkerJob::Search {

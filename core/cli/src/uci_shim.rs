@@ -63,6 +63,10 @@ pub struct UciConfig {
     /// all books; lower tiers withhold the harder mates so the bot
     /// misplays endgames (and queens instead of underpromoting).
     pub endgame_skill: EndgameSkill,
+    /// Move-visibility dial (geometric-blindness lever): `1.0` = sees
+    /// every move; lower prunes geometrically subtle moves from the
+    /// bot's search (see `chess_tutor_engine::visibility`).
+    pub perception: f32,
     /// Move-sampling dials (variety / blunder / miss / wild).
     pub noise: NoiseProfile,
 }
@@ -78,16 +82,20 @@ pub fn run(cfg: UciConfig) -> Result<()> {
     // itself) so the bot's search sees threefold draws correctly.
     let mut history: Vec<u64> = Vec::new();
     let mut ply: u64 = 0;
+    // Destination of the last move applied by the latest `position`
+    // command — the perception filter's root attention locus.
+    let mut last_move_to: Option<chess_tutor_engine::types::Square> = None;
     let mut game_index: u64 = 0;
     let mut game_seed = mix_seed(cfg.base_seed, game_index);
 
     // Surface the resolved config on stderr (stdout is the UCI channel)
     // so harness logs record exactly what was measured.
     eprintln!(
-        "uci-shim: depth={} qsearch_depth={:?} endgame_skill={:?} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, blunder={} [{}..{}cp], miss={}, guaranteed_mate_in={}}}",
+        "uci-shim: depth={} qsearch_depth={:?} endgame_skill={:?} perception={} threads={} base_seed={} eval_mask_disabled=[{}] noise={{rank={}, blunder={} [{}..{}cp], miss={}, guaranteed_mate_in={}}}",
         cfg.depth,
         cfg.qsearch_max_plies,
         cfg.endgame_skill,
+        cfg.perception,
         cfg.threads,
         cfg.base_seed,
         cfg.eval_mask
@@ -137,18 +145,29 @@ pub fn run(cfg: UciConfig) -> Result<()> {
                 pos = Position::startpos();
                 history.clear();
                 ply = 0;
+                last_move_to = None;
             }
             "position" => match build_position(line) {
-                Ok((p, h, n)) => {
+                Ok((p, h, n, last)) => {
                     pos = p;
                     history = h;
                     ply = n;
+                    last_move_to = last;
                 }
                 Err(e) => eprintln!("uci-shim: bad position command: {e}"),
             },
             "go" => {
                 let depth = parse_go_depth(line).unwrap_or(cfg.depth).max(1);
-                match choose_move(&mut engine, &mut pos, depth, &cfg, &history, game_seed, ply) {
+                match choose_move(
+                    &mut engine,
+                    &mut pos,
+                    depth,
+                    &cfg,
+                    &history,
+                    game_seed,
+                    ply,
+                    last_move_to,
+                ) {
                     Some(choice) => {
                         // Emit one `info` line so fastchess has a score for
                         // PGN annotation and eval-based resign/draw
@@ -199,6 +218,7 @@ struct MoveChoice {
 /// Pick the bot's move for the current root, mirroring the play worker's
 /// search → `noise::pick` → move pipeline, and carry back the line's
 /// score/PV for the UCI `info` string.
+#[allow(clippy::too_many_arguments)]
 fn choose_move(
     engine: &mut Engine,
     pos: &mut Position,
@@ -207,6 +227,7 @@ fn choose_move(
     history: &[u64],
     seed: u64,
     ply: u64,
+    last_move_to: Option<chess_tutor_engine::types::Square>,
 ) -> Option<MoveChoice> {
     let params = SearchParams {
         max_depth: depth,
@@ -220,6 +241,19 @@ fn choose_move(
         eval_mask: cfg.eval_mask,
         qsearch_max_plies: cfg.qsearch_max_plies,
         endgame_skill: cfg.endgame_skill,
+        // Per-game seed (not the base seed) so blind spots are stable
+        // within a game but vary across the run's games — mirroring
+        // how the noise rolls vary.
+        perception: if cfg.perception < 1.0 {
+            Some(chess_tutor_engine::visibility::PerceptionParams {
+                level: cfg.perception,
+                seed,
+                last_move_to,
+                exempt_root_checks: cfg.noise.guaranteed_mate_in >= 1,
+            })
+        } else {
+            None
+        },
     };
     let lines = engine.search(pos, params);
     // Every noise branch (engine-best / variety / blunder / miss) yields a
@@ -257,7 +291,14 @@ fn uci_score(v: Value) -> String {
 /// Parse a UCI `position` command into the root position, its pre-root
 /// repetition-key history (excluding the root), and the half-move count
 /// (ply) used to seed move-by-move noise.
-fn build_position(line: &str) -> Result<(Position, Vec<u64>, u64)> {
+fn build_position(
+    line: &str,
+) -> Result<(
+    Position,
+    Vec<u64>,
+    u64,
+    Option<chess_tutor_engine::types::Square>,
+)> {
     let rest = line.strip_prefix("position").unwrap_or(line).trim();
     // FEN fields never contain the literal "moves", so a plain find is
     // safe to split the position spec from the move list.
@@ -277,6 +318,7 @@ fn build_position(line: &str) -> Result<(Position, Vec<u64>, u64)> {
 
     let mut history = Vec::new();
     let mut ply = 0u64;
+    let mut last_move_to = None;
     for mv_str in moves_str.split_whitespace() {
         // Key of the position *before* this move joins the pre-root
         // history; the root (after the last move) is deliberately omitted.
@@ -284,9 +326,10 @@ fn build_position(line: &str) -> Result<(Position, Vec<u64>, u64)> {
         let mv = uci::parse(&mut pos, mv_str)
             .map_err(|e| anyhow::anyhow!("bad move {mv_str:?}: {e}"))?;
         pos.do_move(mv);
+        last_move_to = Some(mv.to());
         ply += 1;
     }
-    Ok((pos, history, ply))
+    Ok((pos, history, ply, last_move_to))
 }
 
 /// Extract the depth from a `go depth N` command, if present. Any other

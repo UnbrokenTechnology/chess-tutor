@@ -188,6 +188,18 @@ impl<'a> Search<'a> {
                 continue;
             }
 
+            // Perception filter: an exchange you can't see doesn't get
+            // resolved — the stand-pat already banked above is exactly
+            // the blind read (no never-empty machinery needed here;
+            // out of check, "no qsearch moves" just means stand pat).
+            // This is the defense half of the lever: the opponent's
+            // subtle recapture (knight-move, cross-board) goes unseen
+            // inside the bot's own lines, so it walks into it. Never
+            // applied in check — evasions are forced.
+            if !in_check && self.perception.is_some() && !self.move_is_seen(pos, mv, ply) {
+                continue;
+            }
+
             // Capture moved piece before do_move so we can record it in
             // the per-ply stack for descendants' cont-hist lookups.
             let moved_piece = pos.moved_piece(mv);

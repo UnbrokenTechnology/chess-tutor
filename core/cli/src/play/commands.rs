@@ -59,10 +59,7 @@ fn print_openings_status(
     let probe_profile = OpponentProfile {
         seed: 0,
         book: allowed.clone(),
-        eval_mask: EvalMask::EMPTY,
-        qsearch_max_plies: None,
-        endgame_skill: chess_tutor_engine::endgame::EndgameSkill::Full,
-        noise: NoiseProfile::default(),
+        ..OpponentProfile::default()
     };
     let probe_pos = Position::startpos();
     let cursor = BookCursor::new(&probe_profile, &probe_pos);

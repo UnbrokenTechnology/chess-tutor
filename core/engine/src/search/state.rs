@@ -121,6 +121,13 @@ pub(crate) enum MovesOutcome {
         best_move: Move,
         raised_alpha: bool,
         move_count: usize,
+        /// When the perception filter pruned every legal move at this
+        /// node (`move_count == 0` despite legal moves existing), the
+        /// highest-visibility pruned move — the "a human always sees
+        /// *something*" fallback the caller must search instead.
+        /// Load-bearing for soundness: without it, `move_count == 0`
+        /// would read as checkmate/stalemate.
+        unseen_fallback: Option<Move>,
     },
 }
 
@@ -230,6 +237,19 @@ pub(crate) struct Search<'a> {
     /// judges against true best play. Captured from `params` at `run()`.
     pub(crate) qsearch_cap: i32,
 
+    /// Move-visibility ("perception") filter for this search — the
+    /// geometric-blindness lever for believable weak bots. `None` (the
+    /// default, and anything with level ≥ 1.0, normalized at `run()`)
+    /// is the full-strength bypass: one `is_some()` branch per move.
+    /// When `Some`, moves the bot "didn't see" are pruned before being
+    /// searched — deterministically per `(seed, zobrist, move)`, so TT
+    /// entries stay coherent and blind spots are stable per game. See
+    /// [`crate::visibility`] for the model and
+    /// [`Search::move_is_seen`] for the per-move test. Play-engine-
+    /// only, exactly like [`eval_mask`](Self::eval_mask) /
+    /// [`qsearch_cap`](Self::qsearch_cap) / [`eg_skill`](Self::eg_skill).
+    pub(crate) perception: Option<crate::visibility::PerceptionParams>,
+
     /// Endgame-book knowledge tier the bot may use for this search.
     /// [`EndgameSkill::Full`] (the default) consults every specialist;
     /// lower tiers withhold the harder ones so a weak bot misplays
@@ -309,6 +329,7 @@ impl<'a> Search<'a> {
             root_stm: Color::White,
             eval_mask: EvalMask::EMPTY,
             qsearch_cap: QSEARCH_UNBOUNDED,
+            perception: None,
             eg_skill: EndgameSkill::Full,
             tt_hit_average: TT_HIT_AVERAGE_INIT,
             nmp_min_ply: 0,
@@ -366,6 +387,68 @@ impl<'a> Search<'a> {
     pub(super) fn search_eval(&mut self, pos: &Position) -> Value {
         let raw = evaluate_with_pawn_cache(pos, self.pawn_cache, self.eval_mask, self.eg_skill);
         Value(raw.0 + self.contempt_for_pov(pos.side_to_move()))
+    }
+
+    /// Perception filter: does the bot SEE this legal move? `true` on
+    /// the full-strength path (one branch). Pure per `(seed, zobrist,
+    /// move)` — no ply in the roll — so revisits and re-searches of the
+    /// same position resolve identically (TT-coherent, stable per-game
+    /// blind spots).
+    ///
+    /// `ply == 0` uses the caller-supplied root attention locus and
+    /// honours the `guaranteed_mate_in` contract patch (root checking
+    /// moves exempt — a training feature; see PLAN-perception.md).
+    /// Inner plies read the locus off the parent's stack frame. On
+    /// plies where the side-not-being-modeled moves, the visibility
+    /// score is raised to [`crate::visibility::OPP_EXPONENT`] first —
+    /// subtle refutations are missed more than subtle opportunities
+    /// (Hope Chess), which is what generates organic blunders.
+    ///
+    /// Callers must never let this empty a node: the in-check path
+    /// skips it entirely (evasions are forced) and `negamax_moves`
+    /// carries an `unseen_fallback` so `move_count == 0` keeps meaning
+    /// checkmate/stalemate.
+    pub(super) fn move_is_seen(&self, pos: &Position, mv: Move, ply: usize) -> bool {
+        let Some(pp) = self.perception else {
+            return true;
+        };
+        if ply == 0 && pp.exempt_root_checks && pos.gives_check(mv) {
+            return true;
+        }
+        let last_to = if ply == 0 {
+            pp.last_move_to
+        } else {
+            let parent = &self.stack[STACK_SENTINEL + ply - 1];
+            if parent.was_null {
+                None
+            } else {
+                Some(crate::types::Square::from_index(parent.to_idx))
+            }
+        };
+        let ctx = crate::visibility::VisibilityContext::at_node(pos, last_to);
+        let mut v = crate::visibility::visibility(pos, mv, &ctx);
+        if pos.side_to_move() != self.root_stm {
+            v = v.powf(crate::visibility::OPP_EXPONENT);
+        }
+        let p = crate::visibility::p_see(v, pp.level as f64);
+        crate::visibility::sees(pp.seed, pos.key(), mv, p)
+    }
+
+    /// Visibility score used to rank `unseen_fallback` candidates —
+    /// same context derivation as [`move_is_seen`], no roll.
+    pub(super) fn move_visibility(&self, pos: &Position, mv: Move, ply: usize) -> f64 {
+        let last_to = if ply == 0 {
+            self.perception.and_then(|pp| pp.last_move_to)
+        } else {
+            let parent = &self.stack[STACK_SENTINEL + ply - 1];
+            if parent.was_null {
+                None
+            } else {
+                Some(crate::types::Square::from_index(parent.to_idx))
+            }
+        };
+        let ctx = crate::visibility::VisibilityContext::at_node(pos, last_to);
+        crate::visibility::visibility(pos, mv, &ctx)
     }
 
     /// Apply contempt to a raw eval pulled from the TT. Mirrors

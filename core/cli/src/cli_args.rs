@@ -228,6 +228,14 @@ pub enum Command {
         /// Omit for full knowledge. Mainly for inspecting weak-bot play.
         #[arg(long = "endgame-skill", value_name = "TIER")]
         endgame_skill: Option<u8>,
+        /// Move-visibility dial (geometric-blindness lever): `1.0` =
+        /// sees every move (default); lower prunes geometrically subtle
+        /// moves — backward moves, knight punishes, screened rays —
+        /// from the search. Inspection uses a fixed seed (0) so repeat
+        /// runs are identical. Mainly for inspecting how a weak bot's
+        /// move changes as its perception shrinks.
+        #[arg(long, value_name = "P")]
+        perception: Option<f32>,
         /// Stop after this many nodes.
         #[arg(long)]
         nodes: Option<u64>,
@@ -518,6 +526,12 @@ pub enum Command {
         /// blundered). Set to 0 to allow blunders against any mate.
         #[arg(long = "guaranteed-mate-in", value_name = "N", default_value_t = 1)]
         guaranteed_mate_in: u32,
+        /// Move-visibility dial: `1.0` (default) sees every move; lower
+        /// makes geometrically subtle moves — backward moves, knight
+        /// punishes, screened rays, moves far from the last move —
+        /// invisible to the bot, deterministically per game seed.
+        #[arg(long, value_name = "P", default_value_t = 1.0)]
+        perception: f32,
     },
     /// Expose a dial-configured bot as a UCI engine on stdin/stdout.
     /// **Measurement/test only** — the bridge the offline ELO-calibration
@@ -597,6 +611,12 @@ pub enum Command {
         /// miss suppressed at or within this depth). Default 1.
         #[arg(long = "guaranteed-mate-in", value_name = "N", default_value_t = 1)]
         guaranteed_mate_in: u32,
+        /// Move-visibility dial: `1.0` (default) sees every move; lower
+        /// makes geometrically subtle moves invisible to the bot,
+        /// deterministically per game (seeded from `--seed` + the
+        /// `ucinewgame` counter, like the noise rolls).
+        #[arg(long, value_name = "P", default_value_t = 1.0)]
+        perception: f32,
     },
 }
 

@@ -2,15 +2,16 @@ use super::*;
 
 #[test]
 fn build_position_startpos_no_moves() {
-    let (pos, history, ply) = build_position("position startpos").unwrap();
+    let (pos, history, ply, last) = build_position("position startpos").unwrap();
     assert_eq!(pos.to_fen(), Position::startpos().to_fen());
     assert!(history.is_empty(), "no moves → no pre-root history");
     assert_eq!(ply, 0);
+    assert_eq!(last, None, "no moves -> no attention locus");
 }
 
 #[test]
 fn build_position_startpos_with_moves() {
-    let (pos, history, ply) = build_position("position startpos moves e2e4 e7e5 g1f3").unwrap();
+    let (pos, history, ply, last) = build_position("position startpos moves e2e4 e7e5 g1f3").unwrap();
     // Root is after 3 half-moves; black... no, white to move? e4 e5 Nf3 → black to move.
     assert_eq!(pos.side_to_move(), chess_tutor_engine::types::Color::Black);
     assert_eq!(ply, 3);
@@ -22,6 +23,11 @@ fn build_position_startpos_with_moves() {
     // History must not contain the root key (would be a phantom
     // repetition of the current position).
     assert!(!history.contains(&pos.key()));
+    // The attention locus is the destination of the LAST applied move.
+    assert_eq!(
+        last,
+        chess_tutor_engine::types::Square::from_algebraic("f3"),
+    );
 }
 
 #[test]
@@ -30,7 +36,7 @@ fn build_position_from_fen() {
     // field to `-` when no EP capture is actually legal, so a FEN with a
     // live `c6` would not round-trip. This one round-trips exactly.
     let fen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3";
-    let (pos, history, ply) = build_position(&format!("position fen {fen}")).unwrap();
+    let (pos, history, ply, _last) = build_position(&format!("position fen {fen}")).unwrap();
     assert_eq!(pos.to_fen(), fen);
     assert!(history.is_empty());
     assert_eq!(ply, 0);
@@ -39,11 +45,15 @@ fn build_position_from_fen() {
 #[test]
 fn build_position_from_fen_with_moves() {
     let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-    let (pos, history, ply) = build_position(&format!("position fen {fen} moves e2e4")).unwrap();
+    let (pos, history, ply, last) = build_position(&format!("position fen {fen} moves e2e4")).unwrap();
     assert_eq!(ply, 1);
     assert_eq!(history.len(), 1);
     assert_eq!(history[0], Position::startpos().key());
     assert_eq!(pos.side_to_move(), chess_tutor_engine::types::Color::Black);
+    assert_eq!(
+        last,
+        chess_tutor_engine::types::Square::from_algebraic("e4"),
+    );
 }
 
 #[test]

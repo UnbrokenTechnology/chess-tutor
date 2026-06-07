@@ -32,7 +32,7 @@ use crate::endgame::EndgameSkill;
 use crate::openings::OpeningId;
 
 /// Per-game opponent configuration. See module-level docs.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct OpponentProfile {
     pub book: BookSelection,
     pub noise: NoiseProfile,
@@ -55,11 +55,39 @@ pub struct OpponentProfile {
     /// never read it (full books for true-best-play feedback), exactly
     /// like [`Self::eval_mask`] / [`Self::qsearch_max_plies`].
     pub endgame_skill: EndgameSkill,
+    /// Move-visibility ("perception") dial: `1.0` (default) sees every
+    /// move; lower values make geometrically subtle moves — backward
+    /// moves, knight punishes, screened rays, moves far from the
+    /// action — invisible to the bot's search, deterministically per
+    /// game (see [`crate::visibility`]). Flows to
+    /// [`crate::engine::SearchParams::perception`] bundled with
+    /// [`Self::seed`] and the root attention locus. Analytical engines
+    /// never read it, exactly like [`Self::eval_mask`] /
+    /// [`Self::qsearch_max_plies`] / [`Self::endgame_skill`].
+    pub perception: f32,
     /// Seed for any pseudo-randomness this profile drives — opening
     /// line selection in Phase B, move sampling later. Logged at game
     /// start so a varied game can be replayed exactly by passing the
     /// same seed back in.
     pub seed: u64,
+}
+
+impl Default for OpponentProfile {
+    /// Behaviour-free profile: no book, no noise, no mask, full
+    /// perception. Manual impl (not derived) because `perception`'s
+    /// neutral value is `1.0`, not f32's derived `0.0` (which would
+    /// mean maximally blind).
+    fn default() -> Self {
+        Self {
+            book: BookSelection::default(),
+            noise: NoiseProfile::default(),
+            eval_mask: EvalMask::default(),
+            qsearch_max_plies: None,
+            endgame_skill: EndgameSkill::Full,
+            perception: 1.0,
+            seed: 0,
+        }
+    }
 }
 
 impl OpponentProfile {
@@ -79,12 +107,28 @@ impl OpponentProfile {
     pub fn with_seed(seed: u64) -> Self {
         Self {
             book: BookSelection::Allowed(crate::book::all_ids()),
-            noise: NoiseProfile::default(),
-            eval_mask: EvalMask::default(),
-            qsearch_max_plies: None,
-            endgame_skill: EndgameSkill::Full,
             seed,
+            ..Self::default()
         }
+    }
+
+    /// The [`crate::engine::SearchParams::perception`] bundle for a
+    /// play-engine search from this profile, or `None` when the dial
+    /// is at full strength. `last_move_to` is the destination of the
+    /// opponent's actual last move (the root attention locus).
+    pub fn perception_params(
+        &self,
+        last_move_to: Option<crate::types::Square>,
+    ) -> Option<crate::visibility::PerceptionParams> {
+        if self.perception >= 1.0 {
+            return None;
+        }
+        Some(crate::visibility::PerceptionParams {
+            level: self.perception,
+            seed: self.seed,
+            last_move_to,
+            exempt_root_checks: self.noise.guaranteed_mate_in >= 1,
+        })
     }
 }
 

@@ -93,6 +93,11 @@ pub struct NewGameForm {
     /// so it botches endgames like a weaker human (shuffles a won KQ,
     /// can't mate KBN). Same persistence rule.
     pub endgame_skill: EndgameSkill,
+    /// Move-visibility dial: `1.0` (default) sees every move; lower
+    /// makes geometrically subtle moves (backward moves, knight
+    /// punishes, screened rays) invisible to the bot's search,
+    /// deterministically per game. Same persistence rule.
+    pub perception: f32,
     /// Which openings the bot may play. Persists across New Game clicks
     /// like the other knobs.
     pub book: OpeningSelection,
@@ -132,6 +137,7 @@ impl NewGameForm {
             eval_mask: session.opponent.eval_mask,
             qsearch_max_plies: session.opponent.qsearch_max_plies,
             endgame_skill: session.opponent.endgame_skill,
+            perception: session.opponent.perception,
             book: OpeningSelection::from_book(&session.opponent.book),
             learning: session.learning,
             active_overlays: session.active_overlays.clone(),
@@ -153,6 +159,7 @@ impl NewGameForm {
             eval_mask: EvalMask::EMPTY,
             qsearch_max_plies: None,
             endgame_skill: EndgameSkill::Full,
+            perception: 1.0,
             book: OpeningSelection::any(),
             learning: crate::learning_mode::LearningPreferences::default(),
             active_overlays: std::collections::HashSet::new(),

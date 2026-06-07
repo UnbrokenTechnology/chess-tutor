@@ -32,6 +32,10 @@ impl<'a> Search<'a> {
             .map(|q| q as i32)
             .unwrap_or(QSEARCH_UNBOUNDED);
         self.eg_skill = params.endgame_skill;
+        // Perception filter: normalize "level >= 1.0" to None here so
+        // every per-move check below is a single `is_some()` branch on
+        // the full-strength path.
+        self.perception = params.perception.filter(|p| p.level < 1.0);
         self.tt_hit_average = TT_HIT_AVERAGE_INIT;
         self.nmp_min_ply = 0;
         self.nmp_color = Color::White;
