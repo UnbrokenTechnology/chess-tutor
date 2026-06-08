@@ -1,10 +1,12 @@
 # ELO-calibration harness — tooling
 
-External tooling for measuring our bot configs against the Maia ladder and
-fitting a dials→Elo model. See [`HANDOFF-calibration.md`](HANDOFF-calibration.md)
-for the harness internals and the repo-root [`HANDOFF-solver.md`](../HANDOFF-solver.md)
-for the live calibration work; this file is the **vetted download list** (for
-sign-off before `fetch-tools.sh` runs) plus the anchor findings.
+External tooling for measuring our bot configs against the Maia ladder to
+build the dials→Elo surface (the product interpolates over the measured grid;
+see [`HANDOFF-solver.md`](../HANDOFF-solver.md)). See
+[`HANDOFF-calibration.md`](HANDOFF-calibration.md) for the harness internals
+and the repo-root [`HANDOFF-solver.md`](../HANDOFF-solver.md) for the live
+calibration work; this file is the **tooling download list** plus the durable
+Maia anchor findings.
 
 ## Methodology validated (2026-06-04 pilot)
 
@@ -31,7 +33,7 @@ licensed, never shipped) — only our scripts + docs + summaries are tracked.
 
 | Tool | Version | Asset | Why this one |
 |---|---|---|---|
-| **fastchess** | `v1.8.0-alpha` | `fastchess-windows-x86-64.zip` | Latest release; the SF Fishtest runner since 2024. UCI-only, concurrent, built-in SPRT. (Still alpha — the plan flagged re-verifying flags; man.md confirms `-openings`, `-pgnout`, `-concurrency`, `-resume`.) |
+| **fastchess** | `v1.8.0-alpha` | `fastchess-windows-x86-64.zip` | The SF Fishtest runner since 2024. UCI-only, concurrent, built-in SPRT. (Flags in use: `-openings`, `-pgnout`, `-concurrency`, `-resume`.) |
 | **lc0** | `v0.32.1` | `lc0-v0.32.1-windows-cpu-dnnl.zip` | **CPU dnnl** backend on purpose: at `go nodes 1` (pure policy) a CPU pass is fast + deterministic + needs no CUDA. `openblas` is the fallback. |
 | **Ordo** | `v1.2.6` | `ordo-1.2.6-win.zip` | Rating calc the SF team used to calibrate UCI_Elo; `-A` anchors the pool. |
 | **Maia nets** | `v1.0` release | `maia-{1100..1900}.pb.gz` (9 files) | The human-calibrated anchor ladder. Run under lc0 with `go nodes 1`. |
@@ -40,10 +42,9 @@ licensed, never shipped) — only our scripts + docs + summaries are tracked.
 Run `bash calibration/fetch-tools.sh` to fetch + lay everything out under
 `tools/`, `nets/`, `books/`.
 
-## ⚠️ Anchor findings (changes the orchestration — resolve before Run 1)
+## Maia anchor findings (durable)
 
-Researching the "measured Maia ratings" open item (PLAN item 1) surfaced two
-things that **must** shape how we anchor:
+Two facts about the Maia nets shape how the pool is anchored:
 
 1. **Only 3 of the 9 nets have measured human ratings.** Maia runs as public
    Lichess bots only as `maia1` (net 1100), `maia5` (net 1500), `maia9` (net
@@ -64,27 +65,29 @@ things that **must** shape how we anchor:
    fixed correction to the band labels, and we cannot trust the labels as
    anchor values.
 
-**Implication for the design.** Don't treat the 9 labels as 9 anchors.
-Instead:
+**How we anchor (production).** Don't treat the 9 labels as 9 anchors:
 
-- Run a **local round-robin among the 9 Maia nets themselves** (plus our
-  configs). This gives a self-consistent internal ladder. Ordo/BayesElo
-  produce ratings on the standard Elo scale *by construction*, so the pool
-  needs only an **offset** pinned — anchor on the measured points (start
-  with `maia5 ≈ 1680` rapid, the middle, least extrapolated) and treat
-  `maia1`/`maia9` as **cross-checks** on whether our local pool's *spacing*
-  matches the human scale.
-- If the local spacing between maia1/maia5/maia9 disagrees with their
-  measured rapid spacing, that's the known **engine-pool-vs-human-pool scale
-  gap** (engine pools run "wider"). Note it and prefer the rapid measured
-  numbers as ground truth for the human scale we're targeting.
-- **Pick ONE time control** for the measured anchors and stick to it
-  (rapid is closest to "thinking" human play; our bot is depth-budget, not
+- Run a round-robin (Maia nets + our configs). Ordo produces ratings on the
+  standard Elo scale *by construction*, so the pool needs only its offset +
+  scale pinned to the measured human points.
+- **Loose multi-anchoring on all three measured points** (`maia1 ≈ 1565` /
+  `maia5 ≈ 1680` / `maia9 ≈ 1855` rapid) is the **production default**
+  (`rate(loose_anchors=...)`). A single hard anchor *compresses* the pool —
+  the pilot placed maia-1900 ~70 Elo low off a single maia-1500 pin — so all
+  three points are needed to stretch the pool onto the human scale.
+- **Maia is a noisy ruler regardless:** non-transitive and compressed (the
+  measured 1100→1900 span is ~290 Elo, narrower than the labels suggest), so
+  absolute calibration is **±~100**. Optimize for ladder *shape* (even
+  spacing) and let chess.com feel-tests pin the absolute offset — which
+  landed at **≈ 0** (target Elo ≈ chess.com Elo directly; see
+  [`HANDOFF-perception.md`](../HANDOFF-perception.md)).
+- **Pick ONE time control** for the measured anchors and stick to it (rapid
+  is closest to "thinking" human play; our bot is depth-budget, not
   time-budget, so TC only matters for the anchor lookup, not our engine).
-- This is consistent with the locked decision to handle the **extremes via
-  self-play connectivity + extrapolation** — the same machinery (let Ordo
-  place players by transitive results, anchor the offset once) covers both
-  the 6 unmeasured intermediate nets and our sub-1100 / >1900 configs.
+- **Extremes float.** A rung that loses ~100% to everything above it floats
+  down hundreds of Elo in a sparse pool. Measure the basement/ceiling
+  **densely with boundary anchors** (a self-connected sub-ladder pinned to a
+  few stable rungs), not as isolated configs — see `HANDOFF-calibration.md`.
 
 ## Directory layout (after fetch)
 
