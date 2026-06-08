@@ -1,0 +1,38 @@
+Bands (perception-era, ONE-DIAL schedule, faster ramp - Maia-only anchored)
+2026-06-07, self-hang-redesign binary. Offset to chess.com ~= 0 (feel-validated:
+t500 >> Martin, t1200 = a chess.com-1200 player) - the old 'lichess +250' was a
+basement-floating artifact. So target ~= chess.com Elo directly.
+
+t500-t1900 LOCKED at the noise floor (RMSE ~46). t2000+ PROVISIONAL (+/-100:
+depth-quantization + top-float). eg1 basement so weak bots CONVERT won endgames
+(t500-vs-Martin: eg0 wandered 70 moves + stalemated; eg1 fixes it).
+
+MEASURED is ONE run, +/-50 from Maia-anchor noise. THIS run's maia-1100 anchor read
++57 high, so the basement (which chains to it) reads ~+40 hot - de-skewed it's on
+target (true t800~840, t900~905). Trust the DIALS + TARGET; measured is a noisy check.
+
+  +--------+---------+-----------+-------+---------+------------+----------+-----------+
+  | config | target  | measured  | depth | qsearch | perception | avg_rank | endgame   |
+  +--------+---------+-----------+-------+---------+------------+----------+-----------+
+  | t500   | 500     | 541       | 1     | 1       | 0.20       | 2.8      | 1 (basic) |
+  | t600   | 600     | 620       | 1     | 1       | 0.35       | 3.1      | 1 (basic) |
+  | t700   | 700     | 744       | 1     | 1       | 0.45       | 3.2      | 1 (basic) |
+  | t800   | 800     | 884       | 1     | 2       | 0.55       | 3.0      | 1 (basic) |
+  | t900   | 900     | 961       | 1     | 2       | 0.65       | 2.8      | 1 (basic) |
+  | t1000  | 1000    | 1027      | 1     | 2       | 0.80       | 2.7      | 2 (inter) |
+  | t1100  | 1100    | 1092      | 1     | 2       | 0.90       | 2.4      | 2 (inter) |
+  | t1200  | 1200    | 1201      | 1     | 2       | 1.00       | 2.1      | 2 (inter) |
+  | t1300  | 1300    | 1312      | 2     | 2       | 1.00       | 2.1      | 2 (inter) |
+  | t1400  | 1400    | 1401      | 2     | 2       | 1.00       | 1.9      | 2 (inter) |
+  | t1500  | 1500    | 1485      | 2     | 2       | 1.00       | 1.7      | 2 (inter) |
+  | t1600  | 1600    | 1574      | 2     | full    | 1.00       | 1.6      | 2 (inter) |
+  | t1700  | 1700    | 1720      | 2     | full    | 1.00       | 1.4      | 2 (inter) |
+  | t1800  | 1800    | 1794      | 2     | full    | 1.00       | 1.3      | 2 (inter) |
+  | t1900  | 1900    | 1862      | 4     | full    | 1.00       | 1.4      | 2 (inter) |
+  | t2000  | 2000    | 2023      | 4     | full    | 1.00       | 1.0      | Full      |
+  | t2100  | 2100    | 2225      | 5     | full    | 1.00       | 1.2      | Full      |
+  | t2200  | 2200    | 2167      | 5     | full    | 1.00       | 1.0      | Full      |
+  | t2300  | 2300    | 2346      | 6     | full    | 1.00       | 1.3      | Full      |
+  | t2400  | 2400    | 2386      | 6     | full    | 1.00       | 1.0      | Full      |
+  | t2500  | 2500    | 2622      | 7     | full    | 1.00       | 1.0      | Full      |
+  +--------+---------+-----------+-------+---------+------------+----------+-----------+

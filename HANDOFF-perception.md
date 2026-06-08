@@ -242,7 +242,16 @@ Landed in `core/engine/src/noise.rs` (+ rewritten `noise_tests.rs`: new
 tests pass, clippy clean. **NOT yet committed.** **Makes weak bots weaker
 + more realistic → basement must be re-measured (`run_rampbase.py`).**
 
-## OPEN — basement design decision (A/B/C, user to choose)
+## RESOLVED — basement design decision (A chosen, 2026-06-07)
+**Option A** (ramp perception from the bottom) + a FASTER ramp
+(`(elo-300)/900`). Feel-test B (`d1 q1 p0.1 r5.5`) played like a weak
+human ("young child" — a queen lost to a missed sideways-knight guard,
+i.e. perception-shaped), clearing the "high rank reads as nonsense"
+worry. Rationale: early Elo gains come from *seeing more moves*. Residual
+watch-item: the floor rank-hump (see LADDER ASSEMBLED / NEXT STEPS). The
+original A/B/C framing is kept below for context.
+
+### original A/B/C options (historical)
 Perception is so strong that the linear formula forces high/wobbly
 basement ranks. Options put to the user:
 - **(A)** Linear formula as-is, accept rank 4.3-5.7 in the basement.
@@ -264,13 +273,98 @@ basement ranks. Options put to the user:
 
 ---
 
+## LADDER ASSEMBLED (2026-06-07, post-self-hang-redesign)
+
+Full t500-t2500 ladder rebuilt + measured. Live table: [`bands.txt`].
+Script: `calibration/run_ladder.py` (now has a `--from/--to` target
+filter; **edit via Edit/Write tools only** per the heredoc gotcha).
+
+- **Schedule = ONE DIAL AT A TIME** (user 2026-06-07), qsearch before
+  depth (more human): `t500-700 d1q1 · t800-1200 d1q2 · t1300-1500 d2q2
+  · t1600-1800 d2qinf · t1900-2500 d4..d7 qinf`. Kills the old
+  d1q1->d2q2 multi-dial cliff.
+- **Perception = FASTER ramp** `clamp((elo-300)/900,0,1)` (0 at t300, 1.0
+  at t1200; option A, feel-validated). Inert above the ~0.6 knee, so it's
+  the active lever only in the basement; rank does the mid/top.
+- **Anchoring = MAIA-ONLY.** The q1floor bottom anchors were themselves
+  floated and FOUGHT the ground-truth Maia (both-end pass-2 dragged them
+  -120 / pushed Maia +120), so dropped. Maia MEASURED band ~1565-1855
+  (NOT labels); rungs t1600-1900 overlap it, lower rungs chain down.
+- **Method that worked: tune the mid FIRST.** Lock t1000-t1900 against
+  Maia (RMSE 44), THEN run the full ladder — the locked mid bridges the
+  basement up to the anchors so it stops floating (pass-1 basement floated
+  -330; with the bridge it lands on target). Final: **t500-t1900 LOCKED,
+  RMSE ~35** (each rung +/-73). Runs: `runs/ladder/run_{mid,full}_pass*.log`.
+- **t2000-t2500 PROVISIONAL (+/-100):** depth-quantization (depth steps
+  ~150-220, steep rank slopes near r1.0) + top-float (top rungs beat all
+  Maia, lose only to d8 ceiling = sparse-anchor noise, the basement
+  problem mirrored). Using pass-1 configs (best available); needs a
+  dedicated top pass + ceiling bracket.
+- **eg1 basement (t500-t900):** at eg0 the endgame eval is flat -> rank-
+  noise wanders (t500-vs-Martin: 70-move bounce + stalemate). eg1 gives a
+  conversion gradient (PushToEdges/PushClose) so weak bots convert won
+  endgames. eg fires only in recognized endgames -> buys conversion
+  without touching middlegame strength (basement Elo barely moved).
+  eg tiers: t500-900 eg1, t1000-1900 eg2, t2000+ Full (provisional).
+
+### CHESS.COM OFFSET ≈ 0 (feel-validated 2026-06-07) — the "lichess +250" was an ARTIFACT
+The prior "lichess runs ~200-350 above chess.com" was a **basement-floating
+artifact**, not a real scale gap. Three independent feel-tests on the
+fixed ladder disprove it:
+- **t500 >> Martin** (chess.com 250): t500 positionally crushed Martin
+  (only drew on an endgame-conversion miss, since fixed by eg1).
+- **t1200 = the user's level** (a chess.com ~1200 player): "absolutely"
+  felt like a peer game.
+- **t1400 beat Mateo** (chess.com 1400) and **chess.com's own Game Review
+  rated our bot 1300 / Mateo 800 for that game** (acc 75.8 vs 71.6).
+So **target Elo ≈ chess.com Elo directly** — drop the offset shift from
+the slider and from any doc that still says "chess.com 200-350 lower"
+(bands.txt updated; the legacy weak-bot memory still claims it).
+Caveat: lichess↔chess.com gap may be band-dependent; this is the floor-to-
+mid read. **Implication: the floor could extend DOWN** (chess.com has
+~250 bots; the self-hang+eg1 basement reaches that believably) instead of
+stopping at t500 — revisit if sub-500 rungs are wanted.
+
+### Humanity at higher Elo (open, user-flagged, revisit-later)
+Low-Elo bots feel human (believable blunders ✓). At higher Elo the user
+(a chess.com ~1200) couldn't judge — couldn't parse the positional moves.
+Two ENTANGLED gaps: (1) **legibility** — the teaching layer names concepts
+(bishop active / gained space / flank attacks) but doesn't tie them to the
+specific puzzling move tightly enough for a 1200 to learn (the NEXT
+teaching-UX frontier; the user's confusion maps where it must land);
+(2) **plan-coherence** — at d2 the bot can't form multi-move plans; moves
+come from the SF11 classical eval (real positional concepts), giving
+*emergent* (not intentional) coherence. Likely "human enough" but the
+threaded-intent gap is a distinct, harder future lever (perception fixes
+*misses*, not plan narrative). User shelving until stronger at chess.
+
+### Measurement lessons (durable)
+- **Lopsided games carry ~no info about gap SIZE** (info ∝ p(1-p)). A
+  round-robin connects everything but a region reachable from the anchors
+  only through near-shutout links has a loose ABSOLUTE scale -> it floats.
+  Fix: an unbroken chain of competitive (~100-Elo) links to the anchors
+  (basement via the locked mid; top still lacks this).
+- **Maia is a noisy ruler:** non-transitive (t1800 beat maia-1900 87.5%
+  but maia-1100 only 75%) + compressed (~290-Elo measured span). Absolute
+  cal is +/-~100 regardless; optimize SHAPE (even ~100-Elo spacing), let
+  chess.com feel-tests pin the offset.
+
 ## NEXT STEPS (in order)
 
-1. **Self-hang filter fix — DONE** (see RESOLVED section; PV-delta,
-   perception-aware, rank-scaled). Remaining: **commit it**, then
-   **re-measure the basement** (`run_rampbase.py`) — it affects every weak
-   bot, so the q1floor / rampbase curves shift and must be re-derived
-   before locking rungs / running the grid.
+1. **Self-hang filter fix — DONE + COMMITTED** (`26007ec`; see RESOLVED
+   section). Basement re-measured under it.
+2. **USER FEEL-TESTS across the ladder** (current ask). Watch: the floor
+   rank-HUMP (t500 r2.8 < t700 r3.2 from the faster ramp — un-accelerate
+   to 500->1400 if the floor reads non-human); eg-tiers (held at 2 in the
+   mid for tuning — believability tiers are a final layer + re-measure).
+3. **Refine the top** (t2000-t2500): dedicated pass with intermediate
+   ceiling anchors (bracket the top the way the locked mid brackets the
+   basement) + measured d5/d6/d7 rank slopes.
+4. **Commit the calibration set** (`run_ladder.py`, `bands.txt`, the
+   `run_*.py` sweep scripts) once rungs survive feel-tests.
+5. **chess.com feel-tests** at the lichess->chess.com offset.
+6. **Full grid** (depth x qsearch x perception x rank x eg) -> scipy
+   regression -> invertible model -> the single ELO slider.
 2. **Resolve the basement design** (A/B/C) — gated on feel-test B and the
    self-hang fix (which softens the high-rank tension).
 3. **Finalize the perception-era ladder** (25 rungs, perception-monotone,
