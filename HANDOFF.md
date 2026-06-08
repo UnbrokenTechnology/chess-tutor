@@ -52,7 +52,20 @@ The five surfaces from the prior NEXT list shipped end-to-end:
 - **GUI teaching-power port** ✅ (formerly `PLAN-teaching-gui.md`, now retired to git history) — the CLI's explanatory discipline baked into which cards show and in what order, **no LLM/NN**. Shipped: the detectors-only **tactical-mode gate** (`analysis/tactical_mode.rs`), the **forcing-check-chain** detector (`analysis/forcing_check_chain.rs`), three new coaching cards (`latent_threat_card` / `check_followup_card` / `king_hunt_card`), the latent→`user_walked_into` retrospective wiring, the static-vs-search **override note** + **depth-honesty note** (`retrospective_view/{override_note,depth_honesty}.rs`), and the **ALLOWED-not-MISSED** reframe in `move_assessment.rs`. The five [`teaching-positions/`](teaching-positions/) case studies are its durable regression targets.
 - **Teaching translation layer + opponent-move retrospective** ✅ — `core/teaching` (renamed from `core/narration`) now owns all prose via one **Claim IR + `phrase`** translator; opponent moves are analysed/graded/phrased from `Perspective::Opponent`. See pillar 3 above and [`HANDOFF-ux.md`](HANDOFF-ux.md).
 
-### NEXT: tuning + persistence + the platform path
+### ACTIVE THREAD (2026-06-08): opponent-Elo solver + weak-bot calibration
+
+A separate active workstream from the teaching UX below. The
+move-visibility ("perception") weak-bot lever LANDED, miss%/blunder% were
+removed, and the ELO calibration ladder was rebuilt around it; the current
+work is baking a measured-grid lookup into the engine's forward model.
+**Read [`HANDOFF-solver.md`](HANDOFF-solver.md)** for the live cold-resume
+(grid re-run status + the bake sequence). Companions:
+[`HANDOFF-perception.md`](HANDOFF-perception.md) (durable perception-lever +
+ladder findings), [`calibration/HANDOFF-calibration.md`](calibration/HANDOFF-calibration.md)
+(harness internals), [`RESEARCH-perception.md`](RESEARCH-perception.md)
+(the evidence base behind the lever).
+
+### NEXT (teaching UX): tuning + persistence + the platform path
 
 Pick up from **[`HANDOFF-ux.md`](HANDOFF-ux.md)** — the teaching surfaces are wired end-to-end; remaining work is real-play tuning, the **persistence design** open thread (below), and the **FFI crate → mobile shells** path. The three teaching surfaces, all card-based and all reading the same engine outcomes:
 
