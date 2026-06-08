@@ -2,25 +2,16 @@
 # magic-bitboard tables, etc.)
 target/
 
-# The Stockfish 11 source archive — its contents are already
-# extracted under `reference/Stockfish-sf_11/`, so committing the
-# zip too would just bloat the history.
+# The entire `reference/` tree is LOCAL-ONLY, never committed. It holds
+# third-party source used only for the port — all trivially re-downloadable,
+# so there's no reason to carry it (or the add/remove diffs) in our history.
+# This is the same "reference, never shipped" posture that always applied to
+# lichess-puzzler, now applied to the whole directory. Re-create locally:
+#   unzip Stockfish-sf_11.zip -d reference/            # Stockfish 11 (GPLv3)
+#   git clone https://github.com/ornicar/lichess-puzzler \
+#       reference/lichess-puzzler                      # lichess-puzzler (AGPL-3.0)
 Stockfish-sf_11.zip
-
-# Build artifacts from compiling the reference Stockfish 11 source
-# (we only run this locally for apples-to-apples NPS comparisons).
-reference/Stockfish-sf_11/src/*.o
-reference/Stockfish-sf_11/src/syzygy/*.o
-reference/Stockfish-sf_11/src/.depend
-reference/Stockfish-sf_11/src/stockfish
-reference/Stockfish-sf_11/src/stockfish.exe
-
-# lichess-puzzler reference is a *nested git clone* (AGPL-3.0, used only
-# locally for the tactic-library port — same "reference, never shipped"
-# posture as the Stockfish source). It carries its own .git, so it can't
-# be committed cleanly as files; keep it out of this repo's index.
-# Re-clone from github.com/ornicar/lichess-puzzler if missing.
-reference/lichess-puzzler/
+reference/
 
 # dhat heap-profile output (generated when running the CLI with the
 # `dhat-heap` feature; useful for one-off allocation audits, but not
