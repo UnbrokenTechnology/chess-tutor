@@ -11,6 +11,7 @@ pub mod attacks;
 pub mod bitbases;
 pub mod bitboard;
 pub mod book;
+pub mod calibration;
 pub mod endgame;
 pub mod engine;
 pub mod eval;

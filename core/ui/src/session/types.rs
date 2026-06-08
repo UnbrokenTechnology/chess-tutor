@@ -111,6 +111,12 @@ pub struct NewGameForm {
     pub active_overlays: std::collections::HashSet<crate::view::OverlayKind>,
     /// Whether the chess.com-style eval bar is shown.
     pub show_eval_bar: bool,
+    /// The "opponent Elo" slider's target — the anchor for the strength
+    /// solver ([`chess_tutor_engine::calibration`]). Moving it resets the
+    /// dials above to that Elo's ladder defaults; tweaking a dial then
+    /// shows the resulting Elo relative to this anchor. Persists across
+    /// New Game like the other knobs.
+    pub elo_target: f64,
     pub error: Option<String>,
 }
 
@@ -120,7 +126,7 @@ impl NewGameForm {
     /// tweaking rather than rebuilding settings from scratch every
     /// time they click New Game.
     pub(crate) fn from_current(session: &Session) -> Self {
-        Self {
+        let self_ = Self {
             color: match session.engine_plays {
                 EngineMode::Side(Color::Black) => ColorChoice::White,
                 EngineMode::Side(Color::White) => ColorChoice::Black,
@@ -142,15 +148,19 @@ impl NewGameForm {
             learning: session.learning,
             active_overlays: session.active_overlays.clone(),
             show_eval_bar: session.show_eval_bar,
+            elo_target: 1500.0,
             error: None,
-        }
+        };
+        let mut form = self_;
+        form.elo_target = chess_tutor_engine::calibration::estimate_elo(&form.bot_dials());
+        form
     }
 
     /// Defaults for the first-launch dialog — same shape as
     /// [`Self::from_current`] would produce for a freshly constructed
     /// [`Session`], but without needing one to exist yet.
     pub(crate) fn initial() -> Self {
-        Self {
+        let mut form = Self {
             color: ColorChoice::White,
             fen: String::new(),
             depth: DEFAULT_DEPTH,
@@ -164,8 +174,40 @@ impl NewGameForm {
             learning: crate::learning_mode::LearningPreferences::default(),
             active_overlays: std::collections::HashSet::new(),
             show_eval_bar: true,
+            elo_target: 1500.0,
             error: None,
+        };
+        form.elo_target = chess_tutor_engine::calibration::estimate_elo(&form.bot_dials());
+        form
+    }
+
+    /// The current dials as a [`chess_tutor_engine::calibration::BotDials`]
+    /// — the bridge to the Elo solver. Endgame `Full` maps to `None`;
+    /// the masks read king-safety / pawn-structure off the eval mask.
+    pub fn bot_dials(&self) -> chess_tutor_engine::calibration::BotDials {
+        use chess_tutor_engine::opponent::EvalCategory;
+        let tier = self.endgame_skill as u8;
+        chess_tutor_engine::calibration::BotDials {
+            depth: self.depth,
+            qsearch: self.qsearch_max_plies,
+            perception: self.perception,
+            avg_move_rank: self.noise.avg_move_rank,
+            endgame_skill: if tier >= 3 { None } else { Some(tier as u32) },
+            mask_safety: self.eval_mask.is_disabled(EvalCategory::KingSafety),
+            mask_positional: self.eval_mask.is_disabled(EvalCategory::PawnStructure),
         }
+    }
+
+    /// Apply solver-produced dials (from the Elo slider) onto the form.
+    /// Sets the five strength dials; leaves the eval mask alone (masks are
+    /// a play-style "personality", not part of the Elo solve).
+    pub fn apply_dials(&mut self, d: &chess_tutor_engine::calibration::BotDials) {
+        self.depth = d.depth;
+        self.qsearch_max_plies = d.qsearch;
+        self.perception = d.perception;
+        self.noise.avg_move_rank = d.avg_move_rank;
+        self.endgame_skill =
+            EndgameSkill::from_tier(d.endgame_skill.map(|t| t as u8).unwrap_or(3));
     }
 }
 

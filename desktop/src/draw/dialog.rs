@@ -13,6 +13,7 @@
 //! There is deliberately **no "Engine PV" toggle** — engine best-move
 //! lines are review-only (decision #9).
 
+use chess_tutor_engine::calibration;
 use chess_tutor_engine::endgame::EndgameSkill;
 use chess_tutor_engine::opponent::{EvalCategory, EvalMask, NoiseProfile};
 use eframe::egui;
@@ -98,69 +99,104 @@ pub(crate) fn draw(
                 ui.heading("Opponent strength");
                 ui.label(
                     egui::RichText::new(
-                        "Tune how the bot plays. Defaults give full-strength play; \
-                         lower the search depth or raise the mistake knobs for a \
-                         weaker, more punishable opponent.",
+                        "Pick a target Elo; the bot's dials are solved to match. Open \
+                         Advanced to fine-tune any dial — the resulting Elo updates live.",
                     )
                     .small()
                     .weak(),
                 );
                 ui.add_space(6.0);
 
-                // Search depth is the primary strength lever — it only
-                // affects the bot's move selection (not retrospective or
-                // game review), so it belongs here. Rendered in the same
-                // grid as the noise knobs so its label/slider columns line
-                // up with them.
-                draw_strength_controls(
-                    ui,
-                    &mut form.depth,
-                    &mut form.qsearch_max_plies,
-                    &mut form.endgame_skill,
-                    &mut form.perception,
-                    &mut form.noise,
+                // Primary control: the opponent-Elo slider. Moving it resets the
+                // advanced dials to that Elo's ladder defaults (calibration solver).
+                ui.horizontal(|ui| {
+                    ui.label("Target Elo:").on_hover_text(
+                        "Approximate opponent strength (chess.com-comparable). The \
+                         advanced dials below are solved to hit this number.",
+                    );
+                    let resp = ui.add(
+                        egui::Slider::new(
+                            &mut form.elo_target,
+                            calibration::ELO_MIN..=calibration::ELO_MAX,
+                        )
+                        .step_by(25.0)
+                        .custom_formatter(|v, _| format!("{v:.0}")),
+                    );
+                    if resp.changed() {
+                        let dials = calibration::config_for_elo(form.elo_target);
+                        form.apply_dials(&dials);
+                    }
+                });
+
+                // Live "resulting Elo" readout: equals the target until an advanced
+                // dial is tweaked, then tracks the change (1-frame lag — invisible).
+                let resulting = calibration::elo_for_dials(&form.bot_dials(), form.elo_target);
+                let off_target = (resulting - form.elo_target).abs() > 15.0;
+                ui.label(
+                    egui::RichText::new(format!("Resulting strength ≈ {resulting:.0} Elo"))
+                        .color(if off_target {
+                            crate::draw::theme::WARN
+                        } else {
+                            crate::draw::theme::TEXT_MUTED
+                        }),
+                )
+                .on_hover_text(
+                    "Estimated Elo of the current dials. Matches the target until you \
+                     change an advanced dial below.",
                 );
 
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(super::icon::icon_label(
-                            egui_phosphor::regular::BOOK_OPEN,
-                            "Openings…",
-                            14.0,
-                        ))
-                        .on_hover_text("Choose which openings the bot may play")
-                        .clicked()
-                    {
-                        super::opening_picker::open(ui.ctx());
-                    }
-                    ui.label(
-                        egui::RichText::new(super::opening_picker::summary(&form.book))
-                            .color(crate::draw::theme::TEXT_MUTED),
-                    );
-                });
+                egui::CollapsingHeader::new("Advanced — individual dials")
+                    .id_salt("opponent_advanced")
+                    .show(ui, |ui| {
+                        draw_strength_controls(
+                            ui,
+                            &mut form.depth,
+                            &mut form.qsearch_max_plies,
+                            &mut form.endgame_skill,
+                            &mut form.perception,
+                            &mut form.noise,
+                        );
 
-                ui.add_space(8.0);
-                ui.collapsing("Eval mask (advanced) — categories the bot is blind to", |ui| {
-                    ui.label(
-                        egui::RichText::new(
-                            "Toggle off a concept to simulate an opponent who doesn't \
-                             understand it (e.g. mask king-safety to spar against a sub-\
-                             1200 positional player).",
-                        )
-                        .small()
-                        .weak(),
-                    );
-                    ui.add_space(4.0);
-                    draw_eval_mask_controls(ui, &mut form.eval_mask);
-                });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(super::icon::icon_label(
+                                    egui_phosphor::regular::BOOK_OPEN,
+                                    "Openings…",
+                                    14.0,
+                                ))
+                                .on_hover_text("Choose which openings the bot may play")
+                                .clicked()
+                            {
+                                super::opening_picker::open(ui.ctx());
+                            }
+                            ui.label(
+                                egui::RichText::new(super::opening_picker::summary(&form.book))
+                                    .color(crate::draw::theme::TEXT_MUTED),
+                            );
+                        });
 
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Reset bot to defaults").clicked() {
-                        reset_bot = true;
-                    }
-                });
+                        ui.add_space(8.0);
+                        ui.collapsing("Eval mask — categories the bot is blind to", |ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Toggle off a concept to simulate an opponent who \
+                                     doesn't understand it (e.g. mask king-safety to spar \
+                                     against a sub-1200 positional player).",
+                                )
+                                .small()
+                                .weak(),
+                            );
+                            ui.add_space(4.0);
+                            draw_eval_mask_controls(ui, &mut form.eval_mask);
+                        });
+
+                        ui.add_space(8.0);
+                        if ui.button("Reset bot to defaults").clicked() {
+                            reset_bot = true;
+                        }
+                    });
 
                 ui.add_space(12.0);
             });
