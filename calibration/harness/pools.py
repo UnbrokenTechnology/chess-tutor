@@ -25,29 +25,24 @@ from .engines import BotConfig, MaiaEngine, Player
 # Approx pilot-measured Elos in the comments are coarse (single-anchor)
 # guides for range coverage, not ground truth.
 REFERENCE_BOTS: list[BotConfig] = [
-    # Tactical-vision floor: with configs no longer playing each other
-    # (seed-swap), the weakest configs need opponents below them to be
-    # ratable. A tactically-blind bot (qsearch_depth 0) hangs pieces and is
-    # weaker than any sane config — the natural, low-variance floor that
-    # replaced the retired wild bots. The qdepth rung gives a spread up to
-    # ~the blunder/depth refs.
-    BotConfig("ref-d1-q0", depth=1, qsearch_depth=0),     # ~ floor (Martin)
-    BotConfig("ref-d2-q0", depth=2, qsearch_depth=0),
-    BotConfig("ref-d4-q1", depth=4, qsearch_depth=1),     # sees initial capture
-    BotConfig("ref-d4-q2", depth=4, qsearch_depth=2),     # sees the recapture
-    # Mid-band perception rung (replaces the retired blunder ref —
-    # miss/blunder dials removed 2026-06-07; perception sweep measured
-    # d2q2-p0.2 ~= 1395).
-    BotConfig("ref-d2q2-p02", depth=2, qsearch_depth=2, perception=0.2),
-    BotConfig("ref-d1", depth=1),                          # ~1750
-    BotConfig("ref-d4", depth=4),                          # ~2100
-    BotConfig("ref-d6", depth=6),                          # ~2435
-    # Ceiling: stronger than any grid config (grid depth caps at 8) so the
-    # grid's strongest no-noise configs aren't all-wins. It will itself be
-    # all-wins and get excluded from the rating pass — that's fine, its job
-    # is purely to give the grid's top a beatable-by-nobody-else opponent
-    # to lose to.
-    BotConfig("ref-d10", depth=10),                        # ~2600 ceiling
+    # Connectivity spine = the LOCKED ladder rungs (calibration commit
+    # 2026-06-07), spread ~every 300 Elo. With the seed-swap (configs don't
+    # play each other), grid configs anchor to the Maia ground truth only
+    # THROUGH this pool — so it must densely bracket the whole 500-2300 range
+    # or weak/strong configs float (the hard-won ladder lesson). The 9 Maia
+    # add density in their 1565-1855 measured band. Dials copied verbatim
+    # from run_ladder.py RUNGS so these are our calibrated reference points.
+    BotConfig("ref-t500",  depth=1, qsearch_depth=1, perception=0.20, avg_move_rank=2.8, endgame_skill=1),
+    BotConfig("ref-t800",  depth=1, qsearch_depth=2, perception=0.55, avg_move_rank=3.0, endgame_skill=1),
+    BotConfig("ref-t1100", depth=1, qsearch_depth=2, perception=0.90, avg_move_rank=2.4, endgame_skill=2),
+    BotConfig("ref-t1400", depth=2, qsearch_depth=2, perception=1.00, avg_move_rank=1.9, endgame_skill=2),
+    BotConfig("ref-t1700", depth=2, perception=1.00, avg_move_rank=1.4, endgame_skill=2),
+    BotConfig("ref-t2000", depth=4),
+    BotConfig("ref-t2300", depth=6, avg_move_rank=1.3),
+    # Ceiling: stronger than any grid config (grid depth caps at 6) so the
+    # grid's strongest configs aren't all-wins. Itself all-wins -> excluded
+    # from the rating pass; its job is purely to give the top a loss.
+    BotConfig("ref-d8", depth=8),
 ]
 
 

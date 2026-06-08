@@ -34,34 +34,31 @@ from harness.grid import GridSpec, build_grid
 from harness.pools import GRID_MASK_COMBOS
 
 # ---------------------------------------------------------------------------
-# The grid (chosen 2026-06-05, "~6.5 h overnight"):
-#   depth x qsearch-depth  = {1,2,4,6} x {0,1,2,None}  (16 tactical cells;
-#     q6 dropped — the probe showed q6 ~= qNone at every depth)
-#   avg_move_rank          = {1,2,4}     (drop 6 — flat variety tail)
-#   blunder_modes          = none + {0.3,0.6} x {pawn, queen}  (drop minor;
-#     pawn/queen brackets severity)
-#   miss_chance            = {0, 0.3, 0.6}
-#   masks                  = none / safety / positional / both  (4 combos)
-# => 4*4*3*5*3*4 = 2880 configs.
+# The grid (perception-era redesign, 2026-06-07 — miss/blunder REMOVED,
+# perception added, eg expanded; masks kept as an axis per the depth-
+# dependent pawn/king-safety effects):
+#   depth x qsearch-depth = {1,2,4,6} x {1,2,None}  (q0 dropped: off-product)
+#   perception            = {0,0.2,0.4,0.6,1.0}     (dense below the knee)
+#   avg_move_rank         = {1,2,3.5,5}             (covers basement high rank)
+#   endgame_skill         = {0,1,2,None=Full}       (conversion; eg x rank)
+#   masks                 = none / safety / positional / both  (4 combos)
+# => 4*3*5*4*4*4 = 3840 configs.
 # ---------------------------------------------------------------------------
 GRID = GridSpec(
     depth=[1, 2, 4, 6],
-    qsearch_depth=[0, 1, 2, None],
-    avg_move_rank=[1.0, 2.0, 4.0],
-    blunder_modes=[
-        (0.0, 1.0, 4.0),
-        (0.3, 1.0, 2.0), (0.6, 1.0, 2.0),   # pawn
-        (0.3, 1.0, 9.0), (0.6, 1.0, 9.0),   # queen
-    ],
-    miss_chance=[0.0, 0.3, 0.6],
+    qsearch_depth=[1, 2, None],
+    perception=[0.0, 0.2, 0.4, 0.6, 1.0],
+    avg_move_rank=[1.0, 2.0, 3.5, 5.0],
+    endgame_skill=[0, 1, 2, None],
     masks=GRID_MASK_COMBOS,
 )
 
 TINY = GridSpec(
     depth=[2, 4],
-    qsearch_depth=[0, None],
+    qsearch_depth=[2, None],
+    perception=[0.0, 1.0],
     avg_move_rank=[1.0],
-    miss_chance=[0.0, 0.4],
+    endgame_skill=[1, None],
     masks=GRID_MASK_COMBOS[:2],   # none + safety
 )
 
@@ -107,9 +104,8 @@ def main() -> None:
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow([
-            "name", "kind", "depth", "qsearch_depth", "avg_move_rank",
-            "blunder_chance", "blunder_min_material", "blunder_max_material",
-            "miss_chance", "mask_safety", "mask_positional",
+            "name", "kind", "depth", "qsearch_depth", "perception",
+            "avg_move_rank", "endgame_skill", "mask_safety", "mask_positional",
             "elo", "elo_error", "games",
         ])
         for name, r in sorted(result.ratings.items(), key=lambda kv: -kv[1].rating):
@@ -119,15 +115,15 @@ def main() -> None:
             err = "" if r.error is None else f"{r.error:.1f}"
             if c is not None:
                 qd = "inf" if c.qsearch_depth is None else c.qsearch_depth
+                eg = "F" if c.endgame_skill is None else c.endgame_skill
                 m_safety, m_pos = _mask_bools(c.disable_eval)
                 w.writerow([
-                    name, kind, c.depth, qd, c.avg_move_rank,
-                    c.blunder_chance, c.blunder_min_material, c.blunder_max_material,
-                    c.miss_chance, m_safety, m_pos,
+                    name, kind, c.depth, qd, c.perception,
+                    c.avg_move_rank, eg, m_safety, m_pos,
                     f"{r.rating:.1f}", err, r.played,
                 ])
             else:
-                w.writerow([name, kind, "", "", "", "", "", "", "", "", "",
+                w.writerow([name, kind, "", "", "", "", "", "", "",
                             f"{r.rating:.1f}", err, r.played])
     print(f"\nwrote {csv_path}  ({len(result.ratings)} rated players)")
     grid_rows = [(n, r) for n, r in result.ratings.items()
