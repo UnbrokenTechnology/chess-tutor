@@ -34,32 +34,35 @@ from harness.grid import GridSpec, build_grid
 from harness.pools import GRID_MASK_COMBOS
 
 # ---------------------------------------------------------------------------
-# The grid (perception-era redesign, 2026-06-07 — miss/blunder REMOVED,
-# perception added, eg expanded; masks kept as an axis per the depth-
-# dependent pawn/king-safety effects):
-#   depth x qsearch-depth = {1,2,4,6} x {1,2,None}  (q0 dropped: off-product)
-#   perception            = {0,0.2,0.4,0.6,1.0}     (dense below the knee)
-#   avg_move_rank         = {1,2,3.5,5}             (covers basement high rank)
-#   endgame_skill         = {0,1,2,None=Full}       (conversion; eg x rank)
-#   masks                 = none / safety / positional / both  (4 combos)
-# => 4*3*5*4*4*4 = 3840 configs.
+# The grid (INTERPOLATION-COVERAGE redesign, 2026-06-08): the product does
+# MULTIVARIATE INTERPOLATION over these measured points, so the bands must
+# BRACKET the full GUI dial range — no extrapolation (the d7/p0 read-2023 bug).
+# Masks PULLED OUT of the Cartesian (≈0 Elo except king-safety, which the
+# lookup carries as an additive depth-term) to free budget for bracketing the
+# dials that actually need it:
+#   depth         = {1,2,3,4,6,8}        (3 = steep 2->4 region; 8 = top; GUI capped at 8)
+#   qsearch-depth = {1,2,None}           (q0 off-product; finite q3-9 interpolate q2..inf)
+#   perception    = {0,0.2,0.4,0.6,0.8,1.0}  (0.8 splits the 0.6->1.0 plateau)
+#   avg_move_rank = {1,2,3.5,5,6.5,8}    (brackets the GUI max of 8)
+#   endgame_skill = {0,1,2,None=Full}
+# => 6*3*6*6*4 = 2592 configs (smaller than the old 3840 despite more knots).
 # ---------------------------------------------------------------------------
 GRID = GridSpec(
-    depth=[1, 2, 4, 6],
+    depth=[1, 2, 3, 4, 6, 8],
     qsearch_depth=[1, 2, None],
-    perception=[0.0, 0.2, 0.4, 0.6, 1.0],
-    avg_move_rank=[1.0, 2.0, 3.5, 5.0],
+    perception=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    avg_move_rank=[1.0, 2.0, 3.5, 5.0, 6.5, 8.0],
     endgame_skill=[0, 1, 2, None],
-    masks=GRID_MASK_COMBOS,
+    masks=[("", ())],  # masks out — handled additively in the lookup
 )
 
 TINY = GridSpec(
-    depth=[2, 4],
+    depth=[2, 8],
     qsearch_depth=[2, None],
     perception=[0.0, 1.0],
-    avg_move_rank=[1.0],
+    avg_move_rank=[1.0, 8.0],
     endgame_skill=[1, None],
-    masks=GRID_MASK_COMBOS[:2],   # none + safety
+    masks=[("", ())],
 )
 
 EST_GAMES_PER_SEC = 49  # measured on a depth-1/2/4/6 mix with noise

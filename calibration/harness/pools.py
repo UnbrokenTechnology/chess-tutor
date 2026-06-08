@@ -39,10 +39,14 @@ REFERENCE_BOTS: list[BotConfig] = [
     BotConfig("ref-t1700", depth=2, perception=1.00, avg_move_rank=1.4, endgame_skill=2),
     BotConfig("ref-t2000", depth=4),
     BotConfig("ref-t2300", depth=6, avg_move_rank=1.3),
-    # Ceiling: stronger than any grid config (grid depth caps at 6) so the
-    # grid's strongest configs aren't all-wins. Itself all-wins -> excluded
-    # from the rating pass; its job is purely to give the top a loss.
-    BotConfig("ref-d8", depth=8),
+    # Weak floor: the expanded grid reaches rank 8 + perception 0 (very weak),
+    # below the t500 rung. This gives those corner configs a same-level
+    # opponent so they're ratable instead of all-loss/floated.
+    BotConfig("ref-floor", depth=1, qsearch_depth=1, perception=0.0, avg_move_rank=6.0, endgame_skill=0),
+    # Ceiling: stronger than any grid config. The grid now reaches d8, so the
+    # ceiling is d10 (was d8) to still tower over the strongest configs.
+    # Itself all-wins -> excluded from rating; its job is to give the top a loss.
+    BotConfig("ref-d10", depth=10),
 ]
 
 

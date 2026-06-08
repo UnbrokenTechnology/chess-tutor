@@ -14,10 +14,11 @@ Construction per target (see design_bot):
      pick the cheapest base whose full-strength Elo sits comfortably above
      the target. d1-q0 (~976) -> d1-q1 (~1637) -> d4 (~1996); d5/d6 are
      fixed ceiling rungs (nothing rank-tunes above d4 in our data).
-  2. Miss + blunder are modest, human-weighted garnish (miss > blunder per
-     round 2), ramped down as Elo rises. Their Elo cost (miss ~-5/%,
-     blunder ~-2.5/%) is SUBTRACTED from the rank job so the totals still
-     land on target.
+  2. Miss + blunder are modest, human-weighted garnish, ramped down as Elo
+     rises. Their Elo cost (miss ~-1.6/%, blunder ~-2.0/%, pooled) is
+     SUBTRACTED from the rank job so the totals still land on target. (Post
+     the 2-ply miss-gating, miss is the WEAKER lever per % — we still apply
+     more of it because it reads more human, its Elo cost is just smaller.)
   3. Rank closes the remaining gap, via the inverted (rank -> Elo) curves.
 
 Because the levers are sub-additive (round 2: m20+b20 < m20 plus b20), the
@@ -50,31 +51,41 @@ from harness.rate import rate
 #: measured rank sweep — we ASSUME the sighted slope (a touch steeper for
 #: full qsearch); the run tells us whether that holds.
 RANK_CURVES: dict[str, list[tuple[float, int]]] = {
-    # Re-measured POST material-easing (build_ladder, 2026-06-05) — the
-    # full r1..r7 sweep on the blind base; high rank is now sane-but-weak
-    # so the floor reaches r7 ≈ -113.
-    "d1-q0": [(1.0, 942), (1.5, 838), (2.0, 674), (3.0, 489),
-              (4.0, 262), (5.0, 128), (6.0, 15), (7.0, -113)],
-    "d1-q1": [(1.0, 1606), (1.5, 1381), (2.0, 1151), (3.0, 858)],
-    # d4 rank still unmeasured — slope guess, less steep than pre-easing
-    # (~-1090/unit) because the easing softens rank. The run measures it.
-    "d4": [(1.0, 1958), (2.0, 1258)],  # slope -700/unit (guess)
+    # Re-measured POST promotion-easing (build_ladder, 2026-06-06, commit
+    # 4437e73). Changes vs the 06-05 run are all inside the ±90 bars — the
+    # promotion fix is a rare-event change, as expected. Floor reaches r7 ≈ 57.
+    "d1-q0": [(1.0, 890), (1.5, 865), (2.0, 757), (3.0, 529),
+              (4.0, 375), (5.0, 162), (6.0, 95), (7.0, 57)],
+    "d1-q1": [(1.0, 1621), (1.5, 1472), (2.0, 1261), (3.0, 930)],
+    # d4 rank still unmeasured — r1 anchor MEASURED (1939, drifted -85 vs the
+    # 06-05 run via Ordo re-anchoring); slope still a guess (-700/unit). A
+    # measured d4 rank sweep remains the top-end model gap.
+    "d4": [(1.0, 1939), (2.0, 1239)],  # slope -700/unit (guess)
 }
 
 #: base name -> (BotConfig dial kwargs at rank 1, full-strength Elo).
 BASES: dict[str, tuple[dict, int]] = {
-    "d1-q0": (dict(depth=1, qsearch_depth=0), 942),
-    "d1-q1": (dict(depth=1, qsearch_depth=1), 1606),
-    "d4": (dict(depth=4), 1958),
+    "d1-q0": (dict(depth=1, qsearch_depth=0), 890),
+    "d1-q1": (dict(depth=1, qsearch_depth=1), 1621),
+    "d4": (dict(depth=4), 1939),
 }
 #: Order to try bases (weakest first); pick the first whose full-strength
 #: Elo clears the target by `BASE_MARGIN` (room for rank + noise to weaken).
 BASE_ORDER = ["d1-q0", "d1-q1", "d4"]
 BASE_MARGIN = 120
 
-# Elo lost per percentage-point of each noise lever (round 2).
-MISS_SLOPE = 5.0
-BLUNDER_SLOPE = 2.5
+# Elo lost per percentage-point of each noise lever. POOLED across both
+# post-miss-gating build_ladder runs (06-05 + 06-06): each single-lever delta
+# rides on a noisy d1-q1 baseline (which drifted 1653->1621 between runs via
+# Ordo re-anchoring, comparable to the deltas themselves), so any one run
+# over/under-states the slope. Pooling the per-run deltas: MISS ~-1.6/%,
+# BLUNDER ~-2.0/%. Both are weak, noisy levers used only as small garnish; the
+# predicted-vs-measured bias absorbs the residual. (m10/b10 land below the
+# noise floor — even came out positive in 06-06 — so the slope is fit off the
+# wide m30/m50 + b30 spans.) Miss stays the WEAKER lever per % post-gating; we
+# still apply more of it because it reads more human.
+MISS_SLOPE = 1.6
+BLUNDER_SLOPE = 2.0
 
 # Targets to design a rung for (every 100). Below ~200 the basement isn't
 # precisely placeable; above d4(~1996) we use fixed d5/d6 ceiling rungs.
@@ -99,10 +110,27 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+#: Miss% on the weakest designed rung (t300), ramping linearly to 0 by
+#: MISS_ZERO_AT. Bumped from 0.35 -> 0.80 once the 2-ply miss-gating made
+#: miss BELIEVABLE (it declines only combinations, never a free piece), so a
+#: near-beginner bot can lean on it heavily for human "saw it, didn't play
+#: it" texture instead of leaning on rank-noise. CAVEAT: build_ladder only
+#: measured miss to 50%, and the cost curve is concave, so MISS_SLOPE * miss
+#: OVER-estimates the Elo cost above ~50% — high-miss rungs are predicted a
+#: touch strong; the measured-vs-predicted bias corrects it (add an m70
+#: sweep point to build_ladder next round to measure the cost directly).
+MISS_AT_FLOOR = 0.80
+MISS_ZERO_AT = 1500
+
+
 def miss_for(target: int) -> float:
-    """Modest, human miss% — high for weak bots, ~0 by ~1500. Capped 0.35
-    so it stays inside the measured range (round 2 went to 0.30)."""
-    return round(0.35 * _clamp01(1 - target / 1500), 2)
+    """Believable human miss%: MISS_AT_FLOOR on the weakest rung (t300),
+    linearly down to 0 by MISS_ZERO_AT."""
+    lo = TARGETS[0]
+    if target >= MISS_ZERO_AT:
+        return 0.0
+    frac = (MISS_ZERO_AT - target) / (MISS_ZERO_AT - lo)
+    return round(MISS_AT_FLOOR * _clamp01(frac), 2)
 
 
 def blunder_for(target: int) -> float:
@@ -113,13 +141,16 @@ def blunder_for(target: int) -> float:
 def tier_for(target: int) -> int | None:
     """Endgame-book skill tier by Elo band — a weak rung shouldn't play
     flawless KBNK. 0=no books, 1=Basic (trivial mates), 2=Intermediate
-    (opposition/piece technique), None=Full. (Endgames are a small slice of
-    games, so this barely moves the Elo; it's a believability default.)"""
-    if target < 1000:
+    (opposition/piece technique), None=Full. Thresholds LOWERED 2026-06-06:
+    even weak humans convert basic mates, and (chess.com validation) a bot
+    that draws KQvK by the 50-move rule reads as broken, not weak. Basic@600,
+    Intermediate@1200, Full@1600. Modestly lifts the measured Elo of
+    endgame-reaching rungs (they convert wins they used to draw)."""
+    if target < 600:
         return 0
-    if target < 1400:
+    if target < 1200:
         return 1
-    if target < 1800:
+    if target < 1600:
         return 2
     return None
 

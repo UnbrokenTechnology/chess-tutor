@@ -84,6 +84,7 @@ CANDIDATES: list[BotConfig] = [
     BotConfig("d1-q0-r5", depth=1, qsearch_depth=0, avg_move_rank=5.0),   # NEW (reopened)
     BotConfig("d1-q0-r6", depth=1, qsearch_depth=0, avg_move_rank=6.0),   # NEW
     BotConfig("d1-q0-r7", depth=1, qsearch_depth=0, avg_move_rank=7.0),   # NEW basement
+    BotConfig("d1-q0-r8", depth=1, qsearch_depth=0, avg_move_rank=8.0),   # post-self-hang reach
 
     # --- rank + miss/blunder panel on the SIGHTED base (d1-q1 ~1637) ----
     # Single-lever deltas off one baseline; re-measured so the post-easing
@@ -93,10 +94,58 @@ CANDIDATES: list[BotConfig] = [
     BotConfig("d1-q1-r1.5", depth=1, qsearch_depth=1, avg_move_rank=1.5),
     BotConfig("d1-q1-r2", depth=1, qsearch_depth=1, avg_move_rank=2.0),
     BotConfig("d1-q1-r3", depth=1, qsearch_depth=1, avg_move_rank=3.0),  # NEW (extend)
+    # Miss panel WIDENED post 2-ply-gating (commit 00f1bba): `miss` now fires
+    # only on *combinations* (forks/discovered/sacs), not on immediate free
+    # captures, so it's a much rarer event and its per-% Elo cost dropped. At
+    # 10% the delta off baseline is now likely inside Ordo's error — DON'T
+    # anchor the slope on m10. Fit MISS_SLOPE off the wide m30<->m50 span; m10
+    # is kept only to check the low end stays monotone.
     BotConfig("d1-q1-m10", depth=1, qsearch_depth=1, miss_chance=0.1),
     BotConfig("d1-q1-m30", depth=1, qsearch_depth=1, miss_chance=0.3),
+    BotConfig("d1-q1-m50", depth=1, qsearch_depth=1, miss_chance=0.5),   # NEW (wider band)
     BotConfig("d1-q1-b10", depth=1, qsearch_depth=1, blunder_chance=0.1),
     BotConfig("d1-q1-b30", depth=1, qsearch_depth=1, blunder_chance=0.3),
+
+    # --- depth-2 (sighted) rank sweep — the PROGRESSIVE-DEPTH PILOT -----
+    # Testing whether a d2-q1 base is a usable lever for believable 1000-1500
+    # bots. Rationale: the t1100 rook-wiggle was depth-1 myopia — the winning
+    # break (…Ndxe5) ranked ~20th at d1 but rank-2 at d8, so the noise never
+    # saw it. A deeper search puts constructive moves into the noise's
+    # candidate pool. Open questions this sweep answers: (a) where does d2-q1
+    # full strength land, (b) does rank weaken it into the 1000-1500 band, and
+    # (c) does it have a d4-like "dead zone" near r1. r4 probes the low reach.
+    BotConfig("d2-q1", depth=2, qsearch_depth=1),
+    BotConfig("d2-q1-r1.5", depth=2, qsearch_depth=1, avg_move_rank=1.5),
+    BotConfig("d2-q1-r2", depth=2, qsearch_depth=1, avg_move_rank=2.0),
+    BotConfig("d2-q1-r3", depth=2, qsearch_depth=1, avg_move_rank=3.0),
+    BotConfig("d2-q1-r4", depth=2, qsearch_depth=1, avg_move_rank=4.0),
+
+    # --- d2 miss/blunder panel — does noise bite HARDER at depth? -------
+    # Hypothesis: at d1 (tactically shallow) miss/blunder have little to act
+    # on; at d2 the bot SEES tactics, so the same % should strip MORE Elo.
+    # Compare these deltas off d2-q1 (1691) to the d1-q1-m30/m50/b30 deltas
+    # off d1-q1 (1634) measured in the SAME run.
+    BotConfig("d2-q1-m30", depth=2, qsearch_depth=1, miss_chance=0.3),
+    BotConfig("d2-q1-m50", depth=2, qsearch_depth=1, miss_chance=0.5),
+    BotConfig("d2-q1-b30", depth=2, qsearch_depth=1, blunder_chance=0.3),
+
+    # --- depth-3 placement — does d3 = d4, or sit between d2 and d4? ----
+    # d2 ~= d1 (~1690), d4 ~= 2058. Place d3 full strength + one rank point
+    # to confirm where it lands and that rank is a clean lever on it.
+    BotConfig("d3-q1", depth=3, qsearch_depth=1),
+    BotConfig("d3-q1-r2", depth=3, qsearch_depth=1, avg_move_rank=2.0),
+
+    # --- qsearch sweep at depth 2 — map the q1 -> full CLIFF ------------
+    # The ladder jumps q1 (t1500, d2) straight to full (t1600, d4); we never
+    # measure q2/q3/q4. Sweep qsearch on the d2 base (q1=1648 already above) to
+    # see if it's a smooth lever or another cliff, and where d2-qfull lands vs
+    # d4 (2008). If smooth, intermediate qsearch gives the 1300-1500 bots more
+    # tactical VISION (more human, sees simple tactics) while rank/miss pull
+    # the Elo back to band.
+    BotConfig("d2-q2", depth=2, qsearch_depth=2),
+    BotConfig("d2-q3", depth=2, qsearch_depth=3),
+    BotConfig("d2-q4", depth=2, qsearch_depth=4),
+    BotConfig("d2-qfull", depth=2),  # qsearch_depth defaults to None = full
 
     # --- depth-2 baseline + upper ceiling ladder -----------------------
     BotConfig("d2-q0", depth=2, qsearch_depth=0),
