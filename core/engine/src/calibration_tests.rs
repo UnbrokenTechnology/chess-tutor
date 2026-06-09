@@ -174,6 +174,54 @@ fn safety_mask_is_a_handicap_fading_with_depth() {
     assert!(deep < shallow, "safety penalty should fade with depth ({deep} vs {shallow})");
 }
 
+// ---- the lookup itself -------------------------------------------------
+
+#[test]
+fn interp_is_exact_at_knots() {
+    // Multilinear interpolation must return the baked value when every axis
+    // sits exactly on a knot. Index the flat table the same way interp5 does.
+    let (di, qi, pi, ri, ei) = (1usize, 1, 2, 2, 1); // d2, q2, p0.4, r3.5, eg1
+    let idx = (((di * QSEARCH_KNOTS.len() + qi) * PERCEPTION_KNOTS.len() + pi)
+        * RANK_KNOTS.len()
+        + ri)
+        * EG_KNOTS.len()
+        + ei;
+    let got = interp5(
+        DEPTH_KNOTS[di],
+        QSEARCH_KNOTS[qi],
+        PERCEPTION_KNOTS[pi],
+        RANK_KNOTS[ri],
+        EG_KNOTS[ei],
+    );
+    assert!(
+        (got - LOOKUP[idx] as f64).abs() < 1e-3,
+        "interp at knot = {got}, baked = {}",
+        LOOKUP[idx]
+    );
+}
+
+#[test]
+fn deep_blind_bot_reads_weak_not_strong() {
+    // Regression for the additive model's bug: a high-depth / zero-perception
+    // bot extrapolated to ~2023 Elo but actually plays ~1050 (perception gates
+    // the search — depth is wasted on moves it never considers). The lookup
+    // interpolates the real d6/d8 p0 measurements, so it must read WEAK.
+    let d = BotDials {
+        depth: 7,
+        qsearch: None,
+        perception: 0.0,
+        avg_move_rank: 1.0,
+        endgame_skill: None,
+        mask_safety: false,
+        mask_positional: false,
+    };
+    let elo = model_elo(&d);
+    assert!(
+        (700.0..1400.0).contains(&elo),
+        "d7/p0 should read weak (~1000-1100), got {elo}"
+    );
+}
+
 // ---- inverse rank solve ------------------------------------------------
 
 #[test]

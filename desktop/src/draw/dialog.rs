@@ -292,23 +292,27 @@ fn draw_strength_controls(
                  stronger and slower. Only affects the opponent — your move \
                  feedback uses its own depth.",
             );
-            ui.add(egui::Slider::new(depth, 1..=20));
+            // Capped at 8: the calibration grid (and the baked Elo lookup)
+            // brackets depth 1..=8; beyond it the forward model would
+            // extrapolate, and strength has saturated anyway.
+            ui.add(egui::Slider::new(depth, 1..=8));
             ui.end_row();
 
             // Tactical vision = the quiescence horizon (how many capture
-            // plies the bot resolves before judging on position alone). A
-            // plain slider like depth: 0 = blind (hangs pieces), and the
+            // plies the bot resolves before judging on position alone). The
             // far right = ∞ = full tactical sight (the default). `None` on
-            // the form is ∞; finite caps are 0..9.
+            // the form is ∞; finite caps are q1..q9. Floored at q1: q0 (can't
+            // even see the recapture) is off-product and would extrapolate the
+            // lookup, which only brackets q1..∞.
             ui.label("Tactical vision:").on_hover_text(
                 "How many capture plies the bot sees before judging on position \
                  alone. Far right (∞) is full sight — normal play. Lower values \
-                 hang material like a weaker human; 0 = blind, doesn't even see \
-                 the recapture.",
+                 hang material like a weaker human (1 = sees only the immediate \
+                 recapture).",
             );
-            let mut vision: u32 = qsearch.map_or(QSEARCH_INF, |n| n.min(QSEARCH_INF));
+            let mut vision: u32 = qsearch.map_or(QSEARCH_INF, |n| n.clamp(1, QSEARCH_INF));
             let resp = ui.add(
-                egui::Slider::new(&mut vision, 0..=QSEARCH_INF).custom_formatter(|v, _| {
+                egui::Slider::new(&mut vision, 1..=QSEARCH_INF).custom_formatter(|v, _| {
                     if v >= QSEARCH_INF as f64 {
                         "∞".to_string()
                     } else {
