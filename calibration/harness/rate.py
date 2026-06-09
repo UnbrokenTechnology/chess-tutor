@@ -153,7 +153,9 @@ def rate(
         ratings[m.group("name")] = Rating(
             name=m.group("name"),
             rating=float(m.group("rating")),
-            error=None if err.startswith("-") else float(err),
+            # At `-s 0` Ordo omits the error column entirely (err is None);
+            # a "----" placeholder starts with "-". Either way: no error bar.
+            error=None if err is None or err.startswith("-") else float(err),
             points=float(m.group("points")),
             played=int(m.group("played")),
         )
