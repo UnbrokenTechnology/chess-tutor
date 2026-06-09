@@ -47,14 +47,45 @@ impl Session {
     }
 
     /// Build the player strip shown *below* the board — the user's own
-    /// captured pieces and point lead (mirror of the bot strip).
+    /// captured pieces and point lead (mirror of the bot strip), plus
+    /// the opening played, surfaced on the strip's empty right side.
     pub fn build_player_strip_view(&self) -> PlayerStripView {
         let (captured, point_advantage) = captured_diff(&self.position, self.user_color());
+        let positions =
+            std::iter::once(&self.start_position).chain(self.history.iter().map(|e| &e.position_after));
         PlayerStripView {
             captured,
             point_advantage,
+            opening: recognized_opening(positions),
         }
     }
+}
+
+/// How many plies from the game start to scan for an opening match.
+/// Recognition is position-keyed and openings resolve in the first
+/// dozen-or-so moves, so this bounds the per-frame scan on long games
+/// without missing even the deepest catalogued lines (~24 moves).
+const OPENING_SCAN_PLIES: usize = 48;
+
+/// The deepest opening recognized as the game progressed, kept "sticky".
+///
+/// [`openings::identify`] is keyed on the *current* position's EPD and
+/// returns `None` the moment play leaves the book — so naively showing
+/// "the current position's opening" would make the label vanish on the
+/// first off-book move. Instead we walk the game's positions start→now
+/// and keep the *last* one that matched a named opening (the chess.com /
+/// Lichess idiom: the name you reached stays on screen all game).
+///
+/// Bounded by [`OPENING_SCAN_PLIES`]. Recomputed per frame like the rest
+/// of the view models; cache on the Session if it ever shows up hot.
+fn recognized_opening<'a>(positions: impl Iterator<Item = &'a Position>) -> Option<String> {
+    let mut name = None;
+    for pos in positions.take(OPENING_SCAN_PLIES) {
+        if let Some(op) = chess_tutor_engine::openings::identify(pos) {
+            name = Some(op.name);
+        }
+    }
+    name
 }
 
 /// Translate the opponent profile's active knobs into the structured

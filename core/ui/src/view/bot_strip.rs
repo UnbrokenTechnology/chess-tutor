@@ -48,6 +48,14 @@ pub struct PlayerStripView {
     /// shows `+N` only when positive (the lead sits next to whoever
     /// holds it).
     pub point_advantage: i32,
+    /// The name of the opening played this game, e.g. `"Sicilian
+    /// Defense: Najdorf Variation"`. "Sticky": it's the deepest opening
+    /// recognized as the game progressed and persists once play leaves
+    /// the book (the recognizer is position-keyed, so it would otherwise
+    /// vanish on the first off-book move). `None` until a named opening
+    /// is reached (the start position itself isn't one). The renderer
+    /// shows it right-aligned, filling the strip's empty right side.
+    pub opening: Option<String>,
 }
 
 /// One active bot handicap, structured so the renderer owns the
