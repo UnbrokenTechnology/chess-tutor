@@ -27,8 +27,10 @@ use crate::worker::{WorkerJob, WorkerResult};
 pub type RepaintFn = Arc<dyn Fn() + Send + Sync>;
 
 pub(crate) const ENGINE_TURN_NODE_CAP: u64 = 5_000_000;
-/// Engine-play depth — what the bot uses to pick its own moves.
-pub(crate) const DEFAULT_DEPTH: u32 = 10;
+/// Engine-play depth — what the bot uses to pick its own moves. 7 is the
+/// top of the calibrated ladder (~2500 Elo, the slider's max); the GUI depth
+/// slider caps at 8, so a higher default would read off-slider (>2500).
+pub(crate) const DEFAULT_DEPTH: u32 = 7;
 /// Analytical depth for retrospective / hint / analyze paths. Kept
 /// deeper than [`DEFAULT_DEPTH`] so the student's feedback is a
 /// stronger reference than the bot they're playing — at d=10 we

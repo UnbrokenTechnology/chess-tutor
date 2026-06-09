@@ -363,9 +363,9 @@ pub enum Command {
         /// Transposition-table size in MB.
         #[arg(long, default_value_t = 16)]
         tt_mb: usize,
-        /// Search depth per run. Defaults to the retrospective's
-        /// `DEFAULT_DEPTH` (10) so the measurement reflects what users
-        /// actually see.
+        /// Search depth per run. Defaults to ~10 (a representative
+        /// retrospective-class depth) so the SMP-variance measurement
+        /// reflects the deeper searches users' feedback actually runs.
         #[arg(long, default_value_t = 10)]
         depth: u32,
         /// Multi-PV breadth per run. Defaults to the retrospective's
