@@ -82,8 +82,11 @@ const LADDER: &[Rung] = &[
     Rung { elo: 2500.0, depth: 7, qsearch: None,    rank: 1.0, eg: None },
 ];
 
-/// Lowest / highest reproducible target.
-pub const ELO_MIN: f64 = 500.0;
+/// Slider bounds. The feel-validated ladder bottoms at 500; below that
+/// [`config_for_elo`] holds the floor band and solves avg_move_rank against
+/// the lookup down to ~0 (best-effort, off-ladder) so the slider can still
+/// produce ~100-Elo bots. Negative targets clamp to 0.
+pub const ELO_MIN: f64 = 0.0;
 pub const ELO_MAX: f64 = 2500.0;
 
 // ---- forward model: 5-D interpolation over the measured grid ------------
@@ -221,12 +224,69 @@ pub fn perception_for(elo: f64) -> f32 {
     round_to(p, 0.05)
 }
 
+/// Solve avg_move_rank in `[1, 8]` (on the 0.1 grid) so the *absolute*
+/// forward-model Elo matches `target` for otherwise-fixed `dials`. `model_elo`
+/// is monotone-decreasing in rank, so plain bisection converges. Used by the
+/// sub-ladder basement (below t500), where there's no rung to interpolate —
+/// distinct from [`solve_rank`], which anchors via [`elo_for_dials`] (and
+/// would recurse here). Returns 8 if the target is below the config's reach.
+fn rank_for_model_elo(target: f64, dials: &BotDials) -> f32 {
+    let eval = |r: f32| {
+        let mut d = *dials;
+        d.avg_move_rank = r;
+        model_elo(&d)
+    };
+    let (mut lo, mut hi) = (1.0f32, 8.0f32);
+    if eval(lo) <= target {
+        return 1.0;
+    }
+    if eval(hi) >= target {
+        return 8.0;
+    }
+    for _ in 0..30 {
+        let mid = (lo + hi) / 2.0;
+        if eval(mid) > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    round_to((lo + hi) / 2.0, 0.1)
+}
+
 /// Default dials for a target Elo: interpolate the locked ladder. Discrete
 /// dials come from the band the target sits in; perception from the closed
-/// form; avg_move_rank interpolated between the bracketing rungs.
+/// form; avg_move_rank interpolated between the bracketing rungs. Below the
+/// ladder's floor (t500) it holds the floor band and solves rank for the
+/// target against the lookup (off-ladder, best-effort, down to ~0 Elo).
 pub fn config_for_elo(elo: f64) -> BotDials {
     let elo = elo.clamp(ELO_MIN, ELO_MAX);
-    let mut lo = &LADDER[0];
+    let floor = &LADDER[0];
+
+    // Below the feel-validated ladder: hold the floor band's discrete dials
+    // (depth/qsearch/eg), take perception from the closed-form ramp, and
+    // solve avg_move_rank against the lookup so the bot weakens monotonically
+    // toward ~0 Elo. The grid brackets this region (rank to 8, perception 0).
+    if elo < floor.elo {
+        let mut d = BotDials {
+            depth: floor.depth,
+            qsearch: floor.qsearch,
+            perception: perception_for(elo),
+            avg_move_rank: 1.0,
+            endgame_skill: floor.eg,
+            mask_safety: false,
+            mask_positional: false,
+        };
+        // Anchor to the ladder floor so strength is continuous across the
+        // t500 boundary and on the ladder's real-Elo scale: the lookup's
+        // absolute scale over-reads the floor (the t500 config models ~750),
+        // so solve the rank whose model Elo equals target + that floor offset.
+        let floor_offset = model_elo(&config_for_elo(floor.elo)) - floor.elo;
+        d.avg_move_rank = rank_for_model_elo(elo + floor_offset, &d);
+        return d;
+    }
+
+    let mut lo = floor;
     let mut hi = &LADDER[LADDER.len() - 1];
     for r in LADDER {
         if r.elo <= elo {
@@ -263,12 +323,32 @@ pub fn elo_for_dials(dials: &BotDials, target: f64) -> f64 {
     target + (model_elo(dials) - model_elo(&default))
 }
 
-/// Standalone absolute Elo estimate for a config (the raw forward model,
-/// clamped to the ladder range). Use to seed the slider's target when a
-/// dialog opens onto an existing (possibly off-ladder) config; the
-/// ladder-anchored [`elo_for_dials`] is the precise display thereafter.
+/// Slider target to *seed* when a dialog opens onto an existing config (the
+/// ladder-anchored [`elo_for_dials`] is the precise display thereafter).
+///
+/// Inverts [`config_for_elo`]: finds the target `T` whose default config has
+/// the same model Elo as `dials`. This keeps the seed on the slider's (ladder)
+/// scale — the raw lookup is *absolute* and over-reads the floor (a 500-Elo
+/// config models ~750), so seeding from it directly would jump the slider.
+/// `model_elo(config_for_elo(T))` rises with `T`, so bisect.
 pub fn estimate_elo(dials: &BotDials) -> f64 {
-    model_elo(dials).clamp(ELO_MIN, ELO_MAX)
+    let target = model_elo(dials);
+    let (mut lo, mut hi) = (ELO_MIN, ELO_MAX);
+    if model_elo(&config_for_elo(lo)) >= target {
+        return lo;
+    }
+    if model_elo(&config_for_elo(hi)) <= target {
+        return hi;
+    }
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.0;
+        if model_elo(&config_for_elo(mid)) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo + hi) / 2.0
 }
 
 /// avg_move_rank in `[1, 8]` that makes [`elo_for_dials`] return `target`

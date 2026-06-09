@@ -44,16 +44,39 @@ fn config_interpolates_rank_within_a_band() {
 
 #[test]
 fn config_clamps_outside_the_ladder() {
-    assert_eq!(config_for_elo(100.0), config_for_elo(ELO_MIN));
+    // Negative targets clamp to ELO_MIN (0); above ELO_MAX clamps to the top.
+    assert_eq!(config_for_elo(-50.0), config_for_elo(ELO_MIN));
     assert_eq!(config_for_elo(9999.0), config_for_elo(ELO_MAX));
+}
+
+#[test]
+fn basement_below_t500_weakens_via_rank() {
+    // Below the feel-validated ladder the floor band (d1/q1/eg1) is held and
+    // rank climbs as the target drops, so the modeled Elo tracks downward —
+    // letting the slider reach ~100-Elo bots.
+    let floor = config_for_elo(500.0);
+    let mid = config_for_elo(300.0);
+    let bottom = config_for_elo(100.0);
+    for c in [&mid, &bottom] {
+        assert_eq!(c.depth, floor.depth);
+        assert_eq!(c.qsearch, floor.qsearch);
+    }
+    assert!(
+        bottom.avg_move_rank > mid.avg_move_rank,
+        "weaker target should raise rank: {} vs {}",
+        bottom.avg_move_rank,
+        mid.avg_move_rank
+    );
+    assert!(estimate_elo(&bottom) < estimate_elo(&mid));
 }
 
 // ---- the ladder-anchoring guarantee ------------------------------------
 
 #[test]
 fn default_config_displays_its_target_exactly() {
-    // elo_for_dials(config_for_elo(t), t) must equal t (the anchor cancels).
-    let mut t = 500.0;
+    // elo_for_dials(config_for_elo(t), t) must equal t (the anchor cancels),
+    // including the sub-ladder basement (t < 500).
+    let mut t = 0.0;
     while t <= 2500.0 {
         let d = config_for_elo(t);
         let shown = elo_for_dials(&d, t);
